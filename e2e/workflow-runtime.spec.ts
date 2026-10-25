@@ -126,7 +126,9 @@ test("workflow runtime branches, approval, audit and mobile layout", async ({
   await doneNode.getByRole("button", { name: "完成" }).click();
   await expect(page.locator(".workflow-runtime-head")).toContainText("已完成");
   await expect(page.getByRole("heading", { name: "运行审计" })).toBeVisible();
-  await expect(page.getByText("审批结论").first()).toBeVisible();
+  await expect(
+    page.locator(".workflow-audit-list").getByText("审批结论").first(),
+  ).toBeVisible();
 
   await page.screenshot({
     path: ".tmp/batch5-workflow-runtime-desktop.png",
