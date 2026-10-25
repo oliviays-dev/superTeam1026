@@ -566,7 +566,9 @@ export function deriveWorkflowInstanceStatus(
 ): "active" | "waiting" | "blocked" | "completed" | "failed" {
   const failed = runtime.nodes.filter((node) => node.status === "failed");
   if (failed.length > 0) {
-    return failed.every((node) => node.nextRetryAt !== null) ? "waiting" : "failed";
+    return failed.every((node) => node.nextRetryAt !== null)
+      ? "waiting"
+      : "failed";
   }
   if (runtime.nodes.some((node) => node.status === "blocked")) return "blocked";
   if (

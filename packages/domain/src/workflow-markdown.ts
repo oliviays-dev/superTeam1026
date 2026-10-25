@@ -276,9 +276,7 @@ export function validateWorkflowMarkdown(
         maxAttempts:
           Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : 1,
         timeoutSeconds: timeoutSeconds ?? 300,
-        ...(retryBackoffSeconds === undefined
-          ? {}
-          : { retryBackoffSeconds }),
+        ...(retryBackoffSeconds === undefined ? {} : { retryBackoffSeconds }),
         ...(loopLimit === undefined || !Number.isInteger(loopLimit)
           ? {}
           : { loopLimit }),

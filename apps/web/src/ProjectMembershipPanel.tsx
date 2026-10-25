@@ -314,9 +314,7 @@ function MemberDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [kind, setKind] = useState<"human" | "agent">(
-    member?.kind ?? "agent",
-  );
+  const [kind, setKind] = useState<"human" | "agent">(member?.kind ?? "agent");
   const [name, setName] = useState(member?.name ?? "");
   const [actorId, setActorId] = useState(
     member?.kind === "human" ? member.actorId : "",

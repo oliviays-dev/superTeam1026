@@ -1690,8 +1690,9 @@ export class PlatformApplication {
         409,
       );
     }
-    const members =
-      await this.repositories.projectMemberships.listMembers(instance.projectId);
+    const members = await this.repositories.projectMemberships.listMembers(
+      instance.projectId,
+    );
     const target = members.find(
       (member) =>
         member.kind === "human" &&
@@ -1766,8 +1767,9 @@ export class PlatformApplication {
         409,
       );
     }
-    const members =
-      await this.repositories.projectMemberships.listMembers(instance.projectId);
+    const members = await this.repositories.projectMemberships.listMembers(
+      instance.projectId,
+    );
     const actor = members.find(
       (member) => member.status === "active" && member.actorId === actorId,
     );
@@ -1903,10 +1905,7 @@ export class PlatformApplication {
         ? 0
         : Math.max(0, Date.now() - new Date(instance.pausedAt).getTime());
     const runtime = shiftWorkflowDeadlines(instance.runtime, pausedMs);
-    await this.repositories.runs.extendWorkflowDeadlines(
-      instance.id,
-      pausedMs,
-    );
+    await this.repositories.runs.extendWorkflowDeadlines(instance.id, pausedMs);
     const saved = await this.repositories.workflowRuntime.save(
       instance.id,
       instance.revision,
@@ -2188,9 +2187,7 @@ export class PlatformApplication {
           definition.executor.kind === "role")
       ) {
         const existingTask =
-          node.taskId === null
-            ? undefined
-            : await this.getTask(node.taskId);
+          node.taskId === null ? undefined : await this.getTask(node.taskId);
         const started = await this.startWorkflowNodeTask(
           instance,
           runtime,
@@ -2243,10 +2240,7 @@ export class PlatformApplication {
     readonly kind: "node.timed_out" | "node.failed";
     readonly runId: string;
   }): Array<{
-    readonly kind:
-      | "node.timed_out"
-      | "node.failed"
-      | "node.retry_scheduled";
+    readonly kind: "node.timed_out" | "node.failed" | "node.retry_scheduled";
     readonly nodeId: string;
     readonly summary: string;
     readonly data: Record<string, unknown>;
@@ -2311,8 +2305,9 @@ export class PlatformApplication {
       input.decision === "approve" ? "approved" : "rejected";
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const current = await this.getWorkflowInstance(input.instanceId);
-      const approvals =
-        await this.repositories.workflowRuntime.listApprovals(input.instanceId);
+      const approvals = await this.repositories.workflowRuntime.listApprovals(
+        input.instanceId,
+      );
       const actorApproval = approvals.find(
         (approval) =>
           approval.nodeId === input.nodeId &&

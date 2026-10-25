@@ -133,18 +133,21 @@ test("workflow governance approvals, audit filters and mobile layout", async ({
 
   for (const actorId of ["reviewer-1", "reviewer-2"]) {
     await json(
-      await request.post(`/api/v1/workflow-instances/${instance.id}/approvals`, {
-        data: {
-          nodeId: "review",
-          decision: "approve",
-          note: `${actorId} approved`,
+      await request.post(
+        `/api/v1/workflow-instances/${instance.id}/approvals`,
+        {
+          data: {
+            nodeId: "review",
+            decision: "approve",
+            note: `${actorId} approved`,
+          },
+          headers: {
+            "content-type": "application/json",
+            "x-pluginmax-actor": actorId,
+            "idempotency-key": `browser-${actorId}-${stamp}`,
+          },
         },
-        headers: {
-          "content-type": "application/json",
-          "x-pluginmax-actor": actorId,
-          "idempotency-key": `browser-${actorId}-${stamp}`,
-        },
-      }),
+      ),
     );
   }
   await page.getByRole("button", { name: "同步运行状态" }).click();

@@ -71,6 +71,20 @@ export class WorkflowIdempotencyRepository {
       );
       if ((retried.rowCount ?? 0) > 0) return { kind: "new" };
     }
+    if (
+      row.state === "pending" &&
+      Date.now() - row.updated_at.getTime() >= 5 * 60 * 1_000
+    ) {
+      const reclaimed = await this.database.query(
+        `UPDATE workflow_idempotency_keys
+         SET updated_at = NOW()
+         WHERE id = $1
+           AND state = 'pending'
+           AND updated_at = $2`,
+        [row.id, row.updated_at],
+      );
+      if ((reclaimed.rowCount ?? 0) > 0) return { kind: "new" };
+    }
     return { kind: "in_progress" };
   }
 

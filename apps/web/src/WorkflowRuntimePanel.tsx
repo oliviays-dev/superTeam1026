@@ -273,8 +273,7 @@ export function WorkflowRuntimePanel({
   const terminal = new Set(["completed", "failed", "cancelled", "blocked"]);
   const currentActorId = "local-admin";
   const currentMember = members.find(
-    (member) =>
-      member.status === "active" && member.actorId === currentActorId,
+    (member) => member.status === "active" && member.actorId === currentActorId,
   );
   const [approvalEditor, setApprovalEditor] = useState<{
     readonly nodeId: string;

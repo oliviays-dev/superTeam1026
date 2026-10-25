@@ -275,10 +275,9 @@ export class WorkflowRuntimeRepository {
     input: SaveWorkflowRuntimeInput,
   ): Promise<WorkflowInstance | undefined> {
     return this.database.transaction(async (client) => {
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtext($1))",
-        [instanceId],
-      );
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        instanceId,
+      ]);
       const steps = stepsFromRuntime(input.runtime);
       const result = await client.query<WorkflowInstanceRow>(
         `WITH updated AS (
@@ -382,11 +381,7 @@ export class WorkflowRuntimeRepository {
          ${where}
          ORDER BY event.created_at DESC, event.seq DESC
          LIMIT $8 OFFSET $9`,
-        [
-          ...values,
-          query.pageSize,
-          (query.page - 1) * query.pageSize,
-        ],
+        [...values, query.pageSize, (query.page - 1) * query.pageSize],
       ),
     ]);
     const total = Number(count.rows[0]?.total ?? 0);
@@ -430,17 +425,15 @@ export class WorkflowRuntimeRepository {
        FROM candidate
        WHERE instance.id = candidate.id
        RETURNING instance.id`,
-      [
-        input.owner,
-        input.leaseSeconds,
-        input.staleAfterSeconds,
-        input.limit,
-      ],
+      [input.owner, input.leaseSeconds, input.staleAfterSeconds, input.limit],
     );
     return result.rows.map((row) => row.id);
   }
 
-  async releaseReconcileLease(instanceId: string, owner: string): Promise<void> {
+  async releaseReconcileLease(
+    instanceId: string,
+    owner: string,
+  ): Promise<void> {
     await this.database.query(
       `UPDATE workflow_instances
        SET sweep_lease_owner = NULL, sweep_lease_expires_at = NULL
@@ -515,10 +508,7 @@ export class WorkflowRuntimeRepository {
            AND approver_id = $4`,
         [input.instanceId, input.nodeId, input.round, input.toActorId],
       );
-      if (
-        target.rows[0] !== undefined &&
-        target.rows[0].status !== "pending"
-      ) {
+      if (target.rows[0] !== undefined && target.rows[0].status !== "pending") {
         return "target_terminal";
       }
       const transferred = await client.query(
@@ -627,10 +617,9 @@ export class WorkflowRuntimeRepository {
     },
   ): Promise<void> {
     await this.database.transaction(async (client) => {
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtext($1))",
-        [instanceId],
-      );
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        instanceId,
+      ]);
       await appendAudits(client, instanceId, actorId, [entry]);
     });
   }

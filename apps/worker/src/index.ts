@@ -79,10 +79,7 @@ const sweep = async () => {
 
 log("worker.started");
 await sweep();
-sweepTimer = setInterval(
-  () => void sweep(),
-  config.workflowSweepIntervalMs,
-);
+sweepTimer = setInterval(() => void sweep(), config.workflowSweepIntervalMs);
 while (!stopping) {
   const job = await repositories.jobs.claimNext(
     workerId,
