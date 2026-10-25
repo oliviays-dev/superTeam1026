@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.env.*
+.tmp/
+coverage/
+dist/
+lib/
+node_modules/
+*.tsbuildinfo
+*.tgz
+profile/package.json
+profile/pnpm-lock.yaml
+profile/pnpm-workspace.yaml
+profile/cordis.patch.yml
+profile/dsh.profile.bundles.json

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "selection": "recommended",
+    "allowedRuntimeIds": [],
+    "requiredCapabilities": [
+      {
+        "key": "file-write",
+        "necessity": "required"
+      },
+      {
+        "key": "blocking-gate",
+        "necessity": "required"
+      }
+    ]
+  },
+  "sourcePolicy": {
+    "allow": ["workspace", "task-attachments", "project-memory"],
+    "deny": ["public-web", "private-local-data"],
+    "citation": "none",
+    "requirePublishedAt": false,
+    "requireAccessedAt": false
+  },
+  "toolPolicy": {
+    "allow": ["fs.read", "fs.write"],
+    "deny": [],
+    "requireApproval": ["fs.write", "shell.execute", "external.publish"]
+  },
+  "evidence": {
+    "requirePlan": true,
+    "requireToolEvents": true,
+    "requireCitations": false,
+    "requireStructuredSubagents": false
+  },
+  "humanGates": [],
+  "budget": {
+    "timeoutMs": 600000,
+    "maxTurns": 8,
+    "maxToolCalls": 20
+  }
+}

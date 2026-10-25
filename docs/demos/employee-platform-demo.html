@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pluginmax 三层员工体系 · 现有布局兼容 Demo</title>
+  <style>
+    :root {
+      --bg-base: #141420;
+      --bg-layer-1: #1b1b2e;
+      --bg-layer-2: #222240;
+      --bg-layer-3: #2a2a4a;
+      --border: rgba(255,255,255,.08);
+      --border-light: rgba(255,255,255,.14);
+      --text-primary: #e2e6f0;
+      --text-secondary: #8b93a8;
+      --text-muted: #5a6478;
+      --accent: #4f8ef7;
+      --accent-hover: #3b7ded;
+      --accent-soft: rgba(79,142,247,.13);
+      --green: #34d47e;
+      --green-soft: rgba(52,212,126,.13);
+      --amber: #e2a737;
+      --amber-soft: rgba(226,167,55,.13);
+      --red: #e5534b;
+      --purple: #a684ff;
+      --purple-soft: rgba(166,132,255,.13);
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body {
+      overflow: hidden;
+      font-family: var(--font);
+      font-size: 14px;
+      color: var(--text-primary);
+      background: var(--bg-base);
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.1); border-radius: 3px; }
+
+    .frame {
+      display: grid;
+      grid-template-columns: 240px minmax(0,1fr) 380px;
+      height: 100vh;
+    }
+    .frame.no-panel { grid-template-columns: 240px minmax(0,1fr) 0; }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg-layer-1);
+      border-right: 1px solid var(--border);
+    }
+    .sidebar-header { padding: 14px; }
+    .brand { font-size: 14px; font-weight: 600; }
+    .brand small { display: block; margin-top: 1px; color: var(--text-muted); font-size: 11px; }
+    .new-btn {
+      display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 10px;
+      padding: 7px 11px; border: 0; border-radius: 6px;
+      background: var(--accent); color: #fff; font-size: 12px; font-weight: 500;
+    }
+    .new-btn:hover { background: var(--accent-hover); }
+    .sidebar-body { flex: 1; overflow-y: auto; padding: 4px 8px; }
+    .sec-label { padding: 12px 6px 4px; color: var(--text-muted); font-size: 10px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase; }
+    .nav-item {
+      display: flex; align-items: center; gap: 7px; min-width: 0;
+      padding: 6px 8px; border-radius: 5px;
+      color: var(--text-secondary); font-size: 12px; white-space: nowrap;
+    }
+    .nav-item:hover { color: var(--text-primary); background: rgba(255,255,255,.04); }
+    .nav-item.active { color: var(--accent); background: var(--accent-soft); }
+    .dot { flex: 0 0 auto; width: 5px; height: 5px; border-radius: 50%; }
+    .sidebar-footer { padding: 6px; border-top: 1px solid var(--border); }
+    .foot-btn {
+      position: relative; display: flex; align-items: center; gap: 9px; width: 100%;
+      padding: 7px 9px; border: 0; border-radius: 5px; background: transparent;
+      color: var(--text-secondary); font-size: 12px; text-align: left;
+    }
+    .foot-btn:hover, .foot-btn.on { color: var(--text-primary); background: rgba(255,255,255,.05); }
+    .foot-btn.meeting.on { color: var(--accent); background: var(--accent-soft); }
+    .badge {
+      position: absolute; right: 9px; top: 50%; transform: translateY(-50%);
+      display: flex; align-items: center; justify-content: center; min-width: 16px; height: 16px;
+      padding: 0 4px; border-radius: 8px; background: var(--accent); color: #fff; font-size: 9px; font-weight: 600;
+    }
+    .ic {
+      flex: 0 0 auto; width: 15px; height: 15px; fill: none;
+      stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+    }
+
+    .center { display: flex; flex-direction: column; min-width: 0; overflow: hidden; background: var(--bg-base); }
+    .workbench-head {
+      display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 18px;
+      border-bottom: 1px solid var(--border); background: rgba(27,27,46,.72);
+    }
+    .context { display: flex; min-width: 0; gap: 6px; overflow: hidden; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+    .context strong { overflow: hidden; text-overflow: ellipsis; color: var(--text-primary); font-weight: 600; }
+    .context span { overflow: hidden; text-overflow: ellipsis; }
+    .center-tabs { display: flex; gap: 2px; margin-left: auto; padding: 3px; border: 1px solid var(--border); border-radius: 6px; background: rgba(34,34,64,.62); }
+    .tab { padding: 5px 10px; border: 0; border-radius: 4px; background: transparent; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+    .tab:hover { color: var(--text-primary); }
+    .tab.active { color: #fff; background: var(--accent); }
+    .demo-pill { flex: 0 0 auto; padding: 3px 7px; border-radius: 999px; color: var(--amber); background: var(--amber-soft); font-size: 10px; }
+    .center-view { display: none; flex: 1; overflow: auto; }
+    .center-view.active { display: block; }
+    .conversation-placeholder { display: grid; min-height: 100%; place-content: center; color: var(--text-muted); font-size: 13px; text-align: center; line-height: 1.7; }
+
+    .pmwf-page { max-width: 880px; margin: 0 auto; padding: 20px 20px 32px; }
+    .pmwf-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 14px; }
+    .pmwf-heading h1 { font-size: 19px; line-height: 1.25; }
+    .pmwf-filter { flex: none; padding: 4px 7px; border-radius: 5px; color: #4c9aff; background: #172a40; font-size: 11px; white-space: nowrap; }
+    .pmwf-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .pmwf-search { flex: 1 1 190px; min-width: 170px; }
+    .pmwf-select, .pmwf-input {
+      min-width: 0; padding: 7px 9px; border: 1px solid var(--border-light); border-radius: 6px;
+      background: var(--bg-base); color: var(--text-primary); font-size: 13px;
+    }
+    .pmwf-select { width: auto; min-width: 112px; }
+    .pmwf-btn {
+      display: inline-flex; align-items: center; justify-content: center; min-height: 33px;
+      padding: 7px 11px; border: 0; border-radius: 6px; background: var(--accent); color: #fff; font-size: 13px;
+    }
+    .pmwf-btn.secondary { color: var(--text-primary); background: transparent; border: 1px solid var(--border-light); }
+    .pmwf-btn:hover { background: var(--accent-hover); }
+    .pmwf-btn.secondary:hover { background: rgba(255,255,255,.05); }
+    .pmwf-btn.small { min-height: 27px; padding: 4px 8px; font-size: 12px; }
+    .pmwf-list { display: grid; gap: 8px; }
+    .pmwf-flow { overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-layer-1); }
+    .pmwf-summary {
+      display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; gap: 10px; align-items: center;
+      width: 100%; min-height: 52px; padding: 9px 12px; border: 0; background: transparent; color: inherit; text-align: left;
+    }
+    .pmwf-summary:hover { background: var(--bg-layer-2); }
+    .status-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+    .status-dot.running { background: #37b76a; }
+    .status-dot.waiting { background: #d99a26; }
+    .pmwf-name { min-width: 0; }
+    .pmwf-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; }
+    .pmwf-name span { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: 11px; }
+    .pmwf-time { color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+    .pmwf-pill { min-width: 54px; padding: 3px 6px; border-radius: 4px; color: var(--text-secondary); background: var(--bg-layer-2); font-size: 10.5px; text-align: center; white-space: nowrap; }
+    .pmwf-pill.running { color: #37b76a; background: #16301f; }
+    .pmwf-pill.waiting { color: #d99a26; background: #372c14; }
+    .pmwf-detail { padding: 4px 12px 12px; border-top: 1px solid var(--border); }
+    .pmwf-nodes { list-style: none; }
+    .pmwf-node { display: grid; grid-template-columns: 58px minmax(0,1fr); gap: 4px 10px; align-items: start; padding: 9px 0; border-bottom: 1px solid var(--border); }
+    .pmwf-node:last-child { border-bottom: 0; }
+    .pmwf-state { padding: 2px 4px; border-radius: 4px; color: var(--text-secondary); background: var(--bg-layer-2); font-size: 10px; text-align: center; white-space: nowrap; }
+    .pmwf-node.completed .pmwf-state { color: #37b76a; background: #16301f; }
+    .pmwf-node.current .pmwf-state { color: #4c9aff; background: #172a40; }
+    .pmwf-node.waiting .pmwf-state { color: #d99a26; background: #372c14; }
+    .pmwf-node-main { min-width: 0; }
+    .pmwf-node-main strong { display: block; font-size: 12.5px; }
+    .pmwf-node-main > span { display: block; margin-top: 2px; color: var(--text-secondary); font-size: 11px; line-height: 1.4; }
+    .pmwf-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+    .pmwf-deliverables { display: grid; gap: 8px; margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--border-light); }
+    .deliverable { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-layer-2); }
+    .deliverable-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 12.5px; }
+    .deliverable-title span { color: var(--text-secondary); font-size: 11px; white-space: nowrap; }
+    .deliverable-meta { color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+    .pmwf-note { padding: 8px 10px; border-radius: 6px; font-size: 12px; line-height: 1.45; }
+    .pmwf-note.warning { color: #d99a26; background: #372c14; }
+    .pmwf-note.info { color: var(--text-secondary); background: var(--bg-layer-2); }
+
+    .mpanel { display: flex; flex-direction: column; overflow: hidden; background: var(--bg-layer-1); border-left: 1px solid var(--border); animation: slideIn .2s ease-out; }
+    .mpanel.hidden { display: none; }
+    @keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+    .phead { display: flex; flex: none; align-items: center; gap: 8px; padding: 12px 14px 10px; border-bottom: 1px solid var(--border); }
+    .ptitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+    .ibtn { display: flex; flex: none; align-items: center; justify-content: center; width: 28px; height: 28px; border: 0; border-radius: 5px; background: transparent; color: var(--text-secondary); }
+    .ibtn:hover { color: var(--text-primary); background: rgba(255,255,255,.06); }
+    .pill { flex: none; padding: 2px 7px; border-radius: 8px; color: var(--text-muted); background: rgba(100,116,139,.12); font-size: 9px; font-weight: 600; white-space: nowrap; }
+    .pill.on { color: var(--green); background: var(--green-soft); }
+    .wsbar { flex: none; padding: 8px 14px 10px; border-bottom: 1px solid var(--border); }
+    .wsrow { display: flex; align-items: center; gap: 5px; }
+    .ws-lb { flex: none; color: var(--text-muted); font-size: 11px; font-weight: 600; }
+    .wsel { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border-light); border-radius: 5px; background: var(--bg-layer-2); color: var(--text-primary); font-size: 12px; appearance: none; }
+    .create-bar { flex: none; padding: 12px 14px 8px; border-bottom: 1px solid var(--border); }
+    .ctoggle { padding: 0; border: 0; background: transparent; color: var(--accent); font-size: 12px; font-weight: 500; }
+    .ctoggle:hover { text-decoration: underline; }
+    .cform { display: grid; gap: 6px; margin-top: 8px; }
+    .cform input, .cform textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--border-light); border-radius: 5px; background: var(--bg-layer-2); color: var(--text-primary); font-size: 12px; }
+    .cform textarea { min-height: 40px; resize: vertical; }
+    .cform button { justify-self: start; padding: 6px 10px; border: 0; border-radius: 5px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 500; }
+    .mlist { flex: 1; display: flex; flex-direction: column; gap: 5px; overflow-y: auto; padding: 6px 10px; }
+    .mcard { padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-layer-2); cursor: pointer; }
+    .mcard:hover { border-color: rgba(79,142,247,.35); }
+    .mcard-title { margin-bottom: 3px; font-size: 13px; font-weight: 600; }
+    .mcard-meta { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 7px; color: var(--text-muted); font-size: 11px; }
+    .btn-xs { padding: 3px 9px; border: 0; border-radius: 4px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 500; }
+    .btn-xs.ghost { color: var(--text-secondary); background: transparent; border: 1px solid var(--border-light); }
+    .btn-xs.ghost:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+    .btn-xs.danger { color: var(--red); background: transparent; border-color: rgba(229,83,75,.3); }
+
+    .chat { display: none; flex: 1; flex-direction: column; overflow: hidden; }
+    .participants { flex: none; border-bottom: 1px solid var(--border); }
+    .participant-head { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 8px 14px; border: 0; background: transparent; color: var(--text-secondary); font-size: 11px; font-weight: 600; text-align: left; }
+    .participant-list { display: grid; gap: 5px; max-height: 138px; padding: 0 10px 9px; overflow-y: auto; }
+    .participant-list.closed { display: none; }
+    .participant-row {
+      display: grid; grid-template-columns: 18px minmax(0,1fr) auto; gap: 7px; align-items: center;
+      min-height: 32px; padding: 4px 7px; border: 1px solid var(--border); border-radius: 7px;
+      background: var(--bg-layer-2); font-size: 11px;
+    }
+    .participant-row.self { border-color: var(--accent); }
+    .participant-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .participant-tag { flex: none; padding: 1px 5px; border-radius: 7px; color: var(--text-muted); background: rgba(255,255,255,.04); font-size: 9px; white-space: nowrap; }
+    .participant-tag.me { color: var(--accent); background: var(--accent-soft); font-weight: 700; }
+    .avatar { display: flex; flex: none; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; color: #fff; font-size: 8px; font-weight: 700; }
+    .avatar.human { background: #2f9e66; }
+    .avatar.digital { background: #6f53d6; }
+    .avatar.human-avatar { background: var(--accent); }
+    .msgs { flex: 1; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; padding: 10px 14px; }
+    .mrow { display: flex; max-width: 88%; gap: 7px; align-items: flex-end; }
+    .mrow.self { align-self: flex-end; flex-direction: row-reverse; }
+    .mbubble { padding: 7px 10px; border-radius: 11px 11px 11px 3px; background: var(--bg-layer-3); font-size: 12px; line-height: 1.5; word-break: break-word; }
+    .mrow.self .mbubble { color: #fff; background: var(--accent); border-radius: 11px 11px 3px 11px; }
+    .mrow.self.delegated .mbubble { background: #38507d; }
+    .mmeta { margin-top: 2px; color: var(--text-muted); font-size: 9px; }
+    .mrow.self .mmeta { text-align: right; }
+    .agent-tag { display: inline-flex; margin-bottom: 3px; padding: 1px 5px; border-radius: 6px; color: var(--amber); background: var(--amber-soft); font-size: 9px; }
+    .sysmsg { padding: 5px 0; color: var(--text-muted); font-size: 10px; text-align: center; }
+    .mention { color: #9ecbff; font-weight: 600; }
+    .agent-sec { flex: none; max-height: 44vh; overflow-y: auto; padding: 8px 14px; border-top: 1px solid var(--border); }
+    .agent-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .agent-label { color: var(--text-secondary); font-size: 11px; font-weight: 600; }
+    .toggle { position: relative; flex: none; width: 32px; height: 18px; border: 0; border-radius: 9px; background: var(--bg-layer-3); }
+    .toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--text-secondary); transition: transform .15s, background .15s; }
+    .toggle.on { background: var(--accent); }
+    .toggle.on::after { transform: translateX(14px); background: #fff; }
+    .agent-body { display: none; gap: 7px; margin-top: 8px; }
+    .agent-body.open { display: grid; }
+    .delegation-card { display: grid; gap: 5px; margin-top: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-layer-2); }
+    .delegation-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; font-weight: 600; }
+    .delegation-title .owner { flex: none; margin-left: auto; color: var(--text-secondary); font-size: 10px; font-weight: 400; white-space: nowrap; }
+    .kv { display: flex; justify-content: space-between; gap: 8px; color: var(--text-muted); font-size: 10px; }
+    .kv b { overflow: hidden; color: var(--text-primary); font-size: 10px; font-weight: 500; text-align: right; white-space: nowrap; text-overflow: ellipsis; }
+    .restriction { padding: 4px 6px; border-radius: 5px; color: var(--amber); background: var(--amber-soft); font-size: 10px; }
+    .compact-row { display: flex; gap: 5px; }
+    .compact-row input, .compact-row select { flex: 1; min-width: 0; padding: 4px 7px; border: 1px solid var(--border-light); border-radius: 5px; background: var(--bg-layer-2); color: var(--text-primary); font-size: 11px; }
+    .primary-small { padding: 4px 10px; border: 0; border-radius: 4px; background: var(--accent); color: #fff; font-size: 11px; font-weight: 500; }
+    .muted { color: var(--text-secondary); font-size: 10px; line-height: 1.45; }
+    .input-sec { flex: none; padding: 7px 10px; border-top: 1px solid var(--border); }
+    .irow { display: flex; align-items: flex-end; gap: 5px; }
+    .minput { flex: 1; min-height: 32px; max-height: 80px; padding: 7px 9px; border: 1px solid var(--border-light); border-radius: 7px; background: var(--bg-layer-2); color: var(--text-primary); font-size: 12px; resize: none; }
+    .send { display: flex; flex: none; align-items: center; justify-content: center; width: 32px; height: 32px; border: 0; border-radius: 7px; background: var(--accent); color: #fff; }
+    .action-bar { display: flex; flex: none; align-items: center; gap: 5px; flex-wrap: wrap; padding: 5px 14px; border-top: 1px solid var(--border); }
+    .hint { flex: 1; color: var(--text-muted); font-size: 10px; }
+
+    .drawer-mask { position: fixed; z-index: 30; display: none; inset: 0; background: rgba(0,0,0,.46); }
+    .drawer-mask.open { display: block; }
+    .drawer { position: fixed; z-index: 31; top: 0; right: 0; bottom: 0; display: none; width: min(960px, 100vw); background: var(--bg-base); border-left: 1px solid var(--border-light); box-shadow: -18px 0 48px rgba(0,0,0,.24); }
+    .drawer.open { display: grid; grid-template-columns: 184px minmax(0,1fr); }
+    .drawer-nav { padding: 12px 8px; overflow: auto; background: var(--bg-layer-1); border-right: 1px solid var(--border); }
+    .drawer-title { padding: 2px 6px 10px; font-size: 14px; font-weight: 700; }
+    .drawer-main { display: flex; min-width: 0; flex-direction: column; }
+    .drawer-head { display: flex; align-items: center; justify-content: space-between; min-height: 48px; padding: 0 16px; border-bottom: 1px solid var(--border); }
+    .drawer-head h2 { font-size: 16px; }
+    .drawer-body { padding: 16px; overflow: auto; }
+    .settings-view { display: none; }
+    .settings-view.active { display: block; }
+    .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; align-items: start; }
+    .panel { overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-layer-1); }
+    .panel + .panel { margin-top: 12px; }
+    .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 12px; border-bottom: 1px solid var(--border); }
+    .panel-head h3 { font-size: 13px; }
+    .panel-body { display: grid; gap: 9px; padding: 12px; }
+    .field label { display: block; margin-bottom: 4px; color: var(--text-muted); font-size: 11px; }
+    .field input, .field select, .field textarea { width: 100%; min-height: 32px; padding: 7px 9px; border: 1px solid var(--border-light); border-radius: 6px; background: var(--bg-layer-2); color: var(--text-primary); outline: none; }
+    .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); }
+    .field textarea { resize: vertical; }
+    .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .btn { display: inline-flex; align-items: center; min-height: 32px; padding: 6px 12px; border: 1px solid transparent; border-radius: 6px; background: var(--bg-layer-3); color: var(--text-primary); font-size: 12px; white-space: nowrap; }
+    .btn.primary { color: #fff; background: var(--accent); font-weight: 600; }
+    .btn.primary:hover { background: var(--accent-hover); }
+    .btn.ghost { color: var(--text-secondary); background: transparent; border-color: var(--border-light); }
+    .btn.ghost:hover { color: var(--text-primary); }
+    .btn.small { min-height: 26px; padding: 3px 8px; font-size: 11px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--text-primary); font-size: 12px; text-align: left; vertical-align: middle; }
+    th { color: var(--text-muted); background: var(--bg-layer-2); font-size: 10px; letter-spacing: .5px; text-transform: uppercase; }
+    .type-pill { display: inline-flex; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+    .type-pill.human { color: var(--green); background: var(--green-soft); }
+    .type-pill.digital { color: var(--purple); background: var(--purple-soft); }
+    .type-pill.avatar { color: var(--accent); background: var(--accent-soft); }
+    .subtext { margin-top: 2px; color: var(--text-muted); font-size: 10px; }
+    .kv-list { display: grid; gap: 6px; font-size: 12px; }
+    .kv-list .kv { color: var(--text-secondary); font-size: 12px; }
+    .kv-list .kv b { color: var(--text-primary); font-size: 12px; }
+    @media (max-width: 1100px) {
+      .frame { grid-template-columns: 210px minmax(0,1fr) 340px; }
+      .settings-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 860px) {
+      .frame { grid-template-columns: 64px minmax(0,1fr) 0; }
+      .sidebar-header, .sec-label, .foot-btn span { display: none; }
+      .new-btn, .foot-btn { justify-content: center; padding: 8px; }
+      .drawer { width: 100vw; grid-template-columns: 1fr; }
+      .drawer-nav { display: flex; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame" id="frame">
+    <nav class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">Pluginmax<small>协作平台</small></div>
+        <button class="new-btn"><svg class="ic" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>新会话</span></button>
+      </div>
+      <div class="sidebar-body">
+        <div class="sec-label">工作区</div>
+        <div class="nav-item active"><span class="dot" style="background:var(--accent)"></span>产品规划室</div>
+        <div class="nav-item"><span class="dot" style="background:var(--text-muted)"></span>技术评审</div>
+        <div class="nav-item"><span class="dot" style="background:var(--text-muted)"></span>日常杂谈</div>
+        <div class="sec-label">会话</div>
+        <div class="nav-item active">R4 会议功能联调</div>
+        <div class="nav-item">共享权限梳理</div>
+      </div>
+      <div class="sidebar-footer">
+        <button class="foot-btn meeting on" id="meetingButton" onclick="toggleMeeting()">
+          <svg class="ic" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          <span>会议</span><span class="badge" id="meetingBadge" style="display:none">3</span>
+        </button>
+        <button class="foot-btn" onclick="openSettings('directory')">
+          <svg class="ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-2.15 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 8.1 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10.6 3V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1.51 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>设置</span>
+        </button>
+      </div>
+    </nav>
+
+    <main class="center">
+      <div class="workbench-head">
+        <div class="context"><strong>产品规划室</strong><span>/ R4 会议功能联调</span></div>
+        <nav class="center-tabs">
+          <button class="tab" onclick="showCenter('conversation')">对话</button>
+          <button class="tab active" onclick="showCenter('workflow')">工作流</button>
+        </nav>
+        <span class="demo-pill">Demo</span>
+      </div>
+      <section class="center-view" id="view-conversation">
+        <div class="conversation-placeholder">当前对话保留在 DSH 原生会话区内。<br>这里不改变主会话，后续才扩展为业务工作台。</div>
+      </section>
+      <section class="center-view active" id="view-workflow">
+        <div class="pmwf-page">
+          <div class="pmwf-heading">
+            <h1>项目工作流</h1>
+            <div class="pmwf-filter">当前会话相关 · 2 条</div>
+          </div>
+          <div class="pmwf-toolbar">
+            <button class="pmwf-btn secondary">查看工作区全部</button>
+            <select class="pmwf-select"><option>全部状态</option><option>进行中</option><option>等待</option><option>已完成</option></select>
+            <input class="pmwf-input pmwf-search" placeholder="搜索流程标题或模板">
+            <button class="pmwf-btn secondary">刷新</button>
+            <button class="pmwf-btn secondary small" onclick="openSettings('workflow-templates')">模板管理</button>
+          </div>
+          <div class="pmwf-list">
+            <article class="pmwf-flow">
+              <button class="pmwf-summary">
+                <span class="status-dot running"></span>
+                <span class="pmwf-name">
+                  <strong>订单导出功能</strong>
+                  <span>product-delivery v3 · 需求评审 → 开发 → 测试准备 → 发布审批 → 发布</span>
+                </span>
+                <span class="pmwf-time">14:22</span>
+                <span class="pmwf-pill running">进行中 · 开发</span>
+              </button>
+              <div class="pmwf-detail">
+                <ol class="pmwf-nodes">
+                  <li class="pmwf-node completed"><span class="pmwf-state">完成</span><div class="pmwf-node-main"><strong>需求评审</strong><span>审批 · 李工 · PRD v2.1 已通过</span></div></li>
+                  <li class="pmwf-node current">
+                    <span class="pmwf-state">运行中</span>
+                    <div class="pmwf-node-main">
+                      <strong>开发</strong>
+                      <span>数字员工 · Backend Engineer 01 · Run run_8f31 · 授权票据：仓库内开发写入</span>
+                      <div class="pmwf-deliverables">
+                        <div class="deliverable">
+                          <div class="deliverable-title">api-export-notes.md<span>已提交</span></div>
+                          <div class="deliverable-meta">接口契约、导出字段和分页限制说明。</div>
+                        </div>
+                        <div class="deliverable">
+                          <div class="deliverable-title">regression-notes.md<span>缺失</span></div>
+                          <div class="deliverable-meta">提交该文件后，节点才满足人工确认门槛。</div>
+                        </div>
+                      </div>
+                      <div class="pmwf-note warning">数字员工完成执行只产生草稿交付物；最终确认由节点负责人或授权操作者完成。</div>
+                      <div class="pmwf-actions"><button class="pmwf-btn small">查看运行</button><button class="pmwf-btn secondary small">补交材料</button><button class="pmwf-btn secondary small">重新派发</button></div>
+                    </div>
+                  </li>
+                  <li class="pmwf-node waiting"><span class="pmwf-state">等待</span><div class="pmwf-node-main"><strong>测试准备</strong><span>工作流节点 · QA Checklist</span></div></li>
+                  <li class="pmwf-node waiting"><span class="pmwf-state">等待</span><div class="pmwf-node-main"><strong>发布审批</strong><span>审批 · Olivia Yang · 可通过 / 否决 / 转交 / 加签</span></div></li>
+                  <li class="pmwf-node waiting"><span class="pmwf-state">等待</span><div class="pmwf-node-main"><strong>发布</strong><span>系统流程 · 发布服务</span></div></li>
+                </ol>
+              </div>
+            </article>
+            <article class="pmwf-flow">
+              <button class="pmwf-summary">
+                <span class="status-dot waiting"></span>
+                <span class="pmwf-name">
+                  <strong>架构方案评审</strong>
+                  <span>complex-review v2 · 父流程：订单导出功能</span>
+                </span>
+                <span class="pmwf-time">13:08</span>
+                <span class="pmwf-pill waiting">等待 · 方案判断</span>
+              </button>
+              <div class="pmwf-detail">
+                <ol class="pmwf-nodes">
+                  <li class="pmwf-node completed"><span class="pmwf-state">完成</span><div class="pmwf-node-main"><strong>提交方案</strong><span>系统流程 · 已接收 architecture-plan.md</span></div></li>
+                  <li class="pmwf-node current"><span class="pmwf-state">待录入</span><div class="pmwf-node-main"><strong>方案判断</strong><span>规则 / AI 决策 · score >= 80 走简化评审，否则走完整评审</span><div class="pmwf-actions"><button class="pmwf-btn small">录入判断</button><button class="pmwf-btn secondary small">查看依据</button></div></div></li>
+                  <li class="pmwf-node waiting"><span class="pmwf-state">等待</span><div class="pmwf-node-main"><strong>架构评审</strong><span>数字员工 · Architecture Reviewer · 只读 + 评审意见</span></div></li>
+                </ol>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="mpanel" id="meetingPanel">
+      <div id="meetingList" style="display:flex; flex-direction:column; flex:1; overflow:hidden;">
+        <div class="phead"><span class="ptitle">会议</span><button class="ibtn" onclick="toggleMeeting()"><svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+        <div class="wsbar"><div class="wsrow"><span class="ws-lb">工作区</span><select class="wsel"><option>产品规划室</option><option>技术评审</option></select></div></div>
+        <div class="create-bar">
+          <button class="ctoggle" onclick="toggleCreate()">+ 新会议</button>
+          <form class="cform" id="createForm" style="display:none"><input placeholder="会议标题"><textarea placeholder="议程（可选）" rows="2"></textarea><button type="submit">创建</button></form>
+        </div>
+        <div class="mlist">
+          <div class="mcard" onclick="showChat()">
+            <div class="mcard-title">R4 里程碑评审</div>
+            <div class="mcard-meta"><span class="pill on">进行中</span><span>5 位参与者</span><span>14:30</span></div>
+            <div class="mcard-actions"><button class="btn-xs" onclick="event.stopPropagation();showChat()">进入</button></div>
+          </div>
+          <div class="mcard" onclick="showChat()">
+            <div class="mcard-title">共享权限方案讨论</div>
+            <div class="mcard-meta"><span class="pill on">进行中</span><span>2 位参与者</span><span>09:15</span></div>
+            <div class="mcard-actions"><button class="btn-xs" onclick="event.stopPropagation();showChat()">进入</button></div>
+          </div>
+          <div class="mcard" style="opacity:.55;cursor:default">
+            <div class="mcard-title">上周遗留问题清理</div>
+            <div class="mcard-meta"><span class="pill">已关闭</span><span>昨天</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="chat" id="chatView">
+        <div class="phead">
+          <button class="ibtn" onclick="showMeetingList()"><svg class="ic" viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg></button>
+          <span class="ptitle">R4 里程碑评审</span><span class="pill on">进行中</span>
+        </div>
+        <div class="participants">
+          <button class="participant-head" onclick="toggleParticipants()"><span>参与者 · 5</span><span id="participantArrow">▾</span></button>
+          <div class="participant-list" id="participantList">
+            <div class="participant-row self"><div class="avatar human">O</div><div class="participant-name">Olivia Yang</div><span class="participant-tag me">我 · 真人</span></div>
+            <div class="participant-row"><div class="avatar human">李</div><div class="participant-name">李工</div><span class="participant-tag">真人 · Leader</span></div>
+            <div class="participant-row"><div class="avatar digital">AR</div><div class="participant-name">Architecture Reviewer</div><span class="participant-tag">数字员工</span></div>
+            <div class="participant-row"><div class="avatar human-avatar">OV</div><div class="participant-name">Olivia 的分身 · Reviewer</div><span class="participant-tag">人类分身</span></div>
+            <div class="participant-row"><div class="avatar human">王</div><div class="participant-name">王工</div><span class="participant-tag">真人</span></div>
+          </div>
+        </div>
+        <div class="msgs">
+          <div class="sysmsg">Olivia 加入了会议</div>
+          <div class="mrow"><div><div class="mbubble"><span class="mention">@Olivia 的分身</span> 请重点核对测试结论是否覆盖失败重试。</div><div class="mmeta">李工 · 14:31</div></div></div>
+          <div class="mrow self delegated"><div><div class="mbubble"><span class="agent-tag">Olivia 的分身 · Agent</span>已核对 A–E 系列。失败重试覆盖派发失败、超时和交付物缺失；缺一处取消后重试的断言。</div><div class="mmeta">Olivia 的分身 · 14:32</div></div></div>
+          <div class="mrow self"><div><div class="mbubble">同意，我会让 Backend Engineer 01 补交回归说明。</div><div class="mmeta">Olivia · 14:32</div></div></div>
+          <div class="mrow"><div><div class="mbubble"><span class="mention">@Architecture Reviewer</span> 请只评审接口边界，不要改动实现。</div><div class="mmeta">李工 · 14:33</div></div></div>
+          <div class="mrow"><div><div class="mbubble">收到。接口边界与导出权限一致；建议补充审计事件字段。</div><div class="mmeta">Architecture Reviewer · 14:33</div></div></div>
+        </div>
+        <div class="agent-sec">
+          <div class="agent-head"><span class="agent-label">会议分身 / 受限委托</span><button class="toggle on" onclick="toggleAgentBody(this)"></button></div>
+          <div class="agent-body open" id="agentBody">
+            <div class="delegation-card">
+              <div class="delegation-title"><span>Reviewer</span><span class="owner">Olivia 的 Human Avatar</span></div>
+              <div class="kv"><span>委托人</span><b>Olivia Yang</b></div>
+              <div class="kv"><span>行为资产</span><b>proof-reader 人设</b></div>
+              <div class="kv"><span>本次授权</span><b>只读材料 + 会议建议</b></div>
+              <div class="kv"><span>审批权</span><b>建议，不审批</b></div>
+              <div class="restriction">受限于 Olivia 的委托；操作以 Delegation Ticket 审计。</div>
+              <div class="row"><button class="btn-xs ghost" onclick="openReport()">查看分身报告</button><button class="btn-xs ghost">调整委托</button></div>
+            </div>
+            <div class="compact-row"><input placeholder="分身名称，例如 Reviewer"><select><option>选择行为人设</option><option>proof-reader</option><option>note-taker</option></select></div>
+            <div class="compact-row"><select><option>只读 + 建议</option><option>可代写意见</option><option>只收集信息</option></select><button class="primary-small">派出</button></div>
+            <div class="muted">Human Avatar 不是 Digital Employee；审批型会议保持建议模式，除非委托单显式授权且通过策略校验。</div>
+          </div>
+        </div>
+        <div class="input-sec"><div class="irow"><textarea class="minput" rows="1" placeholder="输入消息，可用 @ 指定接收人"></textarea><button class="send"><svg class="ic" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button></div></div>
+        <div class="action-bar"><span class="hint">你是 Olivia · 当前会话 Leader 委托给李工</span><button class="btn-xs ghost">离开会议</button><button class="btn-xs ghost danger">关闭会议</button></div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="drawer-mask" id="settingsMask" onclick="closeSettings()"></div>
+  <section class="drawer" id="settingsDrawer">
+    <nav class="drawer-nav">
+      <div class="drawer-title">设置</div>
+      <button class="nav-item active" data-settings="directory" onclick="showSettings('directory')"><span class="dot" style="background:var(--accent)"></span>员工目录</button>
+      <button class="nav-item" data-settings="digital" onclick="showSettings('digital')"><span class="dot" style="background:var(--text-muted)"></span>数字员工</button>
+      <button class="nav-item" data-settings="delegation" onclick="showSettings('delegation')"><span class="dot" style="background:var(--text-muted)"></span>分身与委托</button>
+      <button class="nav-item" data-settings="workflow-templates" onclick="showSettings('workflow-templates')"><span class="dot" style="background:var(--text-muted)"></span>工作流模板</button>
+      <button class="nav-item" data-settings="audit" onclick="showSettings('audit')"><span class="dot" style="background:var(--text-muted)"></span>权限与审计</button>
+    </nav>
+    <div class="drawer-main">
+      <div class="drawer-head"><h2 id="settingsTitle">员工目录</h2><button class="ibtn" onclick="closeSettings()"><svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+      <div class="drawer-body">
+        <section class="settings-view active" id="settings-directory">
+          <div class="panel">
+            <div class="panel-head">
+              <h3>企业员工</h3>
+              <div class="row"><input class="pmwf-input" placeholder="搜索姓名、账号、角色"><button class="btn ghost small">筛选</button><button class="btn primary small">创建数字员工</button></div>
+            </div>
+            <table>
+              <thead><tr><th>姓名 / 标识</th><th>类型</th><th>登录 / 执行主体</th><th>角色</th><th>状态</th><th></th></tr></thead>
+              <tbody>
+                <tr><td><strong>Olivia Yang</strong><div class="subtext">employee:olivia</div></td><td><span class="type-pill human">Human Employee</span></td><td>gui-owner</td><td>平台管理员</td><td>在职</td><td><button class="btn ghost small">详情</button></td></tr>
+                <tr><td><strong>Backend Engineer 01</strong><div class="subtext">employee:backend-engineer-01</div></td><td><span class="type-pill digital">Digital Employee</span></td><td>Runtime Profile backend-dev-01</td><td>后端工程师</td><td>启用</td><td><button class="btn ghost small">详情</button></td></tr>
+                <tr><td><strong>Architecture Reviewer</strong><div class="subtext">employee:architecture-reviewer</div></td><td><span class="type-pill digital">Digital Employee</span></td><td>Runtime Profile arch-reviewer</td><td>架构评审</td><td>启用</td><td><button class="btn ghost small">详情</button></td></tr>
+                <tr><td><strong>Olivia 的分身 · Reviewer</strong><div class="subtext">delegation:del_91 · owner: olivia</div></td><td><span class="type-pill avatar">Human Avatar</span></td><td>随会议 / 任务临时创建</td><td>委托代表</td><td>会中有效</td><td><button class="btn ghost small">详情</button></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="settings-view" id="settings-digital">
+          <div class="settings-grid">
+            <div class="panel">
+              <div class="panel-head"><h3>创建 Digital Employee</h3></div>
+              <div class="panel-body">
+                <div class="field"><label>姓名</label><input value="Data Analyst 02"></div>
+                <div class="row">
+                  <div class="field" style="flex:1"><label>Employee ID</label><input value="data-analyst-02"></div>
+                  <div class="field" style="flex:1"><label>角色</label><select><option>数据分析</option><option>后端工程师</option><option>架构评审</option></select></div>
+                </div>
+                <div class="field"><label>人设资产</label><select><option>data-analyst · Markdown</option><option>backend-engineer · Markdown</option></select></div>
+                <div class="field"><label>Runtime Profile</label><select><option>standard-readonly</option><option>backend-dev</option><option>reviewer</option></select></div>
+                <div class="muted">Persona 只描述行为；真正可执行能力由 Runtime Profile 和策略决定。创建后先进入草稿，授权审核通过才能承担工作。</div>
+                <div class="row"><button class="btn primary">创建草稿</button><button class="btn ghost">选择人设文件</button></div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h3>Backend Engineer 01</h3><span class="type-pill digital">Digital Employee</span></div>
+              <div class="panel-body">
+                <div class="kv-list">
+                  <div class="kv"><span>Employee ID</span><b>backend-engineer-01</b></div>
+                  <div class="kv"><span>正式角色</span><b>后端工程师</b></div>
+                  <div class="kv"><span>人设</span><b>backend-engineer.md v4</b></div>
+                  <div class="kv"><span>Runtime Profile</span><b>backend-dev-01</b></div>
+                  <div class="kv"><span>归属</span><b>工程部 · 产品规划室</b></div>
+                </div>
+                <div class="muted">可执行能力：repo:read、repo:write、workflow:run、meeting:speak。</div>
+                <div class="pmwf-note warning">审批、删除、跨工作区导出默认禁用；如需开启必须走权限申请和审计。</div>
+                <div class="row"><button class="btn primary">保存</button><button class="btn ghost">权限申请</button><button class="btn ghost">停用</button></div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="settings-view" id="settings-delegation">
+          <div class="settings-grid">
+            <div class="panel">
+              <div class="panel-head"><h3>默认委托策略</h3></div>
+              <div class="panel-body">
+                <div class="kv-list">
+                  <div class="kv"><span>默认类型</span><b>Human Avatar / Delegation</b></div>
+                  <div class="kv"><span>权限来源</span><b>委托人权限的受限子集</b></div>
+                  <div class="kv"><span>审批权</span><b>默认建议，不审批</b></div>
+                  <div class="kv"><span>可见范围</span><b>当前任务 / 会议</b></div>
+                  <div class="kv"><span>生命周期</span><b>任务结束或最长 8 小时</b></div>
+                </div>
+                <div class="pmwf-note info">分身发言必须标注委托人；分身报告回传给委托人，包含关键过程、结论、证据和未尽事项。</div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-head"><h3>创建委托</h3></div>
+              <div class="panel-body">
+                <div class="field"><label>委托人</label><input value="Olivia Yang" readonly></div>
+                <div class="field"><label>分身名称</label><input value="Reviewer"></div>
+                <div class="row">
+                  <div class="field" style="flex:1"><label>行为人设</label><select><option>proof-reader</option><option>note-taker</option><option>debate-support</option></select></div>
+                  <div class="field" style="flex:1"><label>有效期</label><select><option>会议期间</option><option>任务完成前</option><option>最长 8 小时</option></select></div>
+                </div>
+                <div class="field"><label>委托指令</label><textarea rows="4">核对本会议的测试覆盖结论；只提出风险和证据，不替 Olivia 审批。</textarea></div>
+                <div class="row"><button class="btn primary">签发 Ticket</button><button class="btn ghost">查看模板</button></div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <section class="settings-view" id="settings-workflow-templates">
+          <div class="panel">
+            <div class="panel-head"><h3>工作流模板管理</h3><div class="row"><button class="btn primary small">导入 Markdown</button><button class="btn ghost small">下载语法说明</button></div></div>
+            <table>
+              <thead><tr><th>模板</th><th>版本</th><th>节点 / 分支</th><th>循环保护</th><th>状态</th><th></th></tr></thead>
+              <tbody>
+                <tr><td><strong>product-delivery</strong></td><td>v3</td><td>5 节点 · 1 分支</td><td>最多 3 次</td><td>启用</td><td><button class="btn ghost small">预览</button></td></tr>
+                <tr><td><strong>complex-review</strong></td><td>v2</td><td>4 节点 · 2 分支</td><td>无需循环</td><td>启用</td><td><button class="btn ghost small">预览</button></td></tr>
+                <tr><td><strong>controlled-rework</strong></td><td>v1</td><td>3 节点 · 回到开发</td><td>必须填写 break 条件</td><td>已归档</td><td><button class="btn ghost small">查看</button></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="settings-view" id="settings-audit">
+          <div class="panel">
+            <div class="panel-head"><h3>权限与审计</h3><button class="btn ghost small">导出</button></div>
+            <table>
+              <thead><tr><th>时间</th><th>主体</th><th>动作</th><th>票据 / 结果</th></tr></thead>
+              <tbody>
+                <tr><td>14:22</td><td>Backend Engineer 01</td><td>workflow.node.run</td><td>Allowed · ticket_4a91 · workspace write</td></tr>
+                <tr><td>14:21</td><td>Backend Engineer 01</td><td>repo.write src/export.ts</td><td>Allowed · ticket_4a91</td></tr>
+                <tr><td>14:20</td><td>Olivia 的分身</td><td>meeting.suggest</td><td>Allowed · delegation_del_91</td></tr>
+                <tr><td>13:58</td><td>Architecture Reviewer</td><td>workflow.approve</td><td>Denied · 未授予审批权</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </div>
+  </section>
+
+  <div class="drawer-mask" id="reportMask" style="display:none" onclick="closeReport(event)"></div>
+  <section class="drawer" id="reportDrawer">
+    <div class="drawer-main">
+      <div class="drawer-head"><h2>分身报告 · Olivia 的分身</h2><button class="ibtn" onclick="closeReport(event)"><svg class="ic" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+      <div class="drawer-body">
+        <div class="panel">
+          <div class="panel-head"><h3>客观摘要</h3><span class="pill on">已回传</span></div>
+          <div class="panel-body">
+            <div class="muted">会议：R4 里程碑评审 · 14:30-14:41 · 参与者 5</div>
+            <div class="kv-list">
+              <div class="kv"><span>委托指令</span><b>核对测试覆盖结论</b></div>
+              <div class="kv"><span>关键过程</span><b>核对 A–E 系列；复核失败重试与交付门槛</b></div>
+              <div class="kv"><span>结论</span><b>主体覆盖完整，缺取消后重试断言</b></div>
+              <div class="kv"><span>证据</span><b>message-18 / test-report.md / workflow run_8f31</b></div>
+              <div class="kv"><span>未做</span><b>未审批，未修改工作区文件</b></div>
+            </div>
+            <div class="row"><button class="btn primary">标记已读</button><button class="btn ghost">转发给李工</button><button class="btn ghost">归档</button></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <script>
+    const frame = document.getElementById("frame");
+    const meetingPanel = document.getElementById("meetingPanel");
+    const meetingButton = document.getElementById("meetingButton");
+    const meetingBadge = document.getElementById("meetingBadge");
+
+    function toggleMeeting() {
+      const closed = meetingPanel.classList.contains("hidden");
+      meetingPanel.classList.toggle("hidden", !closed);
+      frame.classList.toggle("no-panel", !closed);
+      meetingButton.classList.toggle("on", closed);
+      meetingBadge.style.display = closed ? "none" : "";
+    }
+
+    function showChat() {
+      document.getElementById("meetingList").style.display = "none";
+      document.getElementById("chatView").style.display = "flex";
+    }
+
+    function showMeetingList() {
+      document.getElementById("chatView").style.display = "none";
+      document.getElementById("meetingList").style.display = "flex";
+    }
+
+    function toggleCreate() {
+      const form = document.getElementById("createForm");
+      form.style.display = form.style.display === "none" ? "grid" : "none";
+    }
+
+    function showCenter(view) {
+      document.querySelectorAll(".center-tabs .tab").forEach((item, index) => {
+        const expected = index === 0 ? "conversation" : "workflow";
+        item.classList.toggle("active", expected === view);
+      });
+      document.getElementById("view-conversation").classList.toggle("active", view === "conversation");
+      document.getElementById("view-workflow").classList.toggle("active", view === "workflow");
+    }
+
+    function toggleParticipants() {
+      const list = document.getElementById("participantList");
+      const arrow = document.getElementById("participantArrow");
+      list.classList.toggle("closed");
+      arrow.textContent = list.classList.contains("closed") ? "▸" : "▾";
+    }
+
+    function toggleAgentBody(button) {
+      button.classList.toggle("on");
+      document.getElementById("agentBody").classList.toggle("open");
+    }
+
+    function openSettings(section) {
+      document.getElementById("settingsMask").classList.add("open");
+      document.getElementById("settingsDrawer").classList.add("open");
+      showSettings(section);
+    }
+
+    function closeSettings() {
+      document.getElementById("settingsMask").classList.remove("open");
+      document.getElementById("settingsDrawer").classList.remove("open");
+    }
+
+    function showSettings(section) {
+      const titles = {
+        directory: "员工目录",
+        digital: "数字员工",
+        delegation: "分身与委托",
+        "workflow-templates": "工作流模板",
+        audit: "权限与审计"
+      };
+      document.querySelectorAll("[data-settings]").forEach((item) => {
+        item.classList.toggle("active", item.dataset.settings === section);
+      });
+      document.querySelectorAll(".settings-view").forEach((item) => {
+        item.classList.toggle("active", item.id === `settings-${section}`);
+      });
+      document.getElementById("settingsTitle").textContent = titles[section] || "设置";
+    }
+
+    function openReport() {
+      document.getElementById("reportMask").style.display = "block";
+      document.getElementById("reportDrawer").classList.add("open");
+    }
+
+    function closeReport(event) {
+      if (event && event.target.closest && event.target.closest("#reportDrawer")) return;
+      document.getElementById("reportMask").style.display = "none";
+      document.getElementById("reportDrawer").classList.remove("open");
+    }
+
+  </script>
+</body>
+</html>

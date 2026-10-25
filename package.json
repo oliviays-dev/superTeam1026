@@ -1,0 +1,29 @@
+{
+  "name": "dsh-pluginmax",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Out-of-tree DSH collaboration plugins",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "corepack pnpm -r build",
+    "check": "corepack pnpm run typecheck && corepack pnpm run lint && corepack pnpm run test && corepack pnpm run build && corepack pnpm run contract && corepack pnpm run pack:check",
+    "contract": "node scripts/contract.mjs",
+    "format:check": "corepack pnpm exec prettier --check .",
+    "lint": "corepack pnpm exec oxlint packages plugins",
+    "pack:check": "corepack pnpm --filter './packages/*' --filter './plugins/*' pack --dry-run",
+    "test": "vitest run",
+    "typecheck": "tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "oxlint": "1.76.0",
+    "prettier": "^3.6.2",
+    "tsdown": "0.22.2",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

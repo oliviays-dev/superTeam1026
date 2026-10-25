@@ -1,0 +1,41 @@
+{
+  "name": "dsh-collab-space",
+  "version": "0.1.0",
+  "description": "DSH Pluginmax sharing, locking, and digest service",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsdown && cp client/index.js lib/client.js"
+  },
+  "dependencies": {
+    "@pluginmax/shared": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [],
+      "immediately": true
+    }
+  }
+}

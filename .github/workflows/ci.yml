@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            vendor/deepseek-harness/pnpm-lock.yaml
+      - name: Install Pluginmax workspace
+        run: pnpm install --frozen-lockfile
+      - name: Static, unit, build, and package checks
+        run: pnpm run check
+      - name: Build locked upstream DSH
+        run: pnpm --dir vendor/deepseek-harness install --frozen-lockfile && pnpm --dir vendor/deepseek-harness build
+      - name: Install and smoke canary
+        run: |
+          set +e
+          mkdir -p .tmp
+          ./scripts/install-profile.sh > .tmp/install-profile.log 2>&1
+          install_status=$?
+          smoke_status=0
+          if [[ "$install_status" -eq 0 ]]; then
+            ./scripts/smoke.sh > .tmp/smoke.log 2>&1
+            smoke_status=$?
+          fi
+          if [[ "$install_status" -ne 0 || "$smoke_status" -ne 0 ]]; then
+            {
+              echo '## Smoke diagnostics'
+              echo '```text'
+              tail -n 200 .tmp/install-profile.log 2>/dev/null || true
+              tail -n 200 .tmp/smoke.log 2>/dev/null || true
+            } | sed -E \
+              -e 's#https://[^[:space:]]+token=[^[:space:]]+[)"]?#[redacted launch url]#g' \
+              -e 's#[A-Za-z0-9_-]{40,}#[redacted]#g' \
+            | tee .tmp/smoke-diagnostics.txt \
+              >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do
+              printf '::error::%s\n' "$line"
+            done < <(tail -n 9 .tmp/smoke-diagnostics.txt)
+            cat .tmp/install-profile.log 2>/dev/null || true
+            cat .tmp/smoke.log 2>/dev/null || true
+            [[ "$install_status" -ne 0 ]] && exit "$install_status"
+            exit "$smoke_status"
+          fi
+      - name: Upload smoke diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-diagnostics
+          path: .tmp/smoke-diagnostics.txt
+          if-no-files-found: error

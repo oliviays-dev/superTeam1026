@@ -1,0 +1,4 @@
+[submodule "vendor/deepseek-harness"]
+	path = vendor/deepseek-harness
+	url = https://github.com/oliviays-dev/deepseek-harness.git
+	branch = master

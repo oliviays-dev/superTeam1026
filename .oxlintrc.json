@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxlint/oxlint/main/.oxlintrc.json",
+  "env": {
+    "browser": true,
+    "node": true
+  },
+  "rules": {
+    "default-case-last": "error",
+    "eqeqeq": "error",
+    "no-console": "off",
+    "no-throw-literal": "error",
+    "no-var": "error",
+    "prefer-const": "error"
+  }
+}

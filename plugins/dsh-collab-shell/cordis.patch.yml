@@ -1,0 +1,9 @@
+- id: ui-layout
+  disabled: true
+
+- id: ui-sidebar
+  disabled: true
+
+- insert:
+    - id: dsh-collab-shell
+      name: dsh-collab-shell

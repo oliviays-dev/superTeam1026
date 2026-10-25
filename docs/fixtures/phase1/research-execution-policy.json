@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "selection": "user-selected",
+    "allowedRuntimeIds": ["<P1_WORKBUDDY_RUNTIME_ID>"],
+    "requiredCapabilities": [
+      {
+        "key": "search",
+        "necessity": "required"
+      },
+      {
+        "key": "network",
+        "necessity": "preferred"
+      }
+    ]
+  },
+  "sourcePolicy": {
+    "allow": [
+      "workspace",
+      "task-attachments",
+      "project-memory",
+      "public-web",
+      "regulatory-filing"
+    ],
+    "deny": ["private-local-data"],
+    "citation": "required-for-factual-claims",
+    "requirePublishedAt": true,
+    "requireAccessedAt": true
+  },
+  "toolPolicy": {
+    "allow": [],
+    "deny": [],
+    "requireApproval": []
+  },
+  "evidence": {
+    "requirePlan": true,
+    "requireToolEvents": true,
+    "requireCitations": true,
+    "requireStructuredSubagents": false
+  },
+  "humanGates": [],
+  "budget": {
+    "timeoutMs": 600000,
+    "maxTurns": 12,
+    "maxToolCalls": 40
+  }
+}
