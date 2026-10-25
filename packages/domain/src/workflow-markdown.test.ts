@@ -125,6 +125,7 @@ describe("workflow markdown validation", () => {
 - policy: any
 - timeout: 2m
 - max-attempts: 3
+- retry-backoff: 15s
 
 ### 判断
 
@@ -158,6 +159,7 @@ describe("workflow markdown validation", () => {
       approvalPolicy: "any",
       timeoutSeconds: 120,
       maxAttempts: 3,
+      retryBackoffSeconds: 15,
     });
     expect(result.graph?.nodes[2]?.loopLimit).toBe(2);
     expect(result.graph?.nodes[3]).toMatchObject({

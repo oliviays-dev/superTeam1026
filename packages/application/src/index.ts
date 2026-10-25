@@ -1584,13 +1584,19 @@ export class PlatformApplication {
       (approval) =>
         approval.nodeId === node.nodeId && approval.round === node.visits,
     );
-    const rejected = round.some((approval) => approval.status === "rejected");
+    const activeRound = round.filter(
+      (approval) => approval.status !== "transferred",
+    );
+    const rejected = activeRound.some(
+      (approval) => approval.status === "rejected",
+    );
     const definition = requireGraphNode(instance.graph, node.nodeId);
     const complete =
       rejected ||
       (definition.approvalPolicy === "any"
-        ? round.some((approval) => approval.status === "approved")
-        : round.every((approval) => approval.status === "approved"));
+        ? activeRound.some((approval) => approval.status === "approved")
+        : activeRound.length > 0 &&
+          activeRound.every((approval) => approval.status === "approved"));
     if (!complete) {
       const saved = await this.repositories.workflowRuntime.save(
         instance.id,
@@ -1613,21 +1619,14 @@ export class PlatformApplication {
         },
       );
       if (saved === undefined) {
-        const current = await this.getWorkflowInstance(instanceId);
-        const currentApproval = (
-          await this.repositories.workflowRuntime.listApprovals(instanceId)
-        ).find(
-          (approval) =>
-            approval.nodeId === node.nodeId &&
-            approval.round === node.visits &&
-            approval.approverId === actorId,
-        );
-        if (currentApproval?.status === expectedStatus) return current;
-        throw new ApplicationError(
-          "workflow_revision_conflict",
-          "Workflow instance changed concurrently",
-          409,
-        );
+        return this.resolveWorkflowApprovalConflict({
+          instanceId,
+          nodeId: node.nodeId,
+          round: node.visits,
+          actorId,
+          decision: input.decision,
+          note: input.note,
+        });
       }
       return saved;
     }
@@ -1660,23 +1659,14 @@ export class PlatformApplication {
         error instanceof ApplicationError &&
         error.code === "workflow_revision_conflict"
       ) {
-        const current = await this.getWorkflowInstance(instanceId);
-        const currentApproval = (
-          await this.repositories.workflowRuntime.listApprovals(instanceId)
-        ).find(
-          (approval) =>
-            approval.nodeId === node.nodeId &&
-            approval.round === node.visits &&
-            approval.approverId === actorId,
-        );
-        if (
-          currentApproval?.status === expectedStatus &&
-          current.runtime.nodes.find(
-            (candidate) => candidate.nodeId === node.nodeId,
-          )?.status !== "waiting_approval"
-        ) {
-          return current;
-        }
+        return this.resolveWorkflowApprovalConflict({
+          instanceId,
+          nodeId: node.nodeId,
+          round: node.visits,
+          actorId,
+          decision: input.decision,
+          note: input.note,
+        });
       }
       throw error;
     }
@@ -2307,6 +2297,95 @@ export class PlatformApplication {
           ]
         : []),
     ];
+  }
+
+  private async resolveWorkflowApprovalConflict(input: {
+    readonly instanceId: string;
+    readonly nodeId: string;
+    readonly round: number;
+    readonly actorId: string;
+    readonly decision: "approve" | "reject";
+    readonly note: string;
+  }): Promise<WorkflowInstance> {
+    const expectedStatus =
+      input.decision === "approve" ? "approved" : "rejected";
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.getWorkflowInstance(input.instanceId);
+      const approvals =
+        await this.repositories.workflowRuntime.listApprovals(input.instanceId);
+      const actorApproval = approvals.find(
+        (approval) =>
+          approval.nodeId === input.nodeId &&
+          approval.round === input.round &&
+          approval.approverId === input.actorId,
+      );
+      if (actorApproval?.status !== expectedStatus) {
+        throw new ApplicationError(
+          "workflow_approval_already_decided",
+          "This approval round changed concurrently",
+          409,
+        );
+      }
+      const node = requireRuntimeNode(current.runtime, input.nodeId);
+      if (node.status !== "waiting_approval" || current.graph === null) {
+        return current;
+      }
+      const activeRound = approvals.filter(
+        (approval) =>
+          approval.nodeId === input.nodeId &&
+          approval.round === input.round &&
+          approval.status !== "transferred",
+      );
+      const rejected = activeRound.some(
+        (approval) => approval.status === "rejected",
+      );
+      const definition = requireGraphNode(current.graph, input.nodeId);
+      const complete =
+        rejected ||
+        (definition.approvalPolicy === "any"
+          ? activeRound.some((approval) => approval.status === "approved")
+          : activeRound.length > 0 &&
+            activeRound.every((approval) => approval.status === "approved"));
+      if (!complete) return current;
+      const transition = transitionWorkflowNode({
+        graph: current.graph,
+        runtime: current.runtime,
+        nodeId: input.nodeId,
+        actorId: input.actorId,
+        approvalResult: rejected ? "rejected" : "approved",
+        output: input.note,
+      });
+      try {
+        const saved = await this.saveRuntimeTransition(
+          current,
+          transition,
+          input.actorId,
+          [
+            {
+              kind: "approval.decided",
+              nodeId: input.nodeId,
+              summary: rejected
+                ? `审批节点“${node.name}”被拒绝`
+                : `审批节点“${node.name}”通过`,
+              data: { concurrentResolution: true },
+            },
+          ],
+        );
+        return this.activateWorkflowRuntime(saved, input.actorId);
+      } catch (error) {
+        if (
+          !(error instanceof ApplicationError) ||
+          error.code !== "workflow_revision_conflict"
+        ) {
+          throw error;
+        }
+      }
+    }
+    throw new ApplicationError(
+      "workflow_revision_conflict",
+      "Workflow instance changed concurrently",
+      409,
+    );
   }
 
   async sweepWorkflowInstances(

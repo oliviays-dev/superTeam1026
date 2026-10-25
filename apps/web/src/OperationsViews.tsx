@@ -24,6 +24,7 @@ import { useState, type CSSProperties, type ReactNode } from "react";
 import {
   closeMeeting,
   completeWorkflowNode,
+  cosignWorkflowApproval,
   createMeeting,
   createWorkflow,
   decideWorkflowApproval,
@@ -34,6 +35,7 @@ import {
   getWorkbench,
   listMeetings,
   listMemory,
+  listProjectMembers,
   listProjectRoles,
   listTasks,
   listWorkflowInstances,
@@ -44,6 +46,7 @@ import {
   resumeWorkflow,
   retryWorkflowNode,
   startWorkflow,
+  transferWorkflowApproval,
   validateWorkflowMarkdown,
 } from "./api.js";
 import { WorkflowRuntimePanel } from "./WorkflowRuntimePanel.js";
@@ -410,6 +413,11 @@ export function WorkflowsView({
     queryFn: () => listProjectRoles(selectedProjectId),
     enabled: selectedProjectId !== "",
   });
+  const membersQuery = useQuery({
+    queryKey: ["project-members", selectedProjectId],
+    queryFn: () => listProjectMembers(selectedProjectId),
+    enabled: selectedProjectId !== "",
+  });
   const createMutation = useMutation({
     mutationFn: () => {
       const stepNames = steps
@@ -478,6 +486,32 @@ export function WorkflowsView({
       }),
     onSuccess: refreshWorkflowQueries,
   });
+  const transferMutation = useMutation({
+    mutationFn: (input: {
+      readonly node: WorkflowRuntimeNode;
+      readonly targetActorId: string;
+      readonly note: string;
+    }) =>
+      transferWorkflowApproval(instanceId, {
+        nodeId: input.node.nodeId,
+        targetActorId: input.targetActorId,
+        note: input.note,
+      }),
+    onSuccess: refreshWorkflowQueries,
+  });
+  const cosignMutation = useMutation({
+    mutationFn: (input: {
+      readonly node: WorkflowRuntimeNode;
+      readonly approverId: string;
+      readonly note: string;
+    }) =>
+      cosignWorkflowApproval(instanceId, {
+        nodeId: input.node.nodeId,
+        approvers: [{ kind: "user", id: input.approverId }],
+        note: input.note,
+      }),
+    onSuccess: refreshWorkflowQueries,
+  });
   const retryMutation = useMutation({
     mutationFn: (node: WorkflowRuntimeNode) =>
       retryWorkflowNode(instanceId, {
@@ -505,6 +539,8 @@ export function WorkflowsView({
   const panelPending =
     completeMutation.isPending ||
     approvalMutation.isPending ||
+    transferMutation.isPending ||
+    cosignMutation.isPending ||
     retryMutation.isPending ||
     dispatchMutation.isPending ||
     pauseMutation.isPending ||
@@ -523,6 +559,8 @@ export function WorkflowsView({
     detailQuery.error ??
     completeMutation.error ??
     approvalMutation.error ??
+    transferMutation.error ??
+    cosignMutation.error ??
     retryMutation.error ??
     dispatchMutation.error ??
     pauseMutation.error ??
@@ -746,6 +784,13 @@ export function WorkflowsView({
               onDispatch={() => dispatchMutation.mutate()}
               onApproval={(node, decision) =>
                 approvalMutation.mutate({ node, decision })
+              }
+              members={membersQuery.data ?? []}
+              onTransfer={(node, targetActorId, note) =>
+                transferMutation.mutate({ node, targetActorId, note })
+              }
+              onCosign={(node, approverId, note) =>
+                cosignMutation.mutate({ node, approverId, note })
               }
               onRetry={(node) => retryMutation.mutate(node)}
               onPause={() => pauseMutation.mutate()}

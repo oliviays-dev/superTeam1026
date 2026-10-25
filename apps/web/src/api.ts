@@ -16,6 +16,7 @@ import type {
   CreateProjectInput,
   CreateTaskInput,
   CreateWorkflowInput,
+  CosignWorkflowApprovalInput,
   ImportWorkflowMarkdownInput,
   Meeting,
   MeetingDetail,
@@ -34,6 +35,7 @@ import type {
   Task,
   TaskDetail,
   TaskMessage,
+  TransferWorkflowApprovalInput,
   UploadTaskAttachmentInput,
   UpdateAgentInput,
   UpdateMemoryClaimInput,
@@ -44,6 +46,8 @@ import type {
   ValidateWorkflowMarkdownInput,
   WorkbenchSummary,
   WorkflowDefinition,
+  WorkflowAuditPage,
+  WorkflowAuditKind,
   WorkflowInstance,
   WorkflowInstanceDetail,
   WorkflowReasonInput,
@@ -64,12 +68,13 @@ interface EventPage {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.body !== undefined && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: {
-      "content-type": "application/json",
-      ...init?.headers,
-    },
+    headers,
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
@@ -484,6 +489,47 @@ export function decideWorkflowApproval(
     headers: { "idempotency-key": crypto.randomUUID() },
     body: JSON.stringify(input),
   });
+}
+
+export function transferWorkflowApproval(
+  instanceId: string,
+  input: TransferWorkflowApprovalInput,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/approvals/transfer`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function cosignWorkflowApproval(
+  instanceId: string,
+  input: CosignWorkflowApprovalInput,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/approvals/cosign`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function listWorkflowAudit(input: {
+  readonly projectId: string;
+  readonly instanceId?: string;
+  readonly nodeId?: string;
+  readonly kind?: WorkflowAuditKind;
+  readonly actorId?: string;
+  readonly query?: string;
+  readonly failuresOnly?: boolean;
+  readonly page?: number;
+  readonly pageSize?: number;
+}): Promise<WorkflowAuditPage> {
+  const params = new URLSearchParams({ projectId: input.projectId });
+  for (const [key, value] of Object.entries(input)) {
+    if (key === "projectId" || value === undefined || value === "") continue;
+    params.set(key, String(value));
+  }
+  return request(`/workflow-audit?${params.toString()}`);
 }
 
 export function pauseWorkflow(

@@ -22,7 +22,8 @@ const executor = new RunExecutor(repositories, {
 const workerId = `worker-${randomUUID()}`;
 let stopping = false;
 let closing = false;
-let lastSweepAt = 0;
+let sweeping = false;
+let sweepTimer: NodeJS.Timeout | null = null;
 
 const sleep = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -43,36 +44,46 @@ const stop = async () => {
   if (closing) return;
   closing = true;
   stopping = true;
+  if (sweepTimer !== null) clearInterval(sweepTimer);
   await database.close();
 };
 
 process.on("SIGINT", () => void stop());
 process.on("SIGTERM", () => void stop());
 
-log("worker.started");
-while (!stopping) {
-  const recovered = await repositories.jobs.recoverExpiredLeases(
-    config.workerRecoveryBatchSize,
-  );
-  if (recovered.length > 0) {
-    log("worker.expired_leases_recovered", { count: recovered.length });
-  }
-  if (Date.now() - lastSweepAt >= config.workflowSweepIntervalMs) {
-    lastSweepAt = Date.now();
-    try {
-      const sweep = await application.sweepWorkflowInstances(workerId, {
-        batchSize: config.workflowSweepBatchSize,
-        leaseSeconds: config.workflowSweepLeaseSeconds,
-        staleAfterSeconds: config.workflowSweepStaleSeconds,
-      });
-      if (sweep.claimed > 0) {
-        log("workflow.sweep", sweep);
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log("workflow.sweep_failed", { error: message });
+const sweep = async () => {
+  if (sweeping || stopping) return;
+  sweeping = true;
+  try {
+    const recovered = await repositories.jobs.recoverExpiredLeases(
+      config.workerRecoveryBatchSize,
+    );
+    if (recovered.length > 0) {
+      log("worker.expired_leases_recovered", { count: recovered.length });
     }
+    const result = await application.sweepWorkflowInstances(workerId, {
+      batchSize: config.workflowSweepBatchSize,
+      leaseSeconds: config.workflowSweepLeaseSeconds,
+      staleAfterSeconds: config.workflowSweepStaleSeconds,
+    });
+    if (result.claimed > 0) {
+      log("workflow.sweep", result);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log("workflow.sweep_failed", { error: message });
+  } finally {
+    sweeping = false;
   }
+};
+
+log("worker.started");
+await sweep();
+sweepTimer = setInterval(
+  () => void sweep(),
+  config.workflowSweepIntervalMs,
+);
+while (!stopping) {
   const job = await repositories.jobs.claimNext(
     workerId,
     config.workerLeaseSeconds,

@@ -119,16 +119,11 @@ export function ProjectMembershipPanel({
           <button
             className="pm-btn primary"
             type="button"
-            disabled={availableAgents.length === 0}
-            title={
-              availableAgents.length === 0
-                ? "没有可添加的活跃 AI 伙伴"
-                : "添加 AI 成员"
-            }
+            title="添加项目成员"
             onClick={() => setMemberEditor("new")}
           >
             <Plus size={14} />
-            添加 AI 成员
+            添加成员
           </button>
         </div>
       </header>
@@ -319,6 +314,13 @@ function MemberDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const [kind, setKind] = useState<"human" | "agent">(
+    member?.kind ?? "agent",
+  );
+  const [name, setName] = useState(member?.name ?? "");
+  const [actorId, setActorId] = useState(
+    member?.kind === "human" ? member.actorId : "",
+  );
   const [agentId, setAgentId] = useState(
     member?.kind === "agent" ? member.actorId : (agents[0]?.id ?? ""),
   );
@@ -334,13 +336,27 @@ function MemberDialog({
   const mutation = useMutation({
     mutationFn: async () => {
       if (member === undefined) {
-        if (agentId === "") throw new Error("请选择 AI 成员");
-        const input: CreateProjectMemberInput = {
-          kind: "agent",
-          agentId,
-          responsibility,
-          roleIds,
-        };
+        const input: CreateProjectMemberInput =
+          kind === "agent"
+            ? {
+                kind: "agent",
+                agentId,
+                responsibility,
+                roleIds,
+              }
+            : {
+                kind: "human",
+                actorId,
+                name,
+                responsibility,
+                roleIds,
+              };
+        if (kind === "agent" && agentId === "") {
+          throw new Error("请选择 AI 成员");
+        }
+        if (kind === "human" && (name.trim() === "" || actorId.trim() === "")) {
+          throw new Error("请填写成员名称和 Actor ID");
+        }
         return createProjectMember(projectId, input);
       }
       return updateProjectMember(projectId, member.id, {
@@ -370,7 +386,7 @@ function MemberDialog({
       >
         <div className="pm-modal-head">
           <div>
-            <h2>{member === undefined ? "添加 AI 成员" : "编辑项目成员"}</h2>
+            <h2>{member === undefined ? "添加项目成员" : "编辑项目成员"}</h2>
             <p>设置成员职责、项目角色和在项目中的状态。</p>
           </div>
           <button
@@ -383,26 +399,68 @@ function MemberDialog({
           </button>
         </div>
         <div className="pm-form-grid">
-          {member?.kind === "agent" ? (
+          {member !== undefined && member.kind === "agent" ? (
             <label className="pm-field pm-field-wide">
               <span>AI 伙伴</span>
               <input value={member.name} disabled />
             </label>
-          ) : (
+          ) : member !== undefined && member.kind === "human" ? (
             <label className="pm-field pm-field-wide">
-              <span>AI 伙伴</span>
-              <select
-                autoFocus
-                value={agentId}
-                onChange={(event) => setAgentId(event.target.value)}
-              >
-                {agents.map((agent) => (
-                  <option value={agent.id} key={agent.id}>
-                    {agent.name} · {agent.runtimeKind}
-                  </option>
-                ))}
-              </select>
+              <span>成员</span>
+              <input value={member.name} disabled />
             </label>
+          ) : (
+            <>
+              <label className="pm-field">
+                <span>成员类型</span>
+                <select
+                  value={kind}
+                  onChange={(event) => {
+                    const next = event.target.value as "human" | "agent";
+                    setKind(next);
+                  }}
+                >
+                  <option value="agent">AI 伙伴</option>
+                  <option value="human">人类成员</option>
+                </select>
+              </label>
+              {kind === "agent" ? (
+                <label className="pm-field">
+                  <span>AI 伙伴</span>
+                  <select
+                    autoFocus
+                    value={agentId}
+                    onChange={(event) => setAgentId(event.target.value)}
+                  >
+                    {agents.map((agent) => (
+                      <option value={agent.id} key={agent.id}>
+                        {agent.name} · {agent.runtimeKind}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <>
+                  <label className="pm-field">
+                    <span>成员名称</span>
+                    <input
+                      autoFocus
+                      value={name}
+                      onChange={(event) => setName(event.target.value)}
+                      placeholder="Reviewer"
+                    />
+                  </label>
+                  <label className="pm-field pm-field-wide">
+                    <span>Actor ID</span>
+                    <input
+                      value={actorId}
+                      onChange={(event) => setActorId(event.target.value)}
+                      placeholder="reviewer-1"
+                    />
+                  </label>
+                </>
+              )}
+            </>
           )}
           <label className="pm-field pm-field-wide">
             <span>项目职责</span>
@@ -458,7 +516,11 @@ function MemberDialog({
             className="pm-btn primary"
             type="submit"
             disabled={
-              mutation.isPending || (member === undefined && agentId === "")
+              mutation.isPending ||
+              (member === undefined &&
+                ((kind === "agent" && agentId === "") ||
+                  (kind === "human" &&
+                    (name.trim() === "" || actorId.trim() === ""))))
             }
           >
             {mutation.isPending ? (

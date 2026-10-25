@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type ApiError,
   agentStatusInputSchema,
@@ -14,6 +14,7 @@ import {
   createTaskInputSchema,
   createWorkflowInputSchema,
   completeWorkflowNodeInputSchema,
+  cosignWorkflowApprovalInputSchema,
   decideWorkflowApprovalInputSchema,
   importWorkflowMarkdownInputSchema,
   publishMemoryTruthInputSchema,
@@ -27,7 +28,9 @@ import {
   updateProjectInputSchema,
   updateProjectRoleInputSchema,
   updateTaskInputSchema,
+  transferWorkflowApprovalInputSchema,
   validateWorkflowMarkdownInputSchema,
+  workflowAuditQuerySchema,
   workflowReasonInputSchema,
 } from "@pluginmax/contracts";
 import { ApplicationError, PlatformApplication } from "@pluginmax/application";
@@ -35,6 +38,8 @@ import { Database, PlatformRepositories } from "@pluginmax/database";
 import { LocalFileStore, type FileRef } from "@pluginmax/files";
 import Fastify, {
   type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
   type FastifyServerOptions,
 } from "fastify";
 import { ZodError, z } from "zod";
@@ -129,21 +134,122 @@ function requestIdempotencyKey(
     : undefined;
 }
 
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  return `{${Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
+    .join(",")}}`;
+}
+
+function requestHash(input: unknown): string {
+  return createHash("sha256").update(stableJson(input)).digest("hex");
+}
+
 export function buildApi(options: BuildApiOptions): {
   app: FastifyInstance;
   database: Database;
 } {
   const database = options.database ?? new Database(options.databaseUrl);
   const fileStore = new LocalFileStore(options.fileStoreRoot);
-  const application = new PlatformApplication(
-    new PlatformRepositories(database),
-    fileStore,
-  );
+  const repositories = new PlatformRepositories(database);
+  const application = new PlatformApplication(repositories, fileStore);
   const app = Fastify({
     logger: options.logger ?? true,
     genReqId: () => randomUUID(),
     bodyLimit: 32 * 1024 * 1024,
   });
+
+  async function idempotentRoute<T>(input: {
+    readonly request: FastifyRequest;
+    readonly reply: FastifyReply;
+    readonly scope: string;
+    readonly operation: string;
+    readonly actorId: string;
+    readonly payload: unknown;
+    readonly statusCode: number;
+    readonly execute: () => Promise<T>;
+  }): Promise<FastifyReply> {
+    const key = requestIdempotencyKey(input.request.headers);
+    if (key === undefined) {
+      return input.reply.status(input.statusCode).send(await input.execute());
+    }
+    const hash = requestHash({
+      operation: input.operation,
+      actorId: input.actorId,
+      payload: input.payload,
+    });
+    const begun = await repositories.workflowIdempotency.begin({
+      scope: input.scope,
+      operation: input.operation,
+      idempotencyKey: key,
+      requestHash: hash,
+    });
+    if (begun.kind === "replay") {
+      return input.reply.status(begun.statusCode).send(begun.body);
+    }
+    if (begun.kind === "conflict") {
+      return input.reply
+        .status(409)
+        .send(
+          apiError(
+            String(input.request.id),
+            "idempotency_key_conflict",
+            "The idempotency key was already used with a different request",
+          ),
+        );
+    }
+    if (begun.kind === "in_progress") {
+      return input.reply
+        .status(409)
+        .send(
+          apiError(
+            String(input.request.id),
+            "idempotency_request_in_progress",
+            "An identical idempotent request is still in progress",
+          ),
+        );
+    }
+    try {
+      const result = await input.execute();
+      await repositories.workflowIdempotency.complete({
+        scope: input.scope,
+        idempotencyKey: key,
+        requestHash: hash,
+        statusCode: input.statusCode,
+        body: result,
+      });
+      return input.reply.status(input.statusCode).send(result);
+    } catch (error) {
+      if (error instanceof ApplicationError) {
+        const body = apiError(
+          String(input.request.id),
+          error.code,
+          error.message,
+          error.details,
+        );
+        await repositories.workflowIdempotency.complete({
+          scope: input.scope,
+          idempotencyKey: key,
+          requestHash: hash,
+          statusCode: error.statusCode,
+          body,
+        });
+        return input.reply.status(error.statusCode).send(body);
+      }
+      await repositories.workflowIdempotency.fail({
+        scope: input.scope,
+        idempotencyKey: key,
+        requestHash: hash,
+      });
+      throw error;
+    }
+  }
 
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
@@ -574,16 +680,23 @@ export function buildApi(options: BuildApiOptions): {
   app.post("/api/v1/workflows/:workflowId/start", async (request, reply) => {
     const { workflowId } = workflowParamsSchema.parse(request.params);
     const input = startWorkflowInputSchema.parse(request.body);
-    return reply
-      .status(201)
-      .send(
-        await application.startWorkflow(
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `workflow:${workflowId}`,
+      operation: "workflow.start",
+      actorId,
+      payload: input,
+      statusCode: 201,
+      execute: () =>
+        application.startWorkflow(
           workflowId,
           input,
-          requestActorId(request.headers),
+          actorId,
           requestIdempotencyKey(request.headers),
         ),
-      );
+    });
   });
 
   app.get("/api/v1/workflow-instances", async (request, reply) => {
@@ -594,6 +707,11 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send({
       items: await application.listWorkflowInstances(projectId),
     });
+  });
+
+  app.get("/api/v1/workflow-audit", async (request, reply) => {
+    const query = workflowAuditQuerySchema.parse(request.query);
+    return reply.send(await application.listWorkflowAudit(query));
   });
 
   app.get("/api/v1/workflow-instances/:instanceId", async (request, reply) => {
@@ -615,13 +733,22 @@ export function buildApi(options: BuildApiOptions): {
     "/api/v1/workflow-instances/:instanceId/advance",
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
-      return reply.send(
-        await application.advanceWorkflow(
-          instanceId,
-          requestActorId(request.headers),
-          requestIdempotencyKey(request.headers),
-        ),
-      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.advance",
+        actorId,
+        payload: {},
+        statusCode: 200,
+        execute: () =>
+          application.advanceWorkflow(
+            instanceId,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
     },
   );
 
@@ -629,15 +756,22 @@ export function buildApi(options: BuildApiOptions): {
     "/api/v1/workflow-instances/:instanceId/dispatch",
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
-      return reply
-        .status(202)
-        .send(
-          await application.dispatchWorkflowStep(
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.dispatch",
+        actorId,
+        payload: {},
+        statusCode: 202,
+        execute: () =>
+          application.dispatchWorkflowStep(
             instanceId,
-            requestActorId(request.headers),
+            actorId,
             requestIdempotencyKey(request.headers),
           ),
-        );
+      });
     },
   );
 
@@ -646,14 +780,23 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
       const input = completeWorkflowNodeInputSchema.parse(request.body);
-      return reply.send(
-        await application.completeWorkflowNode(
-          instanceId,
-          input,
-          requestActorId(request.headers),
-          requestIdempotencyKey(request.headers),
-        ),
-      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.node.complete",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.completeWorkflowNode(
+            instanceId,
+            input,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
     },
   );
 
@@ -662,14 +805,73 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
       const input = decideWorkflowApprovalInputSchema.parse(request.body);
-      return reply.send(
-        await application.decideWorkflowApproval(
-          instanceId,
-          input,
-          requestActorId(request.headers),
-          requestIdempotencyKey(request.headers),
-        ),
-      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.approval.decide",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.decideWorkflowApproval(
+            instanceId,
+            input,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/approvals/transfer",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const input = transferWorkflowApprovalInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.approval.transfer",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.transferWorkflowApproval(
+            instanceId,
+            input,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/approvals/cosign",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const input = cosignWorkflowApprovalInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.approval.cosign",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.cosignWorkflowApproval(
+            instanceId,
+            input,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
     },
   );
 
@@ -678,14 +880,23 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
       const input = workflowReasonInputSchema.parse(request.body ?? {});
-      return reply.send(
-        await application.pauseWorkflow(
-          instanceId,
-          input,
-          requestActorId(request.headers),
-          requestIdempotencyKey(request.headers),
-        ),
-      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.pause",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.pauseWorkflow(
+            instanceId,
+            input,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
     },
   );
 
@@ -694,14 +905,23 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
       const input = workflowReasonInputSchema.parse(request.body ?? {});
-      return reply.send(
-        await application.resumeWorkflow(
-          instanceId,
-          input,
-          requestActorId(request.headers),
-          requestIdempotencyKey(request.headers),
-        ),
-      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.resume",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.resumeWorkflow(
+            instanceId,
+            input,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
     },
   );
 
@@ -710,14 +930,23 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
       const input = retryWorkflowNodeInputSchema.parse(request.body);
-      return reply.send(
-        await application.retryWorkflowNode(
-          instanceId,
-          input,
-          requestActorId(request.headers),
-          requestIdempotencyKey(request.headers),
-        ),
-      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.node.retry",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.retryWorkflowNode(
+            instanceId,
+            input,
+            actorId,
+            requestIdempotencyKey(request.headers),
+          ),
+      });
     },
   );
 
@@ -725,12 +954,18 @@ export function buildApi(options: BuildApiOptions): {
     "/api/v1/workflow-instances/:instanceId/reconcile",
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
-      return reply.send(
-        await application.reconcileWorkflowInstance(
-          instanceId,
-          requestActorId(request.headers),
-        ),
-      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `workflow-instance:${instanceId}`,
+        operation: "workflow.reconcile",
+        actorId,
+        payload: {},
+        statusCode: 200,
+        execute: () =>
+          application.reconcileWorkflowInstance(instanceId, actorId),
+      });
     },
   );
 

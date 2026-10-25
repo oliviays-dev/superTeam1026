@@ -196,6 +196,21 @@ export function validateWorkflowMarkdown(
           message: `节点“${raw.name}”的 timeout 必须使用 ms、s、m 或 h 单位`,
         });
       }
+      const retryBackoffValue = raw.fields.get("retry-backoff")?.[0];
+      const retryBackoffSeconds =
+        retryBackoffValue === undefined
+          ? undefined
+          : parseDurationSeconds(retryBackoffValue);
+      if (
+        retryBackoffValue !== undefined &&
+        retryBackoffSeconds === undefined
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_retry_backoff",
+          message: `节点“${raw.name}”的 retry-backoff 必须使用 ms、s、m 或 h 单位`,
+        });
+      }
       const loopLimitValue = raw.fields.get("loop-limit")?.[0];
       const loopLimit =
         loopLimitValue === undefined ? undefined : Number(loopLimitValue);
@@ -261,6 +276,9 @@ export function validateWorkflowMarkdown(
         maxAttempts:
           Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : 1,
         timeoutSeconds: timeoutSeconds ?? 300,
+        ...(retryBackoffSeconds === undefined
+          ? {}
+          : { retryBackoffSeconds }),
         ...(loopLimit === undefined || !Number.isInteger(loopLimit)
           ? {}
           : { loopLimit }),

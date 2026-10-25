@@ -24,7 +24,11 @@ const targetVersion =
   targetValue === undefined || targetValue === ""
     ? Number.POSITIVE_INFINITY
     : Number(targetValue);
-if (!Number.isInteger(targetVersion) && Number.isFinite(targetVersion)) {
+if (
+  targetValue !== undefined &&
+  targetValue !== "" &&
+  (!Number.isInteger(targetVersion) || targetVersion < 1)
+) {
   throw new Error("MIGRATION_TARGET_VERSION must be an integer");
 }
 

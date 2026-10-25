@@ -81,6 +81,7 @@ pnpm test:smoke:collaboration
 pnpm test:smoke:workflow
 pnpm test:smoke:workflow-agent
 pnpm test:smoke:workflow-runtime
+pnpm test:smoke:workflow-governance
 pnpm test:smoke:workflow-postgres
 pnpm test:e2e:browser
 ```
@@ -96,3 +97,5 @@ pnpm test:membership
 See [engineering-platform-v1-technical-design.md](./docs/engineering-platform-v1-technical-design.md).
 Workflow runtime semantics and migration notes are in
 [v1-batch5-workflow-runtime.md](./docs/v1-batch5-workflow-runtime.md).
+Recovery, idempotency and approval governance are documented in
+[v1-batch6-workflow-governance.md](./docs/v1-batch6-workflow-governance.md).

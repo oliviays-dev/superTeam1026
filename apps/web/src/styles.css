@@ -3052,6 +3052,35 @@ code {
   font-size: 10.5px;
 }
 
+.workflow-approval-editor {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(130px, 1fr) auto auto;
+  gap: 6px;
+  padding-top: 7px;
+  border-top: 1px solid var(--pm-border-l2);
+}
+
+.workflow-approval-editor input,
+.workflow-approval-editor select,
+.workflow-audit-filters input,
+.workflow-audit-filters select {
+  min-width: 0;
+  height: 29px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 5px;
+  padding: 0 8px;
+  color: var(--pm-label-primary);
+  background: var(--pm-bg-base);
+  font-size: 10.5px;
+}
+
+.workflow-approval-editor .pm-btn {
+  min-height: 29px;
+  padding-inline: 8px;
+  font-size: 10.5px;
+}
+
 .workflow-node.node-ready {
   border-color: color-mix(in srgb, var(--pm-accent) 36%, transparent);
 }
@@ -3195,6 +3224,65 @@ code {
   gap: 5px;
   max-height: 280px;
   overflow: auto;
+}
+
+.workflow-audit-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+
+.workflow-audit-search {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 5px;
+  background: var(--pm-bg-base);
+}
+
+.workflow-audit-search svg {
+  flex: none;
+  color: var(--pm-label-tertiary);
+}
+
+.workflow-audit-search input {
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.workflow-audit-failure-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--pm-label-secondary);
+  font-size: 10.5px;
+}
+
+.workflow-audit-failure-toggle input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--pm-button-primary);
+}
+
+.workflow-audit-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 6px;
+}
+
+.workflow-audit-pagination span {
+  color: var(--pm-label-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .workflow-approval-list > div,
@@ -3867,6 +3955,16 @@ code {
   .workflow-node-actions {
     grid-column: 2;
     justify-content: flex-start;
+  }
+
+  .workflow-approval-editor,
+  .workflow-audit-filters {
+    grid-column: 2;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workflow-approval-editor {
+    display: grid;
   }
 
   .workflow-branch-grid {
