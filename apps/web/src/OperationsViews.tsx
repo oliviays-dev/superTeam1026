@@ -5,11 +5,13 @@ import type {
   Project,
   WorkflowDefinition,
   WorkflowInstance,
+  WorkflowValidationResult,
 } from "@pluginmax/contracts";
 import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
+  Bot,
   BookOpen,
   CalendarClock,
   CheckCircle2,
@@ -25,6 +27,8 @@ import {
   closeMeeting,
   createMeeting,
   createWorkflow,
+  dispatchWorkflowStep,
+  importWorkflowMarkdown,
   getMeeting,
   getWorkbench,
   listMeetings,
@@ -34,6 +38,7 @@ import {
   listWorkflows,
   postMeetingMessage,
   startWorkflow,
+  validateWorkflowMarkdown,
 } from "./api.js";
 
 interface ProjectViewProps {
@@ -371,6 +376,10 @@ export function WorkflowsView({
   const [name, setName] = useState("");
   const [steps, setSteps] = useState("");
   const [roleId, setRoleId] = useState("");
+  const [markdown, setMarkdown] = useState("");
+  const [validation, setValidation] = useState<WorkflowValidationResult | null>(
+    null,
+  );
   const [instance, setInstance] = useState<WorkflowInstance | null>(null);
   const workflowsQuery = useQuery({
     queryKey: ["workflows", selectedProjectId],
@@ -410,6 +419,26 @@ export function WorkflowsView({
         `${workflow.name} · ${new Date().toLocaleString("zh-CN")}`,
       ),
     onSuccess: setInstance,
+  });
+  const validateMutation = useMutation({
+    mutationFn: () => validateWorkflowMarkdown({ markdown }),
+    onSuccess: setValidation,
+  });
+  const importMutation = useMutation({
+    mutationFn: () =>
+      importWorkflowMarkdown({
+        projectId: selectedProjectId,
+        markdown,
+      }),
+    onSuccess: () => {
+      setMarkdown("");
+      setValidation(null);
+      void queryClient.invalidateQueries({ queryKey: ["workflows"] });
+    },
+  });
+  const dispatchStepMutation = useMutation({
+    mutationFn: () => dispatchWorkflowStep(instance?.id ?? ""),
+    onSuccess: (result) => setInstance(result.instance),
   });
   const advanceMutation = useMutation({
     mutationFn: (workflowInstance: WorkflowInstance) =>
@@ -496,6 +525,68 @@ export function WorkflowsView({
               创建定义
             </button>
           </form>
+          <details className="workflow-markdown-import">
+            <summary>从 Markdown 导入</summary>
+            <textarea
+              rows={8}
+              value={markdown}
+              onChange={(event) => {
+                setMarkdown(event.target.value);
+                setValidation(null);
+              }}
+              placeholder={
+                "# 工作流：发布流程\n\n## 元信息\n- key: release\n- version: 1..."
+              }
+            />
+            <div>
+              <button
+                className="pm-btn secondary"
+                type="button"
+                disabled={markdown.trim() === "" || validateMutation.isPending}
+                onClick={() => validateMutation.mutate()}
+              >
+                校验 Markdown
+              </button>
+              <button
+                className="pm-btn primary"
+                type="button"
+                disabled={
+                  validation?.valid !== true || importMutation.isPending
+                }
+                onClick={() => importMutation.mutate()}
+              >
+                导入定义
+              </button>
+            </div>
+            {validation !== null && (
+              <div
+                className={`workflow-validation${
+                  validation.valid ? " valid" : " invalid"
+                }`}
+              >
+                <strong>
+                  {validation.valid
+                    ? `校验通过 · ${validation.graph?.nodes.length ?? 0} 个节点`
+                    : `${validation.errors.length} 个错误`}
+                </strong>
+                {validation.errors.map((error, index) => (
+                  <span key={`error-${index}`}>
+                    {error.line === undefined ? "" : `第 ${error.line} 行 · `}
+                    {error.message}
+                  </span>
+                ))}
+                {validation.warnings.map((warning, index) => (
+                  <em key={`warning-${index}`}>{warning.message}</em>
+                ))}
+              </div>
+            )}
+            {(validateMutation.error !== null ||
+              importMutation.error !== null) && (
+              <div className="pm-error">
+                {(validateMutation.error ?? importMutation.error)?.message}
+              </div>
+            )}
+          </details>
           <div className="pm-directory-list">
             {workflowsQuery.data?.map((workflow) => (
               <button
@@ -527,15 +618,30 @@ export function WorkflowsView({
               <p>完成当前步骤后推进到下一个节点。</p>
             </div>
             {instance?.status === "active" && (
-              <button
-                className="pm-btn primary"
-                type="button"
-                disabled={advanceMutation.isPending}
-                onClick={() => advanceMutation.mutate(instance)}
-              >
-                <CheckCircle2 size={14} />
-                完成当前步骤
-              </button>
+              <div className="pm-head-actions">
+                {instance.steps[instance.currentStep]?.kind === "agent" &&
+                  instance.steps[instance.currentStep]?.taskId ===
+                    undefined && (
+                    <button
+                      className="pm-btn secondary"
+                      type="button"
+                      disabled={dispatchStepMutation.isPending}
+                      onClick={() => dispatchStepMutation.mutate()}
+                    >
+                      <Bot size={14} />
+                      派发 Agent 节点
+                    </button>
+                  )}
+                <button
+                  className="pm-btn primary"
+                  type="button"
+                  disabled={advanceMutation.isPending}
+                  onClick={() => advanceMutation.mutate(instance)}
+                >
+                  <CheckCircle2 size={14} />
+                  完成当前步骤
+                </button>
+              </div>
             )}
           </div>
           {instance === null ? (
@@ -577,6 +683,12 @@ export function WorkflowsView({
                       <strong>{step.name}</strong>
                       <small>
                         {step.kind === "agent" ? "Agent 步骤" : "人工步骤"}
+                        {step.taskId === undefined
+                          ? ""
+                          : ` · 任务 ${step.taskId.slice(0, 8)}`}
+                        {step.runId === undefined
+                          ? ""
+                          : ` · Run ${step.runId.slice(0, 8)}`}
                       </small>
                     </div>
                     <em>
@@ -589,6 +701,14 @@ export function WorkflowsView({
                   </li>
                 ))}
               </ol>
+              {advanceMutation.error !== null && (
+                <div className="pm-error">{advanceMutation.error.message}</div>
+              )}
+              {dispatchStepMutation.error !== null && (
+                <div className="pm-error">
+                  {dispatchStepMutation.error.message}
+                </div>
+              )}
             </div>
           )}
         </section>

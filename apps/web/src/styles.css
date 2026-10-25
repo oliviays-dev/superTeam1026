@@ -2772,6 +2772,62 @@ code {
   font-size: 11.5px;
 }
 
+.workflow-markdown-import {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 9px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 7px;
+  background: var(--pm-bg-layer-2);
+}
+
+.workflow-markdown-import summary {
+  color: var(--pm-label-secondary);
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.workflow-markdown-import textarea {
+  min-height: 150px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.workflow-markdown-import > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.workflow-validation {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--pm-bg-base);
+  font-size: 10.5px;
+}
+
+.workflow-validation.valid {
+  border-left: 2px solid var(--pm-success);
+}
+
+.workflow-validation.invalid {
+  border-left: 2px solid var(--pm-danger);
+}
+
+.workflow-validation span {
+  color: var(--pm-danger);
+}
+
+.workflow-validation em {
+  color: var(--pm-warning);
+  font-style: normal;
+}
+
 .workflow-empty,
 .meeting-empty {
   min-height: 430px;

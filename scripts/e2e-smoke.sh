@@ -171,6 +171,8 @@ fi
 
 API_BASE="$API_BASE" "$SCRIPT_DIR/dependency-memory-smoke.sh"
 API_BASE="$API_BASE" "$SCRIPT_DIR/task-collaboration-smoke.sh"
+API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-markdown-smoke.sh"
+API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-agent-smoke.sh"
 
 printf 'e2e_smoke=ok\n'
 printf 'agent_id=%s\n' "$agent_id"

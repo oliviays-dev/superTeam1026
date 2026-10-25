@@ -13,6 +13,7 @@ import {
   createTaskMessageInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
+  importWorkflowMarkdownInputSchema,
   publishMemoryTruthInputSchema,
   taskReviewInputSchema,
   uploadTaskAttachmentInputSchema,
@@ -22,6 +23,7 @@ import {
   updateProjectInputSchema,
   updateProjectRoleInputSchema,
   updateTaskInputSchema,
+  validateWorkflowMarkdownInputSchema,
 } from "@pluginmax/contracts";
 import { ApplicationError, PlatformApplication } from "@pluginmax/application";
 import { Database, PlatformRepositories } from "@pluginmax/database";
@@ -93,8 +95,18 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function apiError(requestId: string, code: string, message: string): ApiError {
-  return { requestId, code, message };
+function apiError(
+  requestId: string,
+  code: string,
+  message: string,
+  details?: unknown,
+): ApiError {
+  return {
+    requestId,
+    code,
+    message,
+    ...(details === undefined ? {} : { details }),
+  };
 }
 
 export function buildApi(options: BuildApiOptions): {
@@ -122,7 +134,14 @@ export function buildApi(options: BuildApiOptions): {
     if (error instanceof ApplicationError) {
       return reply
         .status(error.statusCode)
-        .send(apiError(String(request.id), error.code, error.message));
+        .send(
+          apiError(
+            String(request.id),
+            error.code,
+            error.message,
+            error.details,
+          ),
+        );
     }
     const statusCode =
       typeof error === "object" &&
@@ -515,6 +534,18 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send({ items: await application.listWorkflows(projectId) });
   });
 
+  app.post("/api/v1/workflows/validate", async (request, reply) => {
+    const input = validateWorkflowMarkdownInputSchema.parse(request.body);
+    return reply.send(application.validateWorkflowMarkdown(input));
+  });
+
+  app.post("/api/v1/workflows/import", async (request, reply) => {
+    const input = importWorkflowMarkdownInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.importWorkflowMarkdown(input));
+  });
+
   app.post("/api/v1/workflows", async (request, reply) => {
     const input = createWorkflowInputSchema.parse(request.body);
     return reply.status(201).send(await application.createWorkflow(input));
@@ -538,6 +569,16 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
       return reply.send(await application.advanceWorkflow(instanceId));
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/dispatch",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      return reply
+        .status(202)
+        .send(await application.dispatchWorkflowStep(instanceId));
     },
   );
 

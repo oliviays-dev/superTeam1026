@@ -486,3 +486,9 @@ CREATE TABLE IF NOT EXISTS task_attachments (
 CREATE INDEX IF NOT EXISTS task_attachments_task_idx
   ON task_attachments(task_id, created_at DESC);
 `;
+
+export const WORKFLOW_MARKDOWN_SCHEMA_SQL = `
+ALTER TABLE workflow_definitions
+  ADD COLUMN IF NOT EXISTS source_md TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS graph JSONB;
+`;

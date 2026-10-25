@@ -13,6 +13,7 @@ import type {
   CreateTaskInput,
   CreateTaskMessageInput,
   CreateWorkflowInput,
+  ImportWorkflowMarkdownInput,
   Meeting,
   MeetingDetail,
   MeetingMessage,
@@ -34,9 +35,12 @@ import type {
   UpdateProjectInput,
   UpdateProjectRoleInput,
   UpdateTaskInput,
+  ValidateWorkflowMarkdownInput,
   WorkbenchSummary,
   WorkflowDefinition,
   WorkflowInstance,
+  WorkflowStepDefinition,
+  WorkflowValidationResult,
 } from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
@@ -46,6 +50,7 @@ import {
   normalizeProjectRoleIds,
   ProjectMembershipRuleError,
   TaskDependencyRuleError,
+  validateWorkflowMarkdown,
   unresolvedTaskDependencies,
 } from "@pluginmax/domain";
 import type { PlatformRepositories, TaskAttachment } from "@pluginmax/database";
@@ -56,6 +61,7 @@ export class ApplicationError extends Error {
     readonly code: string,
     message: string,
     readonly statusCode = 400,
+    readonly details?: unknown,
   ) {
     super(message);
     this.name = "ApplicationError";
@@ -997,6 +1003,71 @@ export class PlatformApplication {
     return this.repositories.workflows.list(projectId);
   }
 
+  validateWorkflowMarkdown(
+    input: ValidateWorkflowMarkdownInput,
+  ): WorkflowValidationResult {
+    return validateWorkflowMarkdown(input.markdown);
+  }
+
+  async importWorkflowMarkdown(
+    input: ImportWorkflowMarkdownInput,
+  ): Promise<WorkflowDefinition> {
+    const validation = validateWorkflowMarkdown(input.markdown);
+    if (!validation.valid || validation.graph === null) {
+      throw new ApplicationError(
+        "workflow_validation_failed",
+        "Workflow Markdown validation failed",
+        400,
+        validation,
+      );
+    }
+    await this.requireProject(input.projectId);
+    const roles = await this.repositories.projectMemberships.listRoles(
+      input.projectId,
+    );
+    const roleIds = new Set(roles.map((role) => role.id));
+    const steps: WorkflowStepDefinition[] = [];
+    for (const node of validation.graph.nodes) {
+      if (node.executor.kind === "role" && !roleIds.has(node.executor.id)) {
+        throw new ApplicationError(
+          "project_role_not_found",
+          `Workflow role is not in the project: ${node.executor.id}`,
+          400,
+        );
+      }
+      const agent =
+        node.executor.kind === "agent" && isUuid(node.executor.id)
+          ? await this.repositories.agents.get(node.executor.id)
+          : undefined;
+      steps.push({
+        id: randomUUID(),
+        name: node.name,
+        kind:
+          node.executor.kind === "agent" || node.executor.kind === "role"
+            ? "agent"
+            : "human",
+        ...(node.executor.kind === "role" ? { roleId: node.executor.id } : {}),
+        ...(agent === undefined ? {} : { agentId: agent.id }),
+        autoDispatch: node.autoDispatch,
+      });
+    }
+    return this.repositories.workflows.createResolved(
+      {
+        projectId: input.projectId,
+        name: validation.graph.name,
+        description: validation.graph.description,
+        stepNames: validation.graph.nodes.map((node) => node.name),
+        stepRoleIds: [],
+      },
+      [],
+      {
+        sourceMarkdown: input.markdown,
+        graph: validation.graph,
+        steps,
+      },
+    );
+  }
+
   async createWorkflow(
     input: CreateWorkflowInput,
   ): Promise<WorkflowDefinition> {
@@ -1048,7 +1119,93 @@ export class PlatformApplication {
         404,
       );
     }
-    return this.repositories.workflows.start(workflow, title);
+    const instance = await this.repositories.workflows.start(workflow, title);
+    const firstStep = workflow.steps[0];
+    if (firstStep?.kind === "agent" && firstStep.autoDispatch === true) {
+      const dispatched = await this.dispatchWorkflowStep(instance.id);
+      return dispatched.instance;
+    }
+    return instance;
+  }
+
+  async dispatchWorkflowStep(instanceId: string): Promise<{
+    readonly instance: WorkflowInstance;
+    readonly task: Task;
+    readonly runId: string;
+  }> {
+    const instance = await this.getWorkflowInstance(instanceId);
+    if (instance.status !== "active") {
+      throw new ApplicationError(
+        "workflow_not_active",
+        "Workflow instance is not active",
+        409,
+      );
+    }
+    const step = instance.steps[instance.currentStep];
+    if (step === undefined || step.kind !== "agent") {
+      throw new ApplicationError(
+        "workflow_step_not_agent",
+        "The active workflow step is not an Agent step",
+        409,
+      );
+    }
+    if (step.taskId !== undefined) {
+      const existingTask = await this.getTask(step.taskId);
+      return {
+        instance,
+        task: existingTask,
+        runId: step.runId ?? "",
+      };
+    }
+    const workflow = await this.repositories.workflows.get(instance.workflowId);
+    if (workflow === undefined) {
+      throw new ApplicationError(
+        "workflow_not_found",
+        "Workflow not found",
+        404,
+      );
+    }
+    const definition = workflow.steps[instance.currentStep];
+    if (definition === undefined) {
+      throw new ApplicationError(
+        "workflow_step_not_found",
+        "Workflow step definition not found",
+        404,
+      );
+    }
+    const task = await this.createTask({
+      projectId: instance.projectId,
+      title: `${instance.title} · ${step.name}`,
+      description: [
+        `工作流节点：${step.name}`,
+        workflow.description,
+        "完成节点产出后提交任务验收，验收通过后回到工作流推进。",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      acceptance: ["完成节点交付并可供人工验收"],
+      dependsOn: [],
+      ...(definition.roleId === undefined
+        ? definition.agentId === undefined
+          ? {}
+          : { agentId: definition.agentId }
+        : { roleId: definition.roleId }),
+    });
+    const { runId } = await this.dispatchTask(task.id);
+    const updated = await this.repositories.workflows.setStepExecution(
+      instanceId,
+      instance.currentStep,
+      task.id,
+      runId,
+    );
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "workflow_instance_not_found",
+        "Workflow instance not found",
+        404,
+      );
+    }
+    return { instance: updated, task, runId };
   }
 
   async getWorkflowInstance(id: string): Promise<WorkflowInstance> {
@@ -1064,6 +1221,32 @@ export class PlatformApplication {
   }
 
   async advanceWorkflow(id: string): Promise<WorkflowInstance> {
+    const current = await this.getWorkflowInstance(id);
+    const activeStep = current.steps[current.currentStep];
+    if (activeStep?.taskId !== undefined) {
+      const task = await this.getTask(activeStep.taskId);
+      if (task.status !== "done") {
+        throw new ApplicationError(
+          "workflow_gate_blocked",
+          "The linked Agent task must pass review before the workflow can advance",
+          409,
+        );
+      }
+      const completedRun = (
+        await this.repositories.runs.listByTask(task.id)
+      ).find((run) => run.status === "completed");
+      const artifacts =
+        completedRun === undefined
+          ? []
+          : await this.repositories.artifacts.listByRun(completedRun.id);
+      if (completedRun === undefined || artifacts.length === 0) {
+        throw new ApplicationError(
+          "workflow_deliverable_missing",
+          "The linked Agent task must produce a durable deliverable",
+          409,
+        );
+      }
+    }
     const instance = await this.repositories.workflows.advance(id);
     if (instance === undefined) {
       throw new ApplicationError(
@@ -1157,6 +1340,12 @@ function guardTaskDependencyRule(operation: () => void): void {
     }
     throw error;
   }
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 }
 
 export * from "./run-executor.js";

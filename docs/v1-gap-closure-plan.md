@@ -23,6 +23,8 @@
 - 项目 Memory Topic、Claim 状态、Current Truth 版本和来源链。
 - Playwright 浏览器回归和独立依赖/记忆/任务协作 API smoke。
 - 任务评论回复、完整活动时间线和附件上传/下载/归档/复原。
+- 工作流 Markdown 导入、确定性结构校验和 Node/Edge 图持久化。
+- Agent 工作流节点自动派发 Run、人工验收门禁和交付物检查。
 
 ## 2. 待完成
 
@@ -50,10 +52,10 @@
 
 ### 2.4 工作流
 
-- [ ] Markdown 导入和确定性校验。
+- [x] Markdown 导入和确定性校验。
 - [ ] 条件分支、审批、循环和子流程。
-- [ ] Agent 节点自动派发 Run。
-- [ ] 交付物门禁和退回。
+- [x] Agent 节点自动派发 Run。
+- [x] 交付物门禁和退回（Agent Task 验收 + Artifact 检查）。
 
 ### 2.5 会议
 

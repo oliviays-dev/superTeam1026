@@ -20,6 +20,8 @@ The initial implementation provides:
 - Task prerequisite graphs with cycle validation and dispatch gates.
 - Threaded task comments, a durable activity timeline, and task attachments
   with download, archive, and restore.
+- Deterministic workflow Markdown validation/import and Agent-step Run dispatch
+  behind task-review and durable-artifact gates.
 - Workbench metrics, workflow definitions/instances, and meeting rooms.
 
 ## Requirements
@@ -74,6 +76,8 @@ With the isolated API and Web running:
 ```sh
 pnpm test:smoke:dependencies
 pnpm test:smoke:collaboration
+pnpm test:smoke:workflow
+pnpm test:smoke:workflow-agent
 pnpm test:e2e:browser
 ```
 

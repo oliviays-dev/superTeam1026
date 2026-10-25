@@ -213,12 +213,97 @@ export const workbenchSummarySchema = z.object({
 });
 export type WorkbenchSummary = z.infer<typeof workbenchSummarySchema>;
 
+export const workflowNodeTypeSchema = z.enum([
+  "task",
+  "approval",
+  "service",
+  "decision",
+  "subworkflow",
+]);
+export type WorkflowNodeType = z.infer<typeof workflowNodeTypeSchema>;
+
+export const workflowExecutorSchema = z.object({
+  kind: z.enum(["system", "user", "agent", "role"]),
+  id: z.string().trim().min(1).max(180),
+});
+export type WorkflowExecutor = z.infer<typeof workflowExecutorSchema>;
+
+export const workflowGraphNodeSchema = z.object({
+  id: z.string().trim().min(1).max(160),
+  name: z.string().trim().min(1).max(160),
+  type: workflowNodeTypeSchema,
+  executor: workflowExecutorSchema,
+  description: z.string().max(4_000),
+  approvers: z.array(workflowExecutorSchema).max(30),
+  approvalPolicy: z.enum(["all", "any"]),
+  autoDispatch: z.boolean(),
+});
+export type WorkflowGraphNode = z.infer<typeof workflowGraphNodeSchema>;
+
+export const workflowGraphEdgeSchema = z.object({
+  id: z.string(),
+  from: z.string(),
+  to: z.string(),
+  condition: z.string().optional(),
+  result: z.enum(["approved", "rejected"]).optional(),
+  default: z.boolean().optional(),
+  breakCondition: z.string().optional(),
+});
+export type WorkflowGraphEdge = z.infer<typeof workflowGraphEdgeSchema>;
+
+export const workflowGraphSchema = z.object({
+  key: z.string(),
+  version: z.number().int().positive(),
+  name: z.string(),
+  description: z.string(),
+  nodes: z.array(workflowGraphNodeSchema),
+  edges: z.array(workflowGraphEdgeSchema),
+  startNodeIds: z.array(z.string()),
+  warnings: z.array(z.string()),
+});
+export type WorkflowGraph = z.infer<typeof workflowGraphSchema>;
+
+export const workflowValidationIssueSchema = z.object({
+  line: z.number().int().positive().optional(),
+  code: z.string(),
+  message: z.string(),
+});
+export type WorkflowValidationIssue = z.infer<
+  typeof workflowValidationIssueSchema
+>;
+
+export const workflowValidationResultSchema = z.object({
+  valid: z.boolean(),
+  errors: z.array(workflowValidationIssueSchema),
+  warnings: z.array(workflowValidationIssueSchema),
+  graph: workflowGraphSchema.nullable(),
+});
+export type WorkflowValidationResult = z.infer<
+  typeof workflowValidationResultSchema
+>;
+
+export const validateWorkflowMarkdownInputSchema = z.object({
+  markdown: z.string().min(1).max(200_000),
+});
+export type ValidateWorkflowMarkdownInput = z.infer<
+  typeof validateWorkflowMarkdownInputSchema
+>;
+
+export const importWorkflowMarkdownInputSchema = z.object({
+  projectId: z.string().uuid(),
+  markdown: z.string().min(1).max(200_000),
+});
+export type ImportWorkflowMarkdownInput = z.infer<
+  typeof importWorkflowMarkdownInputSchema
+>;
+
 export const workflowStepDefinitionSchema = z.object({
   id: z.string().uuid(),
   name: z.string().trim().min(1).max(160),
   kind: z.enum(["human", "agent"]),
   agentId: z.string().uuid().optional(),
   roleId: z.string().uuid().optional(),
+  autoDispatch: z.boolean().optional(),
 });
 export type WorkflowStepDefinition = z.infer<
   typeof workflowStepDefinitionSchema
@@ -230,6 +315,8 @@ export const workflowDefinitionSchema = z.object({
   name: z.string(),
   description: z.string(),
   steps: z.array(workflowStepDefinitionSchema),
+  sourceMarkdown: z.string(),
+  graph: workflowGraphSchema.nullable(),
   status: z.enum(["active", "archived"]),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
@@ -264,6 +351,8 @@ export const workflowStepStateSchema = z.object({
   kind: z.enum(["human", "agent"]),
   status: z.enum(["pending", "active", "completed"]),
   completedAt: z.string().datetime({ offset: true }).nullable(),
+  taskId: z.string().uuid().optional(),
+  runId: z.string().uuid().optional(),
 });
 export type WorkflowStepState = z.infer<typeof workflowStepStateSchema>;
 

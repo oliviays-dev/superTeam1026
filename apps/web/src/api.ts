@@ -14,6 +14,7 @@ import type {
   CreateProjectInput,
   CreateTaskInput,
   CreateWorkflowInput,
+  ImportWorkflowMarkdownInput,
   Meeting,
   MeetingDetail,
   MeetingMessage,
@@ -37,9 +38,11 @@ import type {
   UpdateProjectInput,
   UpdateProjectRoleInput,
   UpdateTaskInput,
+  ValidateWorkflowMarkdownInput,
   WorkbenchSummary,
   WorkflowDefinition,
   WorkflowInstance,
+  WorkflowValidationResult,
 } from "@pluginmax/contracts";
 
 const API_BASE = "/api/v1";
@@ -401,6 +404,24 @@ export async function listWorkflows(
   ).items;
 }
 
+export function validateWorkflowMarkdown(
+  input: ValidateWorkflowMarkdownInput,
+): Promise<WorkflowValidationResult> {
+  return request("/workflows/validate", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function importWorkflowMarkdown(
+  input: ImportWorkflowMarkdownInput,
+): Promise<WorkflowDefinition> {
+  return request("/workflows/import", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export function createWorkflow(
   input: CreateWorkflowInput,
 ): Promise<WorkflowDefinition> {
@@ -422,6 +443,16 @@ export function startWorkflow(
 
 export function advanceWorkflow(instanceId: string): Promise<WorkflowInstance> {
   return request(`/workflow-instances/${instanceId}/advance`, {
+    method: "POST",
+  });
+}
+
+export function dispatchWorkflowStep(instanceId: string): Promise<{
+  readonly instance: WorkflowInstance;
+  readonly task: Task;
+  readonly runId: string;
+}> {
+  return request(`/workflow-instances/${instanceId}/dispatch`, {
     method: "POST",
   });
 }

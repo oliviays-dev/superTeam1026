@@ -16,6 +16,7 @@ import type {
   UpdateMemoryClaimInput,
   WorkbenchSummary,
   WorkflowDefinition,
+  WorkflowGraph,
   WorkflowInstance,
   WorkflowStepDefinition,
   WorkflowStepState,
@@ -418,6 +419,8 @@ interface WorkflowRow {
   name: string;
   description: string;
   steps: WorkflowStepDefinition[];
+  source_md: string;
+  graph: WorkflowGraph | null;
   status: WorkflowDefinition["status"];
   created_at: Date;
   updated_at: Date;
@@ -453,28 +456,37 @@ export class WorkflowRepository {
   async createResolved(
     input: CreateWorkflowInput,
     stepAgentIds: readonly (string | undefined)[] = [],
+    metadata: {
+      readonly sourceMarkdown?: string;
+      readonly graph?: WorkflowGraph | null;
+      readonly steps?: readonly WorkflowStepDefinition[];
+    } = {},
   ): Promise<WorkflowDefinition> {
-    const steps: WorkflowStepDefinition[] = input.stepNames.map(
-      (name, index) => ({
-        id: randomUUID(),
-        name,
-        kind:
-          input.stepRoleIds[index] !== undefined ||
-          index !== input.stepNames.length - 1
-            ? "agent"
-            : "human",
-        ...(input.stepRoleIds[index] === undefined
-          ? {}
-          : { roleId: input.stepRoleIds[index] }),
-        ...(stepAgentIds[index] === undefined
-          ? {}
-          : { agentId: stepAgentIds[index] }),
-      }),
-    );
+    const steps: WorkflowStepDefinition[] =
+      metadata.steps === undefined
+        ? input.stepNames.map((name, index) => ({
+            id: randomUUID(),
+            name,
+            kind:
+              input.stepRoleIds[index] !== undefined ||
+              index !== input.stepNames.length - 1
+                ? "agent"
+                : "human",
+            ...(input.stepRoleIds[index] === undefined
+              ? {}
+              : { roleId: input.stepRoleIds[index] }),
+            ...(stepAgentIds[index] === undefined
+              ? {}
+              : { agentId: stepAgentIds[index] }),
+          }))
+        : [...metadata.steps];
     const result = await this.database.query<WorkflowRow>(
       `INSERT INTO workflow_definitions (
-         id, project_id, name, description, steps, status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5::jsonb, 'active', NOW(), NOW())
+         id, project_id, name, description, steps, source_md, graph,
+         status, created_at, updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5::jsonb, $6, $7::jsonb, 'active', NOW(), NOW()
+       )
        RETURNING *`,
       [
         randomUUID(),
@@ -482,6 +494,10 @@ export class WorkflowRepository {
         input.name,
         input.description,
         JSON.stringify(steps),
+        metadata.sourceMarkdown ?? "",
+        metadata.graph === undefined || metadata.graph === null
+          ? null
+          : JSON.stringify(metadata.graph),
       ],
     );
     return workflowFromRow(result.rows[0]!);
@@ -560,6 +576,28 @@ export class WorkflowRepository {
       ],
     );
     return workflowInstanceFromRow(result.rows[0]!);
+  }
+
+  async setStepExecution(
+    id: string,
+    stepIndex: number,
+    taskId: string,
+    runId: string,
+  ): Promise<WorkflowInstance | undefined> {
+    const current = await this.getInstance(id);
+    if (current === undefined) return undefined;
+    const steps = current.steps.map((step, index) =>
+      index === stepIndex ? { ...step, taskId, runId } : step,
+    );
+    const result = await this.database.query<WorkflowInstanceRow>(
+      `UPDATE workflow_instances
+       SET steps = $2::jsonb, updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id, JSON.stringify(steps)],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : workflowInstanceFromRow(row);
   }
 }
 
@@ -734,6 +772,8 @@ function workflowFromRow(row: WorkflowRow): WorkflowDefinition {
     name: row.name,
     description: row.description,
     steps: row.steps,
+    sourceMarkdown: row.source_md ?? "",
+    graph: row.graph ?? null,
     status: row.status,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
