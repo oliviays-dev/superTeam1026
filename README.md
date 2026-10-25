@@ -22,6 +22,8 @@ The initial implementation provides:
   with download, archive, and restore.
 - Deterministic workflow Markdown validation/import and Agent-step Run dispatch
   behind task-review and durable-artifact gates.
+- Graph workflow runtime with conditional branches, approvals, controlled loops,
+  subworkflows, timeout recovery, idempotent commands, pause/resume and audit.
 - Workbench metrics, workflow definitions/instances, and meeting rooms.
 
 ## Requirements
@@ -78,6 +80,8 @@ pnpm test:smoke:dependencies
 pnpm test:smoke:collaboration
 pnpm test:smoke:workflow
 pnpm test:smoke:workflow-agent
+pnpm test:smoke:workflow-runtime
+pnpm test:smoke:workflow-postgres
 pnpm test:e2e:browser
 ```
 
@@ -90,3 +94,5 @@ pnpm test:membership
 ## Architecture
 
 See [engineering-platform-v1-technical-design.md](./docs/engineering-platform-v1-technical-design.md).
+Workflow runtime semantics and migration notes are in
+[v1-batch5-workflow-runtime.md](./docs/v1-batch5-workflow-runtime.md).

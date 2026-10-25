@@ -160,6 +160,7 @@
 ```
 
 `subworkflow` 必须是同一工作区已启用的模板 key。省略版本时使用当前 active 版本。
+父子调用链不能出现循环；运行时会同时检查静态引用和实例祖先链。
 
 ## 5. 执行者写法
 
@@ -174,6 +175,7 @@ executor: employee:<Employee ID>
 
 ```text
 - approver: 用户:Alice
+- approver: role:<project-role-id>
 - approver: agent:architect
 - approver: employee:backend-01
 ```
@@ -217,7 +219,7 @@ executor: employee:<Employee ID>
 | --------------- | -------------------- | ---------------------------------------------------------------- |
 | `execution`     | `manual`             | `task-worker` 表示由一次性 Agent 执行；`manual` 继续由人工交付。 |
 | `trigger`       | `manual-dispatch`    | `auto-on-ready` 会在节点就绪后由服务端自动派发。                 |
-| `max-attempts`  | `1`                  | 同一次节点进入最多派发次数，取值 1 到 5。                        |
+| `max-attempts`  | `1`                  | 同一次节点进入最多派发次数，取值 1 到 10。                       |
 | `timeout`       | `30m`                | 单次 Agent 运行超时，支持 `1s` 到 `1h`。                         |
 | `agent-profile` | executor 的 Agent id | 显式指定 Profile；不填时尝试使用 `executor: agent:<id>` 解析。   |
 
@@ -306,7 +308,8 @@ executor: employee:<Employee ID>
 受控循环：
 
 ```md
-- test-failed -> development [break: attempts >= 3]
+- test-failed -> development [condition: visits.development < 3] [break: visits.development >= 3]
+- test-failed -> release [default: true]
 ```
 
 一条边可组合：
@@ -317,12 +320,36 @@ executor: employee:<Employee ID>
 
 ## 7. 循环规则
 
-所有循环必须在至少一条回边上声明 `break`。
+所有循环必须在至少一条回边上声明 `break`，并在循环源节点或目标节点声明
+`loop-limit`。运行时同时检查 break 和硬上限，二者任一触发都会阻塞。
+
+```md
+### 开发
+
+- id: development
+- type: task
+- executor: user:dev
+- loop-limit: 3
+
+### 测试
+
+- id: testing
+- type: decision
+- executor: system:rules
+
+## 连接
+
+- development -> testing
+- testing -> development [condition: visits.development < 3] [break: visits.development >= 3]
+- testing -> release [default: true]
+```
+
+只由环构成的流程可以用 `- start: true` 显式标记起点。
 
 运行时上下文：
 
 - `visits.<nodeId>`：节点累计进入次数；
-- `<nodeId>.attempts`：同一节点的重试次数，首次进入为 1。
+- `<nodeId>.attempts`：兼容别名，值同 `visits.<nodeId>`；首次进入为 1。
 
 示例：
 

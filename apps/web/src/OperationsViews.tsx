@@ -4,17 +4,16 @@ import type {
   MeetingDetail,
   Project,
   WorkflowDefinition,
-  WorkflowInstance,
+  WorkflowInstanceDetail,
+  WorkflowRuntimeNode,
   WorkflowValidationResult,
 } from "@pluginmax/contracts";
 import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
-  Bot,
   BookOpen,
   CalendarClock,
-  CheckCircle2,
   CircleAlert,
   MessageSquare,
   Plus,
@@ -23,11 +22,13 @@ import {
 } from "lucide-react";
 import { useState, type CSSProperties, type ReactNode } from "react";
 import {
-  advanceWorkflow,
   closeMeeting,
+  completeWorkflowNode,
   createMeeting,
   createWorkflow,
+  decideWorkflowApproval,
   dispatchWorkflowStep,
+  getWorkflowInstanceDetail,
   importWorkflowMarkdown,
   getMeeting,
   getWorkbench,
@@ -35,11 +36,17 @@ import {
   listMemory,
   listProjectRoles,
   listTasks,
+  listWorkflowInstances,
   listWorkflows,
+  pauseWorkflow,
   postMeetingMessage,
+  reconcileWorkflow,
+  resumeWorkflow,
+  retryWorkflowNode,
   startWorkflow,
   validateWorkflowMarkdown,
 } from "./api.js";
+import { WorkflowRuntimePanel } from "./WorkflowRuntimePanel.js";
 
 interface ProjectViewProps {
   readonly projects: Project[];
@@ -380,11 +387,23 @@ export function WorkflowsView({
   const [validation, setValidation] = useState<WorkflowValidationResult | null>(
     null,
   );
-  const [instance, setInstance] = useState<WorkflowInstance | null>(null);
+  const [instanceId, setInstanceId] = useState("");
   const workflowsQuery = useQuery({
     queryKey: ["workflows", selectedProjectId],
     queryFn: () => listWorkflows(selectedProjectId),
     enabled: selectedProjectId !== "",
+  });
+  const instancesQuery = useQuery({
+    queryKey: ["workflow-instances", selectedProjectId],
+    queryFn: () => listWorkflowInstances(selectedProjectId),
+    enabled: selectedProjectId !== "",
+    refetchInterval: 4_000,
+  });
+  const detailQuery = useQuery({
+    queryKey: ["workflow-instance-detail", instanceId],
+    queryFn: () => getWorkflowInstanceDetail(instanceId),
+    enabled: instanceId !== "",
+    refetchInterval: 2_000,
   });
   const rolesQuery = useQuery({
     queryKey: ["project-roles", selectedProjectId],
@@ -418,7 +437,10 @@ export function WorkflowsView({
         workflow.id,
         `${workflow.name} · ${new Date().toLocaleString("zh-CN")}`,
       ),
-    onSuccess: setInstance,
+    onSuccess: (instance) => {
+      setInstanceId(instance.id);
+      void queryClient.invalidateQueries({ queryKey: ["workflow-instances"] });
+    },
   });
   const validateMutation = useMutation({
     mutationFn: () => validateWorkflowMarkdown({ markdown }),
@@ -436,18 +458,76 @@ export function WorkflowsView({
       void queryClient.invalidateQueries({ queryKey: ["workflows"] });
     },
   });
-  const dispatchStepMutation = useMutation({
-    mutationFn: () => dispatchWorkflowStep(instance?.id ?? ""),
-    onSuccess: (result) => setInstance(result.instance),
+  const completeMutation = useMutation({
+    mutationFn: (node: WorkflowRuntimeNode) =>
+      completeWorkflowNode(instanceId, {
+        nodeId: node.nodeId,
+        output: "界面人工确认完成",
+      }),
+    onSuccess: refreshWorkflowQueries,
   });
-  const advanceMutation = useMutation({
-    mutationFn: (workflowInstance: WorkflowInstance) =>
-      advanceWorkflow(workflowInstance.id),
-    onSuccess: (result) => {
-      setInstance(result);
-      void queryClient.invalidateQueries({ queryKey: ["workbench-summary"] });
-    },
+  const approvalMutation = useMutation({
+    mutationFn: (input: {
+      readonly node: WorkflowRuntimeNode;
+      readonly decision: "approve" | "reject";
+    }) =>
+      decideWorkflowApproval(instanceId, {
+        nodeId: input.node.nodeId,
+        decision: input.decision,
+        note: input.decision === "approve" ? "界面审批通过" : "界面审批拒绝",
+      }),
+    onSuccess: refreshWorkflowQueries,
   });
+  const retryMutation = useMutation({
+    mutationFn: (node: WorkflowRuntimeNode) =>
+      retryWorkflowNode(instanceId, {
+        nodeId: node.nodeId,
+        reason: "界面人工重试",
+      }),
+    onSuccess: refreshWorkflowQueries,
+  });
+  const dispatchMutation = useMutation({
+    mutationFn: () => dispatchWorkflowStep(instanceId),
+    onSuccess: refreshWorkflowQueries,
+  });
+  const pauseMutation = useMutation({
+    mutationFn: () => pauseWorkflow(instanceId, { reason: "界面暂停" }),
+    onSuccess: refreshWorkflowQueries,
+  });
+  const resumeMutation = useMutation({
+    mutationFn: () => resumeWorkflow(instanceId, { reason: "界面恢复" }),
+    onSuccess: refreshWorkflowQueries,
+  });
+  const reconcileMutation = useMutation({
+    mutationFn: () => reconcileWorkflow(instanceId),
+    onSuccess: refreshWorkflowQueries,
+  });
+  const panelPending =
+    completeMutation.isPending ||
+    approvalMutation.isPending ||
+    retryMutation.isPending ||
+    dispatchMutation.isPending ||
+    pauseMutation.isPending ||
+    resumeMutation.isPending ||
+    reconcileMutation.isPending;
+
+  function refreshWorkflowQueries() {
+    void queryClient.invalidateQueries({
+      queryKey: ["workflow-instance-detail", instanceId],
+    });
+    void queryClient.invalidateQueries({ queryKey: ["workflow-instances"] });
+    void queryClient.invalidateQueries({ queryKey: ["workbench-summary"] });
+  }
+  const detail: WorkflowInstanceDetail | undefined = detailQuery.data;
+  const panelError =
+    detailQuery.error ??
+    completeMutation.error ??
+    approvalMutation.error ??
+    retryMutation.error ??
+    dispatchMutation.error ??
+    pauseMutation.error ??
+    resumeMutation.error ??
+    reconcileMutation.error;
 
   return (
     <main className="pm-page">
@@ -462,7 +542,7 @@ export function WorkflowsView({
           value={selectedProjectId}
           onChange={(event) => {
             onProjectChange(event.target.value);
-            setInstance(null);
+            setInstanceId("");
           }}
         >
           {projects.map((project) => (
@@ -609,107 +689,72 @@ export function WorkflowsView({
               <div className="pm-empty compact">尚未创建工作流</div>
             )}
           </div>
+          <div className="pm-directory-label">
+            <span>运行实例</span>
+            <b>{instancesQuery.data?.length ?? 0}</b>
+          </div>
+          <div className="pm-directory-list workflow-instance-list">
+            {instancesQuery.data?.map((workflowInstance) => (
+              <button
+                className={`pm-directory-row ${
+                  workflowInstance.id === instanceId ? "active" : ""
+                }`}
+                type="button"
+                key={workflowInstance.id}
+                onClick={() => setInstanceId(workflowInstance.id)}
+              >
+                <span className="pm-directory-mark">
+                  <Workflow size={13} />
+                </span>
+                <span className="pm-directory-copy">
+                  <strong>{workflowInstance.title}</strong>
+                  <small>
+                    {workflowInstance.status} ·{" "}
+                    {formatDateTime(workflowInstance.updatedAt)}
+                  </small>
+                </span>
+                <ArrowRight size={13} />
+              </button>
+            ))}
+            {instancesQuery.data?.length === 0 && (
+              <div className="pm-empty compact">尚未启动运行实例</div>
+            )}
+          </div>
         </section>
 
         <section className="pm-panel workflow-runtime">
           <div className="pm-section-head">
             <div>
               <h2>运行实例</h2>
-              <p>完成当前步骤后推进到下一个节点。</p>
+              <p>节点状态、分支、审批和运行审计集中展示。</p>
             </div>
-            {instance?.status === "active" && (
-              <div className="pm-head-actions">
-                {instance.steps[instance.currentStep]?.kind === "agent" &&
-                  instance.steps[instance.currentStep]?.taskId ===
-                    undefined && (
-                    <button
-                      className="pm-btn secondary"
-                      type="button"
-                      disabled={dispatchStepMutation.isPending}
-                      onClick={() => dispatchStepMutation.mutate()}
-                    >
-                      <Bot size={14} />
-                      派发 Agent 节点
-                    </button>
-                  )}
-                <button
-                  className="pm-btn primary"
-                  type="button"
-                  disabled={advanceMutation.isPending}
-                  onClick={() => advanceMutation.mutate(instance)}
-                >
-                  <CheckCircle2 size={14} />
-                  完成当前步骤
-                </button>
-              </div>
-            )}
+            <span className="pm-pill">
+              {instancesQuery.data?.length ?? 0} 个实例
+            </span>
           </div>
-          {instance === null ? (
+          {detail === undefined ? (
             <div className="pm-empty workflow-empty">
               <Workflow size={28} />
-              <strong>选择一个工作流开始运行</strong>
-              <span>运行进度会保留在实例中。</span>
+              <strong>选择定义或实例</strong>
+              <span>运行进度、审批和审计会保留在实例中。</span>
             </div>
           ) : (
-            <div className="workflow-instance">
-              <div className="instance-head">
-                <div>
-                  <strong>{instance.title}</strong>
-                  <span>
-                    {instance.status === "completed" ? "已完成" : "运行中"} ·{" "}
-                    {formatDateTime(instance.updatedAt)}
-                  </span>
-                </div>
-                <span
-                  className={`pm-pill ${instance.status === "completed" ? "done" : "progress"}`}
-                >
-                  {instance.status === "completed" ? "已完成" : "运行中"}
-                </span>
-              </div>
-              <ol className="workflow-steps">
-                {instance.steps.map((step, index) => (
-                  <li
-                    className={`workflow-step step-${step.status}`}
-                    key={step.stepId}
-                  >
-                    <span>
-                      {step.status === "completed" ? (
-                        <CheckCircle2 size={13} />
-                      ) : (
-                        index + 1
-                      )}
-                    </span>
-                    <div>
-                      <strong>{step.name}</strong>
-                      <small>
-                        {step.kind === "agent" ? "Agent 步骤" : "人工步骤"}
-                        {step.taskId === undefined
-                          ? ""
-                          : ` · 任务 ${step.taskId.slice(0, 8)}`}
-                        {step.runId === undefined
-                          ? ""
-                          : ` · Run ${step.runId.slice(0, 8)}`}
-                      </small>
-                    </div>
-                    <em>
-                      {step.status === "completed"
-                        ? "已完成"
-                        : step.status === "active"
-                          ? "当前"
-                          : "等待"}
-                    </em>
-                  </li>
-                ))}
-              </ol>
-              {advanceMutation.error !== null && (
-                <div className="pm-error">{advanceMutation.error.message}</div>
-              )}
-              {dispatchStepMutation.error !== null && (
-                <div className="pm-error">
-                  {dispatchStepMutation.error.message}
-                </div>
-              )}
-            </div>
+            <WorkflowRuntimePanel
+              detail={detail}
+              pending={panelPending}
+              onComplete={(node) => completeMutation.mutate(node)}
+              onDispatch={() => dispatchMutation.mutate()}
+              onApproval={(node, decision) =>
+                approvalMutation.mutate({ node, decision })
+              }
+              onRetry={(node) => retryMutation.mutate(node)}
+              onPause={() => pauseMutation.mutate()}
+              onResume={() => resumeMutation.mutate()}
+              onReconcile={() => reconcileMutation.mutate()}
+            />
+          )}
+          {panelError !== null && (
+            <div className="pm-error">{panelError.message}</div>
           )}
         </section>
       </div>

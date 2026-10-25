@@ -67,6 +67,14 @@ export function App() {
     window.localStorage.setItem("pluginmax.theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    const syncSidebar = () => {
+      if (window.innerWidth < 760) setLeftOpen(false);
+    };
+    window.addEventListener("resize", syncSidebar);
+    return () => window.removeEventListener("resize", syncSidebar);
+  }, []);
+
   const openTask = (nextTaskId: string, nextProjectId: string) => {
     setProjectId(nextProjectId);
     setTaskId(nextTaskId);

@@ -10,6 +10,8 @@ import type {
   CreateProjectMemberInput,
   CreateProjectRoleInput,
   CreateTaskMessageInput,
+  CompleteWorkflowNodeInput,
+  DecideWorkflowApprovalInput,
   ArchiveTaskAttachmentInput,
   CreateProjectInput,
   CreateTaskInput,
@@ -25,6 +27,7 @@ import type {
   ProjectMember,
   ProjectRole,
   PublishMemoryTruthInput,
+  RetryWorkflowNodeInput,
   Run,
   RunDelta,
   RunDetail,
@@ -42,6 +45,8 @@ import type {
   WorkbenchSummary,
   WorkflowDefinition,
   WorkflowInstance,
+  WorkflowInstanceDetail,
+  WorkflowReasonInput,
   WorkflowValidationResult,
 } from "@pluginmax/contracts";
 
@@ -434,10 +439,91 @@ export function createWorkflow(
 export function startWorkflow(
   workflowId: string,
   title: string,
+  context: Record<string, string | number | boolean | null> = {},
 ): Promise<WorkflowInstance> {
   return request(`/workflows/${workflowId}/start`, {
     method: "POST",
-    body: JSON.stringify({ title }),
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({ title, context }),
+  });
+}
+
+export async function listWorkflowInstances(
+  projectId: string,
+): Promise<WorkflowInstance[]> {
+  return (
+    await request<ListResponse<WorkflowInstance>>(
+      `/workflow-instances?projectId=${encodeURIComponent(projectId)}`,
+    )
+  ).items;
+}
+
+export function getWorkflowInstanceDetail(
+  instanceId: string,
+): Promise<WorkflowInstanceDetail> {
+  return request(`/workflow-instances/${instanceId}/detail`);
+}
+
+export function completeWorkflowNode(
+  instanceId: string,
+  input: CompleteWorkflowNodeInput,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/nodes/complete`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function decideWorkflowApproval(
+  instanceId: string,
+  input: DecideWorkflowApprovalInput,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/approvals`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function pauseWorkflow(
+  instanceId: string,
+  input: WorkflowReasonInput,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/pause`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function resumeWorkflow(
+  instanceId: string,
+  input: WorkflowReasonInput,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/resume`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function retryWorkflowNode(
+  instanceId: string,
+  input: RetryWorkflowNodeInput,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/retry`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function reconcileWorkflow(
+  instanceId: string,
+): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/reconcile`, {
+    method: "POST",
   });
 }
 
