@@ -5,6 +5,8 @@ import type {
   Artifact,
   CreateAgentInput,
   CreateMeetingInput,
+  CreateMemoryClaimInput,
+  CreateMemoryTopicInput,
   CreateProjectMemberInput,
   CreateProjectInput,
   CreateProjectRoleInput,
@@ -14,10 +16,12 @@ import type {
   Meeting,
   MeetingDetail,
   MeetingMessage,
+  MemoryClaim,
   MemoryTopic,
   Project,
   ProjectMember,
   ProjectRole,
+  PublishMemoryTruthInput,
   RunDetail,
   RunInputSnapshot,
   Task,
@@ -25,6 +29,7 @@ import type {
   TaskMessage,
   TaskReviewInput,
   UpdateAgentInput,
+  UpdateMemoryClaimInput,
   UpdateProjectMemberInput,
   UpdateProjectInput,
   UpdateProjectRoleInput,
@@ -35,10 +40,13 @@ import type {
 } from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
+  assertValidTaskDependencies,
   canTransitionTask,
   isTerminalRunStatus,
   normalizeProjectRoleIds,
   ProjectMembershipRuleError,
+  TaskDependencyRuleError,
+  unresolvedTaskDependencies,
 } from "@pluginmax/domain";
 import type { PlatformRepositories } from "@pluginmax/database";
 
@@ -397,9 +405,21 @@ export class PlatformApplication {
   }
 
   async getTaskDetail(id: string): Promise<TaskDetail> {
+    const task = await this.getTask(id);
+    const projectTasks = await this.repositories.tasks.list(task.projectId);
     return {
-      task: await this.getTask(id),
+      task,
       messages: await this.repositories.tasks.listMessages(id),
+      dependencies: task.dependsOn.map((dependencyId) => {
+        const dependency = projectTasks.find(
+          (candidate) => candidate.id === dependencyId,
+        );
+        return {
+          id: dependencyId,
+          title: dependency?.title ?? "已失效的前置任务",
+          status: dependency?.status ?? "cancelled",
+        };
+      }),
     };
   }
 
@@ -408,14 +428,22 @@ export class PlatformApplication {
     if (project === undefined) {
       throw new ApplicationError("project_not_found", "Project not found", 404);
     }
-    const agent =
-      input.agentId === undefined
-        ? await this.repositories.agents.default()
-        : await this.repositories.agents.get(input.agentId);
-    if (agent === undefined) {
-      throw new ApplicationError("agent_not_found", "Agent not found", 404);
-    }
-    return this.repositories.tasks.create(input, agent.id);
+    const projectTasks = await this.repositories.tasks.list(input.projectId);
+    const candidateTaskId = randomUUID();
+    guardTaskDependencyRule(() =>
+      assertValidTaskDependencies({
+        taskId: candidateTaskId,
+        projectId: input.projectId,
+        dependsOn: input.dependsOn,
+        tasks: projectTasks,
+      }),
+    );
+    const assignee = await this.resolveTaskAssignee(input);
+    return this.repositories.tasks.create(
+      input,
+      assignee.agentId,
+      assignee.roleId,
+    );
   }
 
   async listTaskRuns(taskId: string) {
@@ -424,6 +452,20 @@ export class PlatformApplication {
   }
 
   async updateTask(id: string, input: UpdateTaskInput): Promise<TaskDetail> {
+    const existing = await this.getTask(id);
+    if (input.dependsOn !== undefined) {
+      const projectTasks = await this.repositories.tasks.list(
+        existing.projectId,
+      );
+      guardTaskDependencyRule(() =>
+        assertValidTaskDependencies({
+          taskId: id,
+          projectId: existing.projectId,
+          dependsOn: input.dependsOn!,
+          tasks: projectTasks,
+        }),
+      );
+    }
     const task = await this.repositories.tasks.update(id, input);
     if (task === undefined) {
       throw new ApplicationError("task_not_found", "Task not found", 404);
@@ -472,6 +514,15 @@ export class PlatformApplication {
         409,
       );
     }
+    const projectTasks = await this.repositories.tasks.list(task.projectId);
+    const unresolved = unresolvedTaskDependencies(task, projectTasks);
+    if (unresolved.length > 0) {
+      throw new ApplicationError(
+        "task_dependencies_unresolved",
+        "All prerequisite tasks must be done before dispatch",
+        409,
+      );
+    }
 
     const inputSnapshot: RunInputSnapshot = {
       taskTitle: task.title,
@@ -490,6 +541,49 @@ export class PlatformApplication {
       { inputSnapshot },
     );
     return { runId };
+  }
+
+  private async resolveTaskAssignee(input: CreateTaskInput): Promise<{
+    readonly agentId: string;
+    readonly roleId?: string;
+  }> {
+    if (input.roleId !== undefined) {
+      const roles = await this.repositories.projectMemberships.listRoles(
+        input.projectId,
+      );
+      if (!roles.some((role) => role.id === input.roleId)) {
+        throw new ApplicationError(
+          "project_role_not_found",
+          "Project role not found",
+          404,
+        );
+      }
+      const members = await this.repositories.projectMemberships.listMembers(
+        input.projectId,
+      );
+      const agentMember = members.find(
+        (member) =>
+          member.kind === "agent" &&
+          member.status === "active" &&
+          member.roles.some((role) => role.id === input.roleId),
+      );
+      if (agentMember === undefined) {
+        throw new ApplicationError(
+          "project_role_has_no_agent",
+          "The selected project role has no active AI member",
+          409,
+        );
+      }
+      return { agentId: agentMember.actorId, roleId: input.roleId };
+    }
+    const agent =
+      input.agentId === undefined
+        ? await this.repositories.agents.default()
+        : await this.repositories.agents.get(input.agentId);
+    if (agent === undefined) {
+      throw new ApplicationError("agent_not_found", "Agent not found", 404);
+    }
+    return { agentId: agent.id };
   }
 
   async getRunDetail(runId: string): Promise<RunDetail> {
@@ -595,6 +689,107 @@ export class PlatformApplication {
     return this.repositories.memory.list(projectId);
   }
 
+  async createMemoryTopic(
+    projectId: string,
+    input: CreateMemoryTopicInput,
+  ): Promise<MemoryTopic> {
+    await this.requireProject(projectId);
+    return this.repositories.memory.createTopic(projectId, input);
+  }
+
+  async addMemoryClaim(
+    projectId: string,
+    topicId: string,
+    input: CreateMemoryClaimInput,
+  ): Promise<MemoryClaim> {
+    await this.requireProject(projectId);
+    try {
+      return await this.repositories.memory.addClaim(projectId, topicId, input);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "memory topic not found"
+      ) {
+        throw new ApplicationError(
+          "memory_topic_not_found",
+          "Memory topic not found",
+          404,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async updateMemoryClaim(
+    projectId: string,
+    topicId: string,
+    claimId: string,
+    input: UpdateMemoryClaimInput,
+  ): Promise<MemoryClaim> {
+    await this.requireProject(projectId);
+    const claim = await this.repositories.memory.updateClaim(
+      projectId,
+      topicId,
+      claimId,
+      input,
+    );
+    if (claim === undefined) {
+      throw new ApplicationError(
+        "memory_claim_not_found",
+        "Memory claim not found",
+        404,
+      );
+    }
+    return claim;
+  }
+
+  async publishMemoryTruth(
+    projectId: string,
+    topicId: string,
+    input: PublishMemoryTruthInput,
+  ): Promise<MemoryTopic> {
+    await this.requireProject(projectId);
+    try {
+      return await this.repositories.memory.publishTruth(
+        projectId,
+        topicId,
+        input,
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "memory topic not found"
+      ) {
+        throw new ApplicationError(
+          "memory_topic_not_found",
+          "Memory topic not found",
+          404,
+        );
+      }
+      if (
+        error instanceof Error &&
+        error.message === "memory claim scope mismatch"
+      ) {
+        throw new ApplicationError(
+          "memory_claim_scope_mismatch",
+          "All selected claims must belong to this topic",
+          400,
+        );
+      }
+      if (
+        error instanceof Error &&
+        error.message === "rejected memory claims cannot form current truth"
+      ) {
+        throw new ApplicationError(
+          "memory_claim_rejected",
+          "Rejected claims cannot form current truth",
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
   async getWorkbench(): Promise<WorkbenchSummary> {
     return this.repositories.workbench.summary();
   }
@@ -611,8 +806,43 @@ export class PlatformApplication {
     return this.repositories.workflows.list(projectId);
   }
 
-  createWorkflow(input: CreateWorkflowInput): Promise<WorkflowDefinition> {
-    return this.repositories.workflows.create(input);
+  async createWorkflow(
+    input: CreateWorkflowInput,
+  ): Promise<WorkflowDefinition> {
+    const stepAgentIds: Array<string | undefined> = [];
+    if (input.stepRoleIds.length > 0) {
+      const roles = await this.repositories.projectMemberships.listRoles(
+        input.projectId,
+      );
+      const roleIds = new Set(roles.map((role) => role.id));
+      if (input.stepRoleIds.some((roleId) => !roleIds.has(roleId))) {
+        throw new ApplicationError(
+          "project_role_scope_mismatch",
+          "Workflow step roles must belong to the project",
+          400,
+        );
+      }
+      const members = await this.repositories.projectMemberships.listMembers(
+        input.projectId,
+      );
+      for (const roleId of input.stepRoleIds) {
+        const member = members.find(
+          (candidate) =>
+            candidate.kind === "agent" &&
+            candidate.status === "active" &&
+            candidate.roles.some((role) => role.id === roleId),
+        );
+        if (member === undefined) {
+          throw new ApplicationError(
+            "project_role_has_no_agent",
+            "Every workflow role needs an active AI member",
+            409,
+          );
+        }
+        stepAgentIds.push(member.actorId);
+      }
+    }
+    return this.repositories.workflows.createResolved(input, stepAgentIds);
   }
 
   async startWorkflow(
@@ -715,6 +945,23 @@ function guardMembershipRule(operation: () => void): void {
         "project_role_scope_mismatch",
         error.message,
         400,
+      );
+    }
+    throw error;
+  }
+}
+
+function guardTaskDependencyRule(operation: () => void): void {
+  try {
+    operation();
+  } catch (error) {
+    if (error instanceof TaskDependencyRuleError) {
+      throw new ApplicationError(
+        error.code,
+        error.path.length === 0
+          ? error.message
+          : `${error.message}: ${error.path.join(" -> ")}`,
+        409,
       );
     }
     throw error;

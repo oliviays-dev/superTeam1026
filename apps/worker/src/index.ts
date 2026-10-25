@@ -20,6 +20,7 @@ const executor = new RunExecutor(repositories, {
 });
 const workerId = `worker-${randomUUID()}`;
 let stopping = false;
+let closing = false;
 
 const sleep = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -37,6 +38,8 @@ const log = (event: string, data: Record<string, unknown> = {}) => {
 };
 
 const stop = async () => {
+  if (closing) return;
+  closing = true;
   stopping = true;
   await database.close();
 };

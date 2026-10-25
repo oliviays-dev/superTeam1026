@@ -401,3 +401,46 @@ WHERE member.kind = 'human'
   AND member.actor_id = 'local-admin'
 ON CONFLICT DO NOTHING;
 `;
+
+export const TASK_DEPENDENCY_MEMORY_SCHEMA_SQL = `
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS role_id UUID REFERENCES project_roles(id)
+    ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS task_dependencies (
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  depends_on_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (task_id, depends_on_task_id),
+  CHECK (task_id <> depends_on_task_id)
+);
+
+CREATE INDEX IF NOT EXISTS task_dependencies_prerequisite_idx
+  ON task_dependencies(depends_on_task_id);
+
+CREATE TABLE IF NOT EXISTS memory_claims (
+  id UUID PRIMARY KEY,
+  topic_id UUID NOT NULL REFERENCES memory_topics(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'proposed'
+    CHECK (status IN ('proposed', 'confirmed', 'rejected')),
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS memory_claims_topic_idx
+  ON memory_claims(topic_id, created_at);
+
+CREATE TABLE IF NOT EXISTS memory_truth_claims (
+  truth_id UUID NOT NULL REFERENCES memory_truths(id) ON DELETE CASCADE,
+  claim_id UUID NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
+  PRIMARY KEY (truth_id, claim_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_truth_topic_version_idx
+  ON memory_truths(topic_id, version);
+`;

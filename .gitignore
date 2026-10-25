@@ -16,3 +16,5 @@ profile/dsh.profile.bundles.json
 .env.local
 data/
 *.log
+playwright-report/
+test-results/

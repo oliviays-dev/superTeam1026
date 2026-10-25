@@ -5,6 +5,8 @@ import type {
   ContextPack,
   ContextReceipt,
   CreateAgentInput,
+  CreateMemoryClaimInput,
+  CreateMemoryTopicInput,
   CreateProjectMemberInput,
   CreateProjectRoleInput,
   CreateTaskMessageInput,
@@ -14,11 +16,13 @@ import type {
   Meeting,
   MeetingDetail,
   MeetingMessage,
+  MemoryClaim,
   MemoryTopic,
   PlatformRunEvent,
   Project,
   ProjectMember,
   ProjectRole,
+  PublishMemoryTruthInput,
   Run,
   RunDelta,
   RunDetail,
@@ -26,6 +30,7 @@ import type {
   TaskDetail,
   TaskMessage,
   UpdateAgentInput,
+  UpdateMemoryClaimInput,
   UpdateProjectMemberInput,
   UpdateProjectInput,
   UpdateProjectRoleInput,
@@ -301,6 +306,53 @@ export async function listMemory(projectId: string): Promise<MemoryTopic[]> {
   return (
     await request<ListResponse<MemoryTopic>>(`/projects/${projectId}/memory`)
   ).items;
+}
+
+export function createMemoryTopic(
+  projectId: string,
+  input: CreateMemoryTopicInput,
+): Promise<MemoryTopic> {
+  return request(`/projects/${projectId}/memory/topics`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function addMemoryClaim(
+  projectId: string,
+  topicId: string,
+  input: CreateMemoryClaimInput,
+): Promise<MemoryClaim> {
+  return request(`/projects/${projectId}/memory/topics/${topicId}/claims`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateMemoryClaim(
+  projectId: string,
+  topicId: string,
+  claimId: string,
+  input: UpdateMemoryClaimInput,
+): Promise<MemoryClaim> {
+  return request(
+    `/projects/${projectId}/memory/topics/${topicId}/claims/${claimId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function publishMemoryTruth(
+  projectId: string,
+  topicId: string,
+  input: PublishMemoryTruthInput,
+): Promise<MemoryTopic> {
+  return request(`/projects/${projectId}/memory/topics/${topicId}/truths`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function getWorkbench(): Promise<WorkbenchSummary> {

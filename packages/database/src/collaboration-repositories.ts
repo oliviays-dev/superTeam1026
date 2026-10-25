@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 import type {
   Artifact,
   CreateMeetingInput,
+  CreateMemoryClaimInput,
+  CreateMemoryTopicInput,
   CreateWorkflowInput,
   Meeting,
   MeetingDetail,
   MeetingMessage,
+  MemoryClaim,
   MemoryTopic,
   MemoryTruth,
+  PublishMemoryTruthInput,
   TaskReviewInput,
+  UpdateMemoryClaimInput,
   WorkbenchSummary,
   WorkflowDefinition,
   WorkflowInstance,
@@ -82,7 +87,27 @@ interface MemoryTopicRow {
   title: string;
   created_at: Date;
   updated_at: Date;
-  current_truth: MemoryTruth | null;
+}
+
+interface MemoryClaimRow {
+  id: string;
+  topic_id: string;
+  content: string;
+  status: MemoryClaim["status"];
+  source_type: string;
+  source_id: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface MemoryTruthRow {
+  id: string;
+  topic_id: string;
+  content: string;
+  version: number;
+  source_type: string;
+  source_id: string;
+  created_at: Date;
 }
 
 export class MemoryRepository {
@@ -96,19 +121,19 @@ export class MemoryRepository {
   }): Promise<void> {
     await this.database.transaction(async (client) => {
       const topicId = randomUUID();
-      const truth: MemoryTruth = {
-        id: randomUUID(),
-        topicId,
-        content: input.content,
-        version: 1,
-        sourceType: "task",
-        sourceId: input.taskId,
-        createdAt: new Date().toISOString(),
-      };
+      const claimId = randomUUID();
+      const truthId = randomUUID();
       await client.query(
         `INSERT INTO memory_topics (id, project_id, title, created_at, updated_at)
          VALUES ($1, $2, $3, NOW(), NOW())`,
         [topicId, input.projectId, input.title],
+      );
+      await client.query(
+        `INSERT INTO memory_claims (
+           id, topic_id, project_id, content, status,
+           source_type, source_id, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, 'confirmed', 'task', $5, NOW(), NOW())`,
+        [claimId, topicId, input.projectId, input.content, input.taskId],
       );
       await client.query(
         `INSERT INTO memory_truths (
@@ -116,53 +141,258 @@ export class MemoryRepository {
            source_type, source_id, created_at
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
-          truth.id,
+          truthId,
           topicId,
           input.projectId,
-          truth.content,
-          truth.version,
-          truth.sourceType,
-          truth.sourceId,
-          truth.createdAt,
+          input.content,
+          1,
+          "task",
+          input.taskId,
+          new Date().toISOString(),
         ],
+      );
+      await client.query(
+        `INSERT INTO memory_truth_claims (truth_id, claim_id)
+         VALUES ($1, $2)`,
+        [truthId, claimId],
       );
     });
   }
 
-  async list(projectId: string): Promise<MemoryTopic[]> {
+  async createTopic(
+    projectId: string,
+    input: CreateMemoryTopicInput,
+  ): Promise<MemoryTopic> {
     const result = await this.database.query<MemoryTopicRow>(
-      `SELECT
-         topic.*,
-         truth_row AS current_truth
-       FROM memory_topics AS topic
-       LEFT JOIN LATERAL (
-         SELECT jsonb_build_object(
-           'id', truth.id,
-           'topicId', truth.topic_id,
-           'content', truth.content,
-           'version', truth.version,
-           'sourceType', truth.source_type,
-           'sourceId', truth.source_id,
-           'createdAt', truth.created_at
-         ) AS truth_row
-         FROM memory_truths AS truth
-         WHERE truth.topic_id = topic.id
-         ORDER BY truth.version DESC
-         LIMIT 1
-       ) AS current ON TRUE
-       WHERE topic.project_id = $1
-       ORDER BY topic.updated_at DESC`,
+      `INSERT INTO memory_topics (
+         id, project_id, title, created_at, updated_at
+       ) VALUES ($1, $2, $3, NOW(), NOW())
+       RETURNING *`,
+      [randomUUID(), projectId, input.title],
+    );
+    return memoryTopicFromRow(result.rows[0]!, [], null);
+  }
+
+  async addClaim(
+    projectId: string,
+    topicId: string,
+    input: CreateMemoryClaimInput,
+  ): Promise<MemoryClaim> {
+    await this.requireTopic(projectId, topicId);
+    const result = await this.database.query<MemoryClaimRow>(
+      `INSERT INTO memory_claims (
+         id, topic_id, project_id, content, status,
+         source_type, source_id, created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, 'proposed', $5, $6, NOW(), NOW())
+       RETURNING *`,
+      [
+        randomUUID(),
+        topicId,
+        projectId,
+        input.content,
+        input.sourceType,
+        input.sourceId,
+      ],
+    );
+    return memoryClaimFromRow(result.rows[0]!);
+  }
+
+  async updateClaim(
+    projectId: string,
+    topicId: string,
+    claimId: string,
+    input: UpdateMemoryClaimInput,
+  ): Promise<MemoryClaim | undefined> {
+    const result = await this.database.query<MemoryClaimRow>(
+      `UPDATE memory_claims
+       SET status = $4, updated_at = NOW()
+       WHERE id = $1 AND topic_id = $2 AND project_id = $3
+       RETURNING *`,
+      [claimId, topicId, projectId, input.status],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : memoryClaimFromRow(row);
+  }
+
+  async publishTruth(
+    projectId: string,
+    topicId: string,
+    input: PublishMemoryTruthInput,
+  ): Promise<MemoryTopic> {
+    await this.requireTopic(projectId, topicId);
+    await this.database.transaction(async (client) => {
+      const claims =
+        input.claimIds.length === 0
+          ? []
+          : (
+              await client.query<MemoryClaimRow>(
+                `SELECT * FROM memory_claims
+                 WHERE topic_id = $1
+                   AND project_id = $2
+                   AND id = ANY($3::uuid[])
+                 ORDER BY created_at, id`,
+                [topicId, projectId, input.claimIds],
+              )
+            ).rows;
+      if (claims.length !== input.claimIds.length) {
+        throw new Error("memory claim scope mismatch");
+      }
+      if (claims.some((claim) => claim.status === "rejected")) {
+        throw new Error("rejected memory claims cannot form current truth");
+      }
+      const content =
+        input.content ??
+        claims
+          .map((claim) => claim.content.trim())
+          .filter(Boolean)
+          .join("\n");
+      const versionResult = await client.query<{ version: number }>(
+        `SELECT COALESCE(MAX(version), 0)::integer + 1 AS version
+         FROM memory_truths
+         WHERE topic_id = $1`,
+        [topicId],
+      );
+      const truthId = randomUUID();
+      await client.query(
+        `INSERT INTO memory_truths (
+           id, topic_id, project_id, content, version,
+           source_type, source_id, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [
+          truthId,
+          topicId,
+          projectId,
+          content,
+          versionResult.rows[0]!.version,
+          input.sourceType,
+          input.sourceId,
+        ],
+      );
+      for (const claim of claims) {
+        await client.query(
+          "INSERT INTO memory_truth_claims (truth_id, claim_id) VALUES ($1, $2)",
+          [truthId, claim.id],
+        );
+      }
+      await client.query(
+        "UPDATE memory_topics SET updated_at = NOW() WHERE id = $1",
+        [topicId],
+      );
+    });
+    const topic = await this.list(projectId).then((topics) =>
+      topics.find((candidate) => candidate.id === topicId),
+    );
+    if (topic === undefined) throw new Error("published topic is missing");
+    return topic;
+  }
+
+  async list(projectId: string): Promise<MemoryTopic[]> {
+    const topics = await this.database.query<MemoryTopicRow>(
+      `SELECT * FROM memory_topics
+       WHERE project_id = $1
+       ORDER BY updated_at DESC, id`,
       [projectId],
     );
-    return result.rows.map((row) => ({
-      id: row.id,
-      projectId: row.project_id,
-      title: row.title,
-      currentTruth: row.current_truth,
-      createdAt: row.created_at.toISOString(),
-      updatedAt: row.updated_at.toISOString(),
-    }));
+    if (topics.rowCount === 0) return [];
+    const topicIds = topics.rows.map((topic) => topic.id);
+    const claims = await this.database.query<MemoryClaimRow>(
+      `SELECT * FROM memory_claims
+       WHERE project_id = $1 AND topic_id = ANY($2::uuid[])
+       ORDER BY created_at, id`,
+      [projectId, topicIds],
+    );
+    const truths = await this.database.query<MemoryTruthRow>(
+      `SELECT * FROM memory_truths
+       WHERE project_id = $1 AND topic_id = ANY($2::uuid[])
+       ORDER BY version DESC`,
+      [projectId, topicIds],
+    );
+    const truthIds = truths.rows.map((truth) => truth.id);
+    const links =
+      truthIds.length === 0
+        ? { rows: [] as Array<{ truth_id: string; claim_id: string }> }
+        : await this.database.query<{ truth_id: string; claim_id: string }>(
+            `SELECT truth_id, claim_id
+             FROM memory_truth_claims
+             WHERE truth_id = ANY($1::uuid[])`,
+            [truthIds],
+          );
+    const claimIdsByTruth = new Map<string, string[]>();
+    for (const link of links.rows) {
+      const ids = claimIdsByTruth.get(link.truth_id) ?? [];
+      ids.push(link.claim_id);
+      claimIdsByTruth.set(link.truth_id, ids);
+    }
+    const claimsByTopic = new Map<string, MemoryClaim[]>();
+    for (const claim of claims.rows) {
+      const items = claimsByTopic.get(claim.topic_id) ?? [];
+      items.push(memoryClaimFromRow(claim));
+      claimsByTopic.set(claim.topic_id, items);
+    }
+    const currentTruthByTopic = new Map<string, MemoryTruth>();
+    for (const truth of truths.rows) {
+      if (currentTruthByTopic.has(truth.topic_id)) continue;
+      currentTruthByTopic.set(truth.topic_id, {
+        id: truth.id,
+        topicId: truth.topic_id,
+        content: truth.content,
+        version: truth.version,
+        sourceType: truth.source_type,
+        sourceId: truth.source_id,
+        claimIds: claimIdsByTruth.get(truth.id) ?? [],
+        createdAt: truth.created_at.toISOString(),
+      });
+    }
+    return topics.rows.map((row) =>
+      memoryTopicFromRow(
+        row,
+        claimsByTopic.get(row.id) ?? [],
+        currentTruthByTopic.get(row.id) ?? null,
+      ),
+    );
   }
+
+  private async requireTopic(
+    projectId: string,
+    topicId: string,
+  ): Promise<MemoryTopicRow> {
+    const result = await this.database.query<MemoryTopicRow>(
+      "SELECT * FROM memory_topics WHERE id = $1 AND project_id = $2",
+      [topicId, projectId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error("memory topic not found");
+    return row;
+  }
+}
+
+function memoryClaimFromRow(row: MemoryClaimRow): MemoryClaim {
+  return {
+    id: row.id,
+    topicId: row.topic_id,
+    content: row.content,
+    status: row.status,
+    sourceType: row.source_type,
+    sourceId: row.source_id,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+function memoryTopicFromRow(
+  row: MemoryTopicRow,
+  claims: MemoryClaim[],
+  currentTruth: MemoryTruth | null,
+): MemoryTopic {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    title: row.title,
+    currentTruth,
+    claims,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  };
 }
 
 export class ReviewRepository {
@@ -217,11 +447,28 @@ export class WorkflowRepository {
   }
 
   async create(input: CreateWorkflowInput): Promise<WorkflowDefinition> {
+    return this.createResolved(input);
+  }
+
+  async createResolved(
+    input: CreateWorkflowInput,
+    stepAgentIds: readonly (string | undefined)[] = [],
+  ): Promise<WorkflowDefinition> {
     const steps: WorkflowStepDefinition[] = input.stepNames.map(
       (name, index) => ({
         id: randomUUID(),
         name,
-        kind: index === input.stepNames.length - 1 ? "human" : "agent",
+        kind:
+          input.stepRoleIds[index] !== undefined ||
+          index !== input.stepNames.length - 1
+            ? "agent"
+            : "human",
+        ...(input.stepRoleIds[index] === undefined
+          ? {}
+          : { roleId: input.stepRoleIds[index] }),
+        ...(stepAgentIds[index] === undefined
+          ? {}
+          : { agentId: stepAgentIds[index] }),
       }),
     );
     const result = await this.database.query<WorkflowRow>(

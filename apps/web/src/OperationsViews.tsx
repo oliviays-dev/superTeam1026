@@ -29,6 +29,7 @@ import {
   getWorkbench,
   listMeetings,
   listMemory,
+  listProjectRoles,
   listTasks,
   listWorkflows,
   postMeetingMessage,
@@ -369,26 +370,36 @@ export function WorkflowsView({
   const selectedProjectId = projectId || projects[0]?.id || "";
   const [name, setName] = useState("");
   const [steps, setSteps] = useState("");
+  const [roleId, setRoleId] = useState("");
   const [instance, setInstance] = useState<WorkflowInstance | null>(null);
   const workflowsQuery = useQuery({
     queryKey: ["workflows", selectedProjectId],
     queryFn: () => listWorkflows(selectedProjectId),
     enabled: selectedProjectId !== "",
   });
+  const rolesQuery = useQuery({
+    queryKey: ["project-roles", selectedProjectId],
+    queryFn: () => listProjectRoles(selectedProjectId),
+    enabled: selectedProjectId !== "",
+  });
   const createMutation = useMutation({
-    mutationFn: () =>
-      createWorkflow({
+    mutationFn: () => {
+      const stepNames = steps
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean);
+      return createWorkflow({
         projectId: selectedProjectId,
         name,
         description: "",
-        stepNames: steps
-          .split("\n")
-          .map((item) => item.trim())
-          .filter(Boolean),
-      }),
+        stepNames,
+        stepRoleIds: roleId === "" ? [] : stepNames.map(() => roleId),
+      });
+    },
     onSuccess: () => {
       setName("");
       setSteps("");
+      setRoleId("");
       void queryClient.invalidateQueries({ queryKey: ["workflows"] });
     },
   });
@@ -468,6 +479,18 @@ export function WorkflowsView({
               placeholder={"每行一个步骤\n需求确认\n方案分析\n人工验收"}
               rows={4}
             />
+            <select
+              value={roleId}
+              onChange={(event) => setRoleId(event.target.value)}
+              aria-label="工作流执行角色"
+            >
+              <option value="">按人工 / Agent 默认执行</option>
+              {(rolesQuery.data ?? []).map((role) => (
+                <option value={role.id} key={role.id}>
+                  项目角色 · {role.name}
+                </option>
+              ))}
+            </select>
             <button className="pm-btn secondary" type="submit">
               <Plus size={14} />
               创建定义

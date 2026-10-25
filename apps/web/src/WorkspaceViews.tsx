@@ -1,7 +1,9 @@
 import type {
   Agent,
+  MemoryClaim,
   MemoryTopic,
   Project,
+  ProjectRole,
   Task,
   TaskMessage,
 } from "@pluginmax/contracts";
@@ -12,11 +14,14 @@ import {
   ArrowRight,
   Bot,
   Check,
+  CircleCheck,
+  CircleX,
   Edit3,
   FileText,
   ListTodo,
   LoaderCircle,
   MessageSquare,
+  Network,
   Plus,
   Search,
   Send,
@@ -26,17 +31,22 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
+  addMemoryClaim,
   createProject,
+  createMemoryTopic,
   createTask,
   dispatchTask,
   getTaskDetail,
   listMemory,
+  listProjectRoles,
   listTaskRuns,
   listTasks,
   postTaskMessage,
+  publishMemoryTruth,
   reviewTask,
   updateProject,
   updateTask,
+  updateMemoryClaim,
 } from "./api.js";
 import { ProjectMembershipPanel } from "./ProjectMembershipPanel.js";
 import { RunView } from "./RunView.js";
@@ -514,7 +524,9 @@ export function ProjectsView({
                   onOpenTask={(taskId) => onOpenTask(taskId, project.id)}
                 />
               )}
-              {tab === "memory" && <ProjectMemoryList memory={memory} />}
+              {tab === "memory" && (
+                <ProjectMemoryPanel projectId={project.id} memory={memory} />
+              )}
               {tab === "members" && (
                 <ProjectMembershipPanel
                   projectId={project.id}
@@ -575,22 +587,235 @@ function ProjectTaskList({
   );
 }
 
-function ProjectMemoryList({ memory }: { memory: MemoryTopic[] }) {
+function ProjectMemoryPanel({
+  projectId,
+  memory,
+}: {
+  projectId: string;
+  memory: MemoryTopic[];
+}) {
+  const queryClient = useQueryClient();
+  const [topicTitle, setTopicTitle] = useState("");
+  const [claimDrafts, setClaimDrafts] = useState<Record<string, string>>({});
+  const [selectedClaims, setSelectedClaims] = useState<
+    Record<string, string[]>
+  >({});
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["memory", projectId] });
+  const createTopicMutation = useMutation({
+    mutationFn: () => createMemoryTopic(projectId, { title: topicTitle }),
+    onSuccess: () => {
+      setTopicTitle("");
+      void invalidate();
+    },
+  });
+  const createClaimMutation = useMutation({
+    mutationFn: (topicId: string) =>
+      addMemoryClaim(projectId, topicId, {
+        content: claimDrafts[topicId] ?? "",
+        sourceType: "manual",
+        sourceId: "local-admin",
+      }),
+    onSuccess: (_claim, topicId) => {
+      setClaimDrafts((current) => ({ ...current, [topicId]: "" }));
+      void invalidate();
+    },
+  });
+  const updateClaimMutation = useMutation({
+    mutationFn: (input: {
+      topicId: string;
+      claim: MemoryClaim;
+      status: MemoryClaim["status"];
+    }) =>
+      updateMemoryClaim(projectId, input.topicId, input.claim.id, {
+        status: input.status,
+      }),
+    onSuccess: () => void invalidate(),
+  });
+  const publishMutation = useMutation({
+    mutationFn: (topicId: string) =>
+      publishMemoryTruth(projectId, topicId, {
+        claimIds: selectedClaims[topicId] ?? [],
+        sourceType: "manual",
+        sourceId: "local-admin",
+      }),
+    onSuccess: (_topic, topicId) => {
+      setSelectedClaims((current) => ({ ...current, [topicId]: [] }));
+      void invalidate();
+    },
+  });
+
   return (
-    <div className="memory-list">
-      {memory.map((topic) => (
-        <article className="memory-item" key={topic.id}>
-          <div>
-            <strong>{topic.title}</strong>
-            <span>v{topic.currentTruth?.version ?? "-"}</span>
-          </div>
-          <p>{topic.currentTruth?.content ?? "尚未发布结论"}</p>
-          <small>{formatDateTime(topic.updatedAt)}</small>
-        </article>
-      ))}
-      {memory.length === 0 && (
-        <div className="pm-empty">任务验收通过后会写入项目记忆</div>
+    <div className="project-memory-panel">
+      <form
+        className="memory-topic-create"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (topicTitle.trim() !== "") createTopicMutation.mutate();
+        }}
+      >
+        <div>
+          <strong>项目记忆</strong>
+          <small>
+            Topic 汇总讨论，Claim 记录事实，Current Truth 固化当前结论。
+          </small>
+        </div>
+        <input
+          value={topicTitle}
+          onChange={(event) => setTopicTitle(event.target.value)}
+          placeholder="新增主题，例如：供应商交付风险"
+        />
+        <button
+          className="pm-btn primary"
+          type="submit"
+          disabled={topicTitle.trim() === "" || createTopicMutation.isPending}
+        >
+          <Plus size={13} />
+          新建主题
+        </button>
+      </form>
+
+      {createTopicMutation.error !== null && (
+        <div className="pm-error">{createTopicMutation.error.message}</div>
       )}
+
+      <div className="memory-list">
+        {memory.map((topic) => {
+          const selected = selectedClaims[topic.id] ?? [];
+          return (
+            <article className="memory-item memory-topic-card" key={topic.id}>
+              <header>
+                <div>
+                  <strong>{topic.title}</strong>
+                  <span>
+                    Current Truth v{topic.currentTruth?.version ?? "-"}
+                  </span>
+                </div>
+                <small>{formatDateTime(topic.updatedAt)}</small>
+              </header>
+              <p className={topic.currentTruth === null ? "muted" : ""}>
+                {topic.currentTruth?.content ?? "尚未发布当前结论"}
+              </p>
+
+              <div className="memory-claim-list">
+                {topic.claims.map((claim) => {
+                  const checked = selected.includes(claim.id);
+                  return (
+                    <div
+                      className={`memory-claim claim-${claim.status}`}
+                      key={claim.id}
+                    >
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={claim.status === "rejected"}
+                          onChange={(event) =>
+                            setSelectedClaims((current) => ({
+                              ...current,
+                              [topic.id]: event.target.checked
+                                ? [...selected, claim.id]
+                                : selected.filter((id) => id !== claim.id),
+                            }))
+                          }
+                        />
+                        <span>{claim.content}</span>
+                      </label>
+                      <div className="memory-claim-actions">
+                        <span className="pm-pill neutral">
+                          {claim.status === "proposed"
+                            ? "待确认"
+                            : claim.status === "confirmed"
+                              ? "已确认"
+                              : "已拒绝"}
+                        </span>
+                        <button
+                          type="button"
+                          title="确认 Claim"
+                          aria-label="确认 Claim"
+                          onClick={() =>
+                            updateClaimMutation.mutate({
+                              topicId: topic.id,
+                              claim,
+                              status: "confirmed",
+                            })
+                          }
+                        >
+                          <CircleCheck size={13} />
+                        </button>
+                        <button
+                          type="button"
+                          title="拒绝 Claim"
+                          aria-label="拒绝 Claim"
+                          onClick={() =>
+                            updateClaimMutation.mutate({
+                              topicId: topic.id,
+                              claim,
+                              status: "rejected",
+                            })
+                          }
+                        >
+                          <CircleX size={13} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {topic.claims.length === 0 && (
+                  <div className="pm-empty compact">
+                    尚无 Claim，先记录一条可验证的事实或决策。
+                  </div>
+                )}
+              </div>
+
+              <form
+                className="memory-claim-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if ((claimDrafts[topic.id] ?? "").trim() !== "") {
+                    createClaimMutation.mutate(topic.id);
+                  }
+                }}
+              >
+                <input
+                  value={claimDrafts[topic.id] ?? ""}
+                  onChange={(event) =>
+                    setClaimDrafts((current) => ({
+                      ...current,
+                      [topic.id]: event.target.value,
+                    }))
+                  }
+                  placeholder="记录一条可追溯的 Claim"
+                />
+                <button
+                  className="pm-btn secondary"
+                  type="submit"
+                  disabled={
+                    (claimDrafts[topic.id] ?? "").trim() === "" ||
+                    createClaimMutation.isPending
+                  }
+                >
+                  添加 Claim
+                </button>
+                <button
+                  className="pm-btn primary"
+                  type="button"
+                  disabled={selected.length === 0 || publishMutation.isPending}
+                  onClick={() => publishMutation.mutate(topic.id)}
+                >
+                  发布 Truth
+                </button>
+              </form>
+            </article>
+          );
+        })}
+        {memory.length === 0 && (
+          <div className="pm-empty">
+            建立 Topic 并记录 Claim 后，可手动发布 Current Truth；任务验收仍会
+            自动沉淀一条记忆。
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -598,11 +823,15 @@ function ProjectMemoryList({ memory }: { memory: MemoryTopic[] }) {
 function CreateTaskDialog({
   projectId,
   agents,
+  roles,
+  tasks,
   onClose,
   onCreated,
 }: {
   projectId: string;
   agents: Agent[];
+  roles: ProjectRole[];
+  tasks: Task[];
   onClose: () => void;
   onCreated: (task: Task) => void;
 }) {
@@ -612,6 +841,8 @@ function CreateTaskDialog({
   const [acceptance, setAcceptance] = useState("");
   const availableAgents = agents.filter((agent) => agent.status === "active");
   const [agentId, setAgentId] = useState(availableAgents[0]?.id ?? "");
+  const [roleId, setRoleId] = useState("");
+  const [dependsOn, setDependsOn] = useState<string[]>([]);
   const mutation = useMutation({
     mutationFn: () =>
       createTask({
@@ -622,7 +853,8 @@ function CreateTaskDialog({
           .split("\n")
           .map((item) => item.trim())
           .filter(Boolean),
-        ...(agentId === "" ? {} : { agentId }),
+        ...(roleId === "" ? (agentId === "" ? {} : { agentId }) : { roleId }),
+        dependsOn,
       }),
     onSuccess: (task) => {
       void queryClient.invalidateQueries({ queryKey: ["tasks"] });
@@ -639,7 +871,7 @@ function CreateTaskDialog({
           if (
             title.trim() !== "" &&
             description.trim() !== "" &&
-            agentId !== ""
+            (roleId !== "" || agentId !== "")
           ) {
             mutation.mutate();
           }
@@ -682,11 +914,26 @@ function CreateTaskDialog({
             <span>执行 AI 伙伴</span>
             <select
               value={agentId}
+              disabled={roleId !== ""}
               onChange={(event) => setAgentId(event.target.value)}
             >
               {availableAgents.map((agent) => (
                 <option value={agent.id} key={agent.id}>
                   {agent.name} · {agent.runtimeKind}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="pm-field">
+            <span>项目角色</span>
+            <select
+              value={roleId}
+              onChange={(event) => setRoleId(event.target.value)}
+            >
+              <option value="">直接指派 AI 伙伴</option>
+              {roles.map((role) => (
+                <option value={role.id} key={role.id}>
+                  {role.name}
                 </option>
               ))}
             </select>
@@ -700,6 +947,29 @@ function CreateTaskDialog({
               placeholder={"每行一条\n提供结论与证据"}
             />
           </label>
+          <fieldset className="pm-field pm-field-wide task-dependency-picker">
+            <legend>前置依赖</legend>
+            <div>
+              {tasks.map((task) => (
+                <label key={task.id}>
+                  <input
+                    type="checkbox"
+                    checked={dependsOn.includes(task.id)}
+                    onChange={(event) =>
+                      setDependsOn((current) =>
+                        event.target.checked
+                          ? [...current, task.id]
+                          : current.filter((id) => id !== task.id),
+                      )
+                    }
+                  />
+                  <span>{task.title}</span>
+                  <small>{taskStatusLabel[task.status]}</small>
+                </label>
+              ))}
+              {tasks.length === 0 && <small>当前项目还没有可依赖任务</small>}
+            </div>
+          </fieldset>
         </div>
         {mutation.error !== null && (
           <div className="pm-error">
@@ -719,7 +989,7 @@ function CreateTaskDialog({
               mutation.isPending ||
               title.trim() === "" ||
               description.trim() === "" ||
-              agentId === ""
+              (roleId === "" && agentId === "")
             }
           >
             {mutation.isPending ? (
@@ -768,7 +1038,13 @@ export function TasksView({
     enabled: selectedProjectId !== "",
     refetchInterval: 4_000,
   });
+  const rolesQuery = useQuery({
+    queryKey: ["project-roles", selectedProjectId],
+    queryFn: () => listProjectRoles(selectedProjectId),
+    enabled: selectedProjectId !== "",
+  });
   const tasks = tasksQuery.data ?? [];
+  const roles = rolesQuery.data ?? [];
   const selectedTask = tasks.find((task) => task.id === selectedTaskId);
 
   useEffect(() => {
@@ -866,6 +1142,7 @@ export function TasksView({
               <div className="task-card-list">
                 {items.map((task) => {
                   const agent = agents.find((item) => item.id === task.agentId);
+                  const role = roles.find((item) => item.id === task.roleId);
                   return (
                     <button
                       className={`task-board-card ${
@@ -885,8 +1162,12 @@ export function TasksView({
                       <p>{task.description}</p>
                       <div className="task-board-card-foot">
                         <span>
-                          <Bot size={12} />
-                          {agent?.name ?? "未分配 AI 伙伴"}
+                          {role === undefined ? (
+                            <Bot size={12} />
+                          ) : (
+                            <UsersRound size={12} />
+                          )}
+                          {role?.name ?? agent?.name ?? "未分配 AI 伙伴"}
                         </span>
                         <time>{formatDateTime(task.updatedAt)}</time>
                       </div>
@@ -905,6 +1186,8 @@ export function TasksView({
       {selectedTask !== undefined && (
         <TaskDetailDrawer
           task={selectedTask}
+          tasks={tasks}
+          roles={roles}
           onClose={() => setSelectedTaskId("")}
           onTaskChanged={() => {
             void queryClient.invalidateQueries({ queryKey: ["tasks"] });
@@ -916,6 +1199,8 @@ export function TasksView({
         <CreateTaskDialog
           projectId={selectedProjectId}
           agents={agents}
+          roles={roles}
+          tasks={tasks}
           onClose={() => setCreateOpen(false)}
           onCreated={(task) => {
             setCreateOpen(false);
@@ -929,10 +1214,14 @@ export function TasksView({
 
 function TaskDetailDrawer({
   task,
+  tasks,
+  roles,
   onClose,
   onTaskChanged,
 }: {
   task: Task;
+  tasks: Task[];
+  roles: ProjectRole[];
   onClose: () => void;
   onTaskChanged: () => void;
 }) {
@@ -943,7 +1232,22 @@ function TaskDetailDrawer({
     task.acceptance.join("\n"),
   );
   const [editingAcceptance, setEditingAcceptance] = useState(false);
+  const [editingDependencies, setEditingDependencies] = useState(false);
+  const [dependencyDraft, setDependencyDraft] = useState<string[]>(
+    task.dependsOn,
+  );
   const [comment, setComment] = useState("");
+  const projectTasks = tasks.filter(
+    (candidate) =>
+      candidate.projectId === task.projectId && candidate.id !== task.id,
+  );
+  const dependencies = task.dependsOn
+    .map((id) => tasks.find((candidate) => candidate.id === id))
+    .filter((candidate): candidate is Task => candidate !== undefined);
+  const unresolvedDependencies = dependencies.filter(
+    (dependency) => dependency.status !== "done",
+  );
+  const role = roles.find((candidate) => candidate.id === task.roleId);
   const detailQuery = useQuery({
     queryKey: ["task-detail", task.id],
     queryFn: () => getTaskDetail(task.id),
@@ -960,6 +1264,10 @@ function TaskDetailDrawer({
   useEffect(() => {
     setAcceptanceDraft(task.acceptance.join("\n"));
   }, [task.acceptance]);
+  useEffect(() => {
+    setDependencyDraft(task.dependsOn);
+    setEditingDependencies(false);
+  }, [task.dependsOn, task.updatedAt]);
   const dispatchMutation = useMutation({
     mutationFn: () => dispatchTask(task.id),
     onSuccess: ({ runId: createdRunId }) => {
@@ -994,6 +1302,16 @@ function TaskDetailDrawer({
       });
     },
   });
+  const dependencyMutation = useMutation({
+    mutationFn: () => updateTask(task.id, { dependsOn: dependencyDraft }),
+    onSuccess: () => {
+      setEditingDependencies(false);
+      onTaskChanged();
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
   const commentMutation = useMutation({
     mutationFn: () => postTaskMessage(task.id, { content: comment }),
     onSuccess: () => {
@@ -1015,6 +1333,7 @@ function TaskDetailDrawer({
                 {taskStatusLabel[task.status]}
               </span>
               <span>{task.acceptance.length} 项验收标准</span>
+              {role !== undefined && <span>项目角色 · {role.name}</span>}
             </div>
             <h2>{task.title}</h2>
             <p>{task.description}</p>
@@ -1086,12 +1405,107 @@ function TaskDetailDrawer({
           )}
         </div>
 
+        <div className="task-dependency-panel">
+          <header>
+            <div>
+              <Network size={14} />
+              <strong>前置依赖</strong>
+              <span>
+                {dependencies.length === 0
+                  ? "无依赖"
+                  : `${dependencies.length} 项，${unresolvedDependencies.length} 项未完成`}
+              </span>
+            </div>
+            {task.status === "queued" && !editingDependencies && (
+              <button
+                className="pm-btn secondary"
+                type="button"
+                onClick={() => setEditingDependencies(true)}
+              >
+                <Edit3 size={12} />
+                编辑依赖
+              </button>
+            )}
+          </header>
+          {editingDependencies ? (
+            <div className="task-dependency-editor">
+              {projectTasks.map((candidate) => (
+                <label key={candidate.id}>
+                  <input
+                    type="checkbox"
+                    checked={dependencyDraft.includes(candidate.id)}
+                    onChange={(event) =>
+                      setDependencyDraft((current) =>
+                        event.target.checked
+                          ? [...current, candidate.id]
+                          : current.filter((id) => id !== candidate.id),
+                      )
+                    }
+                  />
+                  <span>{candidate.title}</span>
+                  <small>{taskStatusLabel[candidate.status]}</small>
+                </label>
+              ))}
+              {projectTasks.length === 0 && (
+                <span className="muted">当前项目没有其他任务</span>
+              )}
+              <div>
+                <button
+                  className="pm-btn secondary"
+                  type="button"
+                  onClick={() => {
+                    setDependencyDraft(task.dependsOn);
+                    setEditingDependencies(false);
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  className="pm-btn primary"
+                  type="button"
+                  disabled={dependencyMutation.isPending}
+                  onClick={() => dependencyMutation.mutate()}
+                >
+                  保存依赖
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="task-dependency-list">
+              {dependencies.map((dependency) => (
+                <span
+                  className={`task-dependency-chip ${
+                    dependency.status === "done" ? "done" : ""
+                  }`}
+                  key={dependency.id}
+                >
+                  <b>{dependency.title}</b>
+                  <small>{taskStatusLabel[dependency.status]}</small>
+                </span>
+              ))}
+              {dependencies.length === 0 && (
+                <span className="muted">未设置前置任务</span>
+              )}
+            </div>
+          )}
+          {dependencyMutation.error !== null && (
+            <div className="pm-error">{dependencyMutation.error.message}</div>
+          )}
+        </div>
+
         <div className="task-detail-actions">
           {task.status === "queued" && (
             <button
               className="pm-btn primary"
               type="button"
-              disabled={dispatchMutation.isPending}
+              disabled={
+                dispatchMutation.isPending || unresolvedDependencies.length > 0
+              }
+              title={
+                unresolvedDependencies.length === 0
+                  ? "派发执行"
+                  : `请先完成 ${unresolvedDependencies.map((item) => item.title).join("、")}`
+              }
               onClick={() => dispatchMutation.mutate()}
             >
               {dispatchMutation.isPending ? (
@@ -1101,6 +1515,11 @@ function TaskDetailDrawer({
               )}
               派发执行
             </button>
+          )}
+          {unresolvedDependencies.length > 0 && (
+            <span className="task-dispatch-blocked">
+              前置任务未完成，暂不能派发
+            </span>
           )}
           {task.status === "review" && (
             <>
@@ -1143,6 +1562,9 @@ function TaskDetailDrawer({
             </select>
           )}
         </div>
+        {dispatchMutation.error !== null && (
+          <div className="pm-error">{dispatchMutation.error.message}</div>
+        )}
 
         <div className="task-run-body">
           <section className="task-discussion">

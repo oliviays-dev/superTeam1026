@@ -2,6 +2,7 @@ import { Pool, type PoolClient, type QueryResultRow } from "pg";
 
 export class Database {
   private readonly pool: Pool;
+  private closing: Promise<void> | undefined;
 
   constructor(connectionString: string) {
     this.pool = new Pool({
@@ -39,6 +40,7 @@ export class Database {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    this.closing ??= this.pool.end();
+    await this.closing;
   }
 }

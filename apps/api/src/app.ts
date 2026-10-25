@@ -3,6 +3,8 @@ import {
   type ApiError,
   agentStatusInputSchema,
   createAgentInputSchema,
+  createMemoryClaimInputSchema,
+  createMemoryTopicInputSchema,
   createMeetingInputSchema,
   createProjectMemberInputSchema,
   createProjectInputSchema,
@@ -10,8 +12,10 @@ import {
   createTaskMessageInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
+  publishMemoryTruthInputSchema,
   taskReviewInputSchema,
   updateAgentInputSchema,
+  updateMemoryClaimInputSchema,
   updateProjectMemberInputSchema,
   updateProjectInputSchema,
   updateProjectRoleInputSchema,
@@ -49,6 +53,13 @@ const projectMemberParamsSchema = z.object({
 const projectRoleParamsSchema = z.object({
   projectId: z.string().uuid(),
   roleId: z.string().uuid(),
+});
+const memoryTopicParamsSchema = z.object({
+  projectId: z.string().uuid(),
+  topicId: z.string().uuid(),
+});
+const memoryClaimParamsSchema = memoryTopicParamsSchema.extend({
+  claimId: z.string().uuid(),
 });
 const workflowStartSchema = z.object({
   title: z.string().trim().min(1).max(180),
@@ -382,6 +393,56 @@ export function buildApi(options: BuildApiOptions): {
     const { projectId } = projectParamsSchema.parse(request.params);
     return reply.send({ items: await application.listMemory(projectId) });
   });
+
+  app.post(
+    "/api/v1/projects/:projectId/memory/topics",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = createMemoryTopicInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(await application.createMemoryTopic(projectId, input));
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/memory/topics/:topicId/claims",
+    async (request, reply) => {
+      const { projectId, topicId } = memoryTopicParamsSchema.parse(
+        request.params,
+      );
+      const input = createMemoryClaimInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(await application.addMemoryClaim(projectId, topicId, input));
+    },
+  );
+
+  app.patch(
+    "/api/v1/projects/:projectId/memory/topics/:topicId/claims/:claimId",
+    async (request, reply) => {
+      const { projectId, topicId, claimId } = memoryClaimParamsSchema.parse(
+        request.params,
+      );
+      const input = updateMemoryClaimInputSchema.parse(request.body);
+      return reply.send(
+        await application.updateMemoryClaim(projectId, topicId, claimId, input),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/memory/topics/:topicId/truths",
+    async (request, reply) => {
+      const { projectId, topicId } = memoryTopicParamsSchema.parse(
+        request.params,
+      );
+      const input = publishMemoryTruthInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(await application.publishMemoryTruth(projectId, topicId, input));
+    },
+  );
 
   app.get("/api/v1/workbench", async (_request, reply) => {
     return reply.send(await application.getWorkbench());

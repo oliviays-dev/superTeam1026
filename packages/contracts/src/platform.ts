@@ -58,24 +58,48 @@ export const taskSchema = z.object({
   acceptance: z.array(z.string().trim().min(1).max(1_000)).max(50),
   status: taskStatusSchema,
   agentId: z.string().uuid(),
+  roleId: z.string().uuid().optional(),
+  dependsOn: z.array(z.string().uuid()),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type Task = z.infer<typeof taskSchema>;
 
-export const createTaskInputSchema = z.object({
-  projectId: z.string().uuid(),
-  title: z.string().trim().min(1).max(240),
-  description: z.string().trim().min(1).max(20_000),
-  acceptance: z.array(z.string().trim().min(1).max(1_000)).max(50).default([]),
-  agentId: z.string().uuid().optional(),
-});
+const taskDependencyIdsSchema = z
+  .array(z.string().uuid())
+  .max(50)
+  .default([])
+  .transform((ids) => [...new Set(ids)]);
+
+export const createTaskInputSchema = z
+  .object({
+    projectId: z.string().uuid(),
+    title: z.string().trim().min(1).max(240),
+    description: z.string().trim().min(1).max(20_000),
+    acceptance: z
+      .array(z.string().trim().min(1).max(1_000))
+      .max(50)
+      .default([]),
+    agentId: z.string().uuid().optional(),
+    roleId: z.string().uuid().optional(),
+    dependsOn: taskDependencyIdsSchema,
+  })
+  .superRefine((input, context) => {
+    if (input.agentId !== undefined && input.roleId !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["roleId"],
+        message: "agentId and roleId are mutually exclusive",
+      });
+    }
+  });
 export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 
 export const updateTaskInputSchema = z.object({
   title: z.string().trim().min(1).max(240).optional(),
   description: z.string().trim().min(1).max(20_000).optional(),
   acceptance: z.array(z.string().trim().min(1).max(1_000)).max(50).optional(),
+  dependsOn: taskDependencyIdsSchema.optional(),
 });
 export type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
 
@@ -102,6 +126,13 @@ export type CreateTaskMessageInput = z.infer<
 export const taskDetailSchema = z.object({
   task: taskSchema,
   messages: z.array(taskMessageSchema),
+  dependencies: z.array(
+    z.object({
+      id: z.string().uuid(),
+      title: z.string(),
+      status: taskStatusSchema,
+    }),
+  ),
 });
 export type TaskDetail = z.infer<typeof taskDetailSchema>;
 

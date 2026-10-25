@@ -14,6 +14,10 @@ The initial implementation provides:
 - A pinned DeepSeek Harness SDK runtime adapter.
 - Task review, durable Markdown artifacts, and downloadable deliverables.
 - Project memory published on task approval.
+- Structured project memory with topics, claims, cited current-truth versions,
+  and manual review controls.
+- Project roles resolved to active AI members for task and workflow execution.
+- Task prerequisite graphs with cycle validation and dispatch gates.
 - Workbench metrics, workflow definitions/instances, and meeting rooms.
 
 ## Requirements
@@ -61,6 +65,13 @@ With API and Worker running:
 
 ```sh
 pnpm test:e2e
+```
+
+With the isolated API and Web running:
+
+```sh
+pnpm test:smoke:dependencies
+pnpm test:e2e:browser
 ```
 
 With API running:

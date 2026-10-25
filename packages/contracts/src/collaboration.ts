@@ -120,19 +120,87 @@ export const memoryTruthSchema = z.object({
   version: z.number().int().positive(),
   sourceType: z.string(),
   sourceId: z.string(),
+  claimIds: z.array(z.string().uuid()),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type MemoryTruth = z.infer<typeof memoryTruthSchema>;
+
+export const memoryClaimStatusSchema = z.enum([
+  "proposed",
+  "confirmed",
+  "rejected",
+]);
+export type MemoryClaimStatus = z.infer<typeof memoryClaimStatusSchema>;
+
+export const memoryClaimSchema = z.object({
+  id: z.string().uuid(),
+  topicId: z.string().uuid(),
+  content: z.string(),
+  status: memoryClaimStatusSchema,
+  sourceType: z.string(),
+  sourceId: z.string(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type MemoryClaim = z.infer<typeof memoryClaimSchema>;
 
 export const memoryTopicSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
   title: z.string(),
   currentTruth: memoryTruthSchema.nullable(),
+  claims: z.array(memoryClaimSchema),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type MemoryTopic = z.infer<typeof memoryTopicSchema>;
+
+export const createMemoryTopicInputSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+});
+export type CreateMemoryTopicInput = z.infer<
+  typeof createMemoryTopicInputSchema
+>;
+
+export const createMemoryClaimInputSchema = z.object({
+  content: z.string().trim().min(1).max(20_000),
+  sourceType: z.string().trim().min(1).max(80).default("manual"),
+  sourceId: z.string().trim().min(1).max(180).default("local-admin"),
+});
+export type CreateMemoryClaimInput = z.infer<
+  typeof createMemoryClaimInputSchema
+>;
+
+export const updateMemoryClaimInputSchema = z.object({
+  status: memoryClaimStatusSchema,
+});
+export type UpdateMemoryClaimInput = z.infer<
+  typeof updateMemoryClaimInputSchema
+>;
+
+export const publishMemoryTruthInputSchema = z
+  .object({
+    claimIds: z
+      .array(z.string().uuid())
+      .max(100)
+      .default([])
+      .transform((ids) => [...new Set(ids)]),
+    content: z.string().trim().min(1).max(40_000).optional(),
+    sourceType: z.string().trim().min(1).max(80).default("manual"),
+    sourceId: z.string().trim().min(1).max(180).default("local-admin"),
+  })
+  .superRefine((input, context) => {
+    if (input.claimIds.length === 0 && input.content === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["claimIds"],
+        message: "Select at least one claim or provide content",
+      });
+    }
+  });
+export type PublishMemoryTruthInput = z.infer<
+  typeof publishMemoryTruthInputSchema
+>;
 
 export const workbenchSummarySchema = z.object({
   projects: z.number().int().nonnegative(),
@@ -150,6 +218,7 @@ export const workflowStepDefinitionSchema = z.object({
   name: z.string().trim().min(1).max(160),
   kind: z.enum(["human", "agent"]),
   agentId: z.string().uuid().optional(),
+  roleId: z.string().uuid().optional(),
 });
 export type WorkflowStepDefinition = z.infer<
   typeof workflowStepDefinitionSchema
@@ -167,12 +236,26 @@ export const workflowDefinitionSchema = z.object({
 });
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
 
-export const createWorkflowInputSchema = z.object({
-  projectId: z.string().uuid(),
-  name: z.string().trim().min(1).max(160),
-  description: z.string().trim().max(2_000).default(""),
-  stepNames: z.array(z.string().trim().min(1).max(160)).min(1).max(20),
-});
+export const createWorkflowInputSchema = z
+  .object({
+    projectId: z.string().uuid(),
+    name: z.string().trim().min(1).max(160),
+    description: z.string().trim().max(2_000).default(""),
+    stepNames: z.array(z.string().trim().min(1).max(160)).min(1).max(20),
+    stepRoleIds: z.array(z.string().uuid()).max(20).default([]),
+  })
+  .superRefine((input, context) => {
+    if (
+      input.stepRoleIds.length > 0 &&
+      input.stepRoleIds.length !== input.stepNames.length
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["stepRoleIds"],
+        message: "stepRoleIds must align one-to-one with stepNames",
+      });
+    }
+  });
 export type CreateWorkflowInput = z.infer<typeof createWorkflowInputSchema>;
 
 export const workflowStepStateSchema = z.object({

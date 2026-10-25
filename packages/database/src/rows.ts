@@ -54,6 +54,8 @@ export interface TaskRow {
   acceptance: string[];
   status: Task["status"];
   agent_id: string;
+  role_id: string | null;
+  depends_on: string[] | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -156,6 +158,8 @@ export function taskFromRow(row: TaskRow): Task {
     acceptance: row.acceptance,
     status: row.status,
     agentId: row.agent_id,
+    ...(row.role_id === null ? {} : { roleId: row.role_id }),
+    dependsOn: row.depends_on ?? [],
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };

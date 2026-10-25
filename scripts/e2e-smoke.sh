@@ -2,6 +2,7 @@
 set -euo pipefail
 
 API_BASE="${API_BASE:-http://127.0.0.1:4310/api/v1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 
 curl -fsS "$API_BASE/health" >/dev/null
@@ -167,6 +168,8 @@ if [[ "$agent_version" -ne 2 || "$agent_event_count" -lt 2 || "$project_descript
   printf 'full e2e verification failed\n' >&2
   exit 1
 fi
+
+API_BASE="$API_BASE" "$SCRIPT_DIR/dependency-memory-smoke.sh"
 
 printf 'e2e_smoke=ok\n'
 printf 'agent_id=%s\n' "$agent_id"

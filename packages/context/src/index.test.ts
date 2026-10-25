@@ -22,6 +22,7 @@ describe("buildTaskContext", () => {
         acceptance: ["Provide evidence"],
         status: "queued",
         agentId: "00000000-0000-4000-8000-000000000003",
+        dependsOn: [],
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
       },

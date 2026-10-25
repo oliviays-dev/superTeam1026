@@ -321,14 +321,26 @@ export class AgentRepository {
 export class TaskRepository {
   constructor(private readonly database: Database) {}
 
+  private readonly selectSql = `SELECT
+    task.*,
+    ARRAY(
+      SELECT dependency.depends_on_task_id::text
+      FROM task_dependencies AS dependency
+      WHERE dependency.task_id = task.id
+      ORDER BY dependency.created_at, dependency.depends_on_task_id
+    ) AS depends_on
+  FROM tasks AS task`;
+
   async list(projectId?: string): Promise<Task[]> {
     const result =
       projectId === undefined
         ? await this.database.query<TaskRow>(
-            "SELECT * FROM tasks ORDER BY updated_at DESC",
+            `${this.selectSql} ORDER BY task.updated_at DESC`,
           )
         : await this.database.query<TaskRow>(
-            "SELECT * FROM tasks WHERE project_id = $1 ORDER BY updated_at DESC",
+            `${this.selectSql}
+             WHERE task.project_id = $1
+             ORDER BY task.updated_at DESC`,
             [projectId],
           );
     return result.rows.map(taskFromRow);
@@ -336,53 +348,78 @@ export class TaskRepository {
 
   async get(id: string): Promise<Task | undefined> {
     const result = await this.database.query<TaskRow>(
-      "SELECT * FROM tasks WHERE id = $1",
+      `${this.selectSql} WHERE task.id = $1`,
       [id],
     );
     const row = result.rows[0];
     return row === undefined ? undefined : taskFromRow(row);
   }
 
-  async create(input: CreateTaskInput, agentId: string): Promise<Task> {
-    const result = await this.database.query<TaskRow>(
-      `INSERT INTO tasks (
-         id, project_id, title, description, acceptance, status,
-         agent_id, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5::jsonb, 'queued', $6, NOW(), NOW())
-       RETURNING *`,
-      [
-        randomUUID(),
+  async create(
+    input: CreateTaskInput,
+    agentId: string,
+    roleId?: string,
+  ): Promise<Task> {
+    const taskId = randomUUID();
+    await this.database.transaction(async (client) => {
+      await client.query(
+        `INSERT INTO tasks (
+           id, project_id, title, description, acceptance, status,
+           agent_id, role_id, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5::jsonb, 'queued', $6, $7, NOW(), NOW())`,
+        [
+          taskId,
+          input.projectId,
+          input.title,
+          input.description,
+          JSON.stringify(input.acceptance),
+          agentId,
+          roleId ?? null,
+        ],
+      );
+      await this.replaceDependenciesWithClient(
+        client,
+        taskId,
         input.projectId,
-        input.title,
-        input.description,
-        JSON.stringify(input.acceptance),
-        agentId,
-      ],
-    );
-    return taskFromRow(result.rows[0]!);
+        input.dependsOn,
+      );
+    });
+    const task = await this.get(taskId);
+    if (task === undefined) throw new Error("created task is missing");
+    return task;
   }
 
   async update(id: string, input: UpdateTaskInput): Promise<Task | undefined> {
-    const result = await this.database.query<TaskRow>(
-      `UPDATE tasks
-       SET
-         title = COALESCE($2, title),
-         description = COALESCE($3, description),
-         acceptance = COALESCE($4::jsonb, acceptance),
-         updated_at = NOW()
-       WHERE id = $1
-       RETURNING *`,
-      [
-        id,
-        input.title ?? null,
-        input.description ?? null,
-        input.acceptance === undefined
-          ? null
-          : JSON.stringify(input.acceptance),
-      ],
-    );
-    const row = result.rows[0];
-    return row === undefined ? undefined : taskFromRow(row);
+    const existing = await this.get(id);
+    if (existing === undefined) return undefined;
+    await this.database.transaction(async (client) => {
+      await client.query(
+        `UPDATE tasks
+         SET
+           title = COALESCE($2, title),
+           description = COALESCE($3, description),
+           acceptance = COALESCE($4::jsonb, acceptance),
+           updated_at = NOW()
+         WHERE id = $1`,
+        [
+          id,
+          input.title ?? null,
+          input.description ?? null,
+          input.acceptance === undefined
+            ? null
+            : JSON.stringify(input.acceptance),
+        ],
+      );
+      if (input.dependsOn !== undefined) {
+        await this.replaceDependenciesWithClient(
+          client,
+          id,
+          existing.projectId,
+          input.dependsOn,
+        );
+      }
+    });
+    return this.get(id);
   }
 
   async listMessages(id: string): Promise<TaskMessage[]> {
@@ -432,6 +469,25 @@ export class TaskRepository {
       await client.query(text, [id, status]);
     } else {
       await client.query(text, [id, status]);
+    }
+  }
+
+  private async replaceDependenciesWithClient(
+    client: PoolClient,
+    taskId: string,
+    projectId: string,
+    dependsOn: readonly string[],
+  ): Promise<void> {
+    await client.query("DELETE FROM task_dependencies WHERE task_id = $1", [
+      taskId,
+    ]);
+    for (const dependencyId of dependsOn) {
+      await client.query(
+        `INSERT INTO task_dependencies (
+           task_id, depends_on_task_id, project_id, created_at
+         ) VALUES ($1, $2, $3, NOW())`,
+        [taskId, dependencyId, projectId],
+      );
     }
   }
 }
