@@ -9,6 +9,7 @@ const database = new Database(config.databaseUrl);
 const repositories = new PlatformRepositories(database);
 const executor = new RunExecutor(repositories, {
   workspaceRoot: config.agentWorkspaceRoot,
+  fileStoreRoot: config.fileStoreRoot,
   dsh: {
     dshBin: config.dshBin,
     profile: config.dshProfile,

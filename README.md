@@ -11,6 +11,9 @@ The initial implementation provides:
 - A normalized run event model ready for DSH and external runtimes.
 - Immutable task ContextPacks with source receipts.
 - A pinned DeepSeek Harness SDK runtime adapter.
+- Task review, durable Markdown artifacts, and downloadable deliverables.
+- Project memory published on task approval.
+- Workbench metrics, workflow definitions/instances, and meeting rooms.
 
 ## Requirements
 
@@ -32,6 +35,13 @@ Open:
 
 - Web: http://127.0.0.1:4311
 - API health: http://127.0.0.1:4310/api/v1/health
+
+Main Web areas:
+
+- Workbench: aggregate metrics and project memory.
+- Projects: project, task, review, Run, Context, and artifacts.
+- Workflows: definition creation, instance start, and step completion.
+- Meetings: meeting rooms, participants, messages, and close state.
 
 The `DSH SDK Agent` is available through `@deepseek-ai/dsh@0.2.1-rc.3`.
 Set `DEEPSEEK_API_KEY` in the root `.env` before dispatching a task to that

@@ -1,9 +1,14 @@
-import { CONTEXT_SCHEMA_SQL, INITIAL_SCHEMA_SQL } from "./schema.js";
+import {
+  COLLABORATION_SCHEMA_SQL,
+  CONTEXT_SCHEMA_SQL,
+  INITIAL_SCHEMA_SQL,
+} from "./schema.js";
 import type { Database } from "./database.js";
 
 const migrations = [
   { version: 1, sql: INITIAL_SCHEMA_SQL },
   { version: 2, sql: CONTEXT_SCHEMA_SQL },
+  { version: 3, sql: COLLABORATION_SCHEMA_SQL },
 ] as const;
 
 export async function migrate(database: Database): Promise<void> {

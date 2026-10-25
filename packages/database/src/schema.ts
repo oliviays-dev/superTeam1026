@@ -167,3 +167,98 @@ INSERT INTO agents (
 )
 ON CONFLICT (id) DO NOTHING;
 `;
+
+export const COLLABORATION_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS artifacts (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id),
+  name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size BIGINT NOT NULL,
+  sha256 TEXT NOT NULL,
+  storage_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS artifacts_run_idx ON artifacts(run_id);
+
+CREATE TABLE IF NOT EXISTS task_reviews (
+  id UUID PRIMARY KEY,
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  decision TEXT NOT NULL CHECK (decision IN ('approve', 'return')),
+  note TEXT NOT NULL DEFAULT '',
+  actor_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory_topics (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id),
+  title TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory_truths (
+  id UUID PRIMARY KEY,
+  topic_id UUID NOT NULL REFERENCES memory_topics(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id),
+  content TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS memory_truth_topic_idx
+  ON memory_truths(topic_id, version DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_definitions (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id),
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  steps JSONB NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workflow_instances (
+  id UUID PRIMARY KEY,
+  workflow_id UUID NOT NULL REFERENCES workflow_definitions(id),
+  project_id UUID NOT NULL REFERENCES projects(id),
+  title TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'completed')),
+  current_step INTEGER NOT NULL DEFAULT 0,
+  steps JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meetings (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id),
+  title TEXT NOT NULL,
+  agenda TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
+  participants JSONB NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meeting_messages (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  author_type TEXT NOT NULL CHECK (author_type IN ('human', 'agent')),
+  author_id TEXT NOT NULL,
+  author_name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS meeting_messages_meeting_idx
+  ON meeting_messages(meeting_id, created_at);
+`;

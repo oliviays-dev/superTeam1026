@@ -3,7 +3,7 @@ import type { RunStatus, TaskStatus } from "@pluginmax/contracts";
 const taskTransitions: Record<TaskStatus, readonly TaskStatus[]> = {
   queued: ["in_progress", "cancelled"],
   in_progress: ["review", "cancelled"],
-  review: ["done", "in_progress"],
+  review: ["done", "queued"],
   done: [],
   cancelled: [],
 };

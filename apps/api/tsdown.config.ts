@@ -11,6 +11,7 @@ export default defineConfig({
     "@pluginmax/config",
     "@pluginmax/contracts",
     "@pluginmax/database",
+    "@pluginmax/files",
     "fastify",
     "zod",
   ],

@@ -20,6 +20,7 @@
     "@pluginmax/context": "workspace:*",
     "@pluginmax/contracts": "workspace:*",
     "@pluginmax/database": "workspace:*",
-    "@pluginmax/domain": "workspace:*"
+    "@pluginmax/domain": "workspace:*",
+    "@pluginmax/files": "workspace:*"
   }
 }

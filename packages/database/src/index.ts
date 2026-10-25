@@ -1,5 +1,13 @@
 export { Database } from "./database.js";
 export { ContextRepository } from "./context-repository.js";
+export {
+  ArtifactRepository,
+  MeetingRepository,
+  MemoryRepository,
+  ReviewRepository,
+  WorkbenchRepository,
+  WorkflowRepository,
+} from "./collaboration-repositories.js";
 export { migrate } from "./migrate.js";
 export {
   AgentRepository,

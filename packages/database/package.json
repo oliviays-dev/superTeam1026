@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@pluginmax/contracts": "workspace:*",
+    "@pluginmax/files": "workspace:*",
     "pg": "^8.16.3"
   },
   "devDependencies": {

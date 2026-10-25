@@ -12,5 +12,6 @@ export default defineConfig({
     "@pluginmax/database",
     "@pluginmax/domain",
     "@pluginmax/agent-runtime",
+    "@pluginmax/files",
   ],
 });

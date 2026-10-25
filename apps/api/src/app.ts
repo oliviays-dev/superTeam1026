@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
   type ApiError,
+  createMeetingInputSchema,
   createProjectInputSchema,
   createTaskInputSchema,
+  createWorkflowInputSchema,
+  taskReviewInputSchema,
 } from "@pluginmax/contracts";
 import { ApplicationError, PlatformApplication } from "@pluginmax/application";
 import { Database, PlatformRepositories } from "@pluginmax/database";
+import { LocalFileStore, type FileRef } from "@pluginmax/files";
 import Fastify, {
   type FastifyInstance,
   type FastifyServerOptions,
@@ -14,12 +18,29 @@ import { ZodError, z } from "zod";
 
 export interface BuildApiOptions {
   readonly databaseUrl: string;
+  readonly fileStoreRoot: string;
   readonly logger?: FastifyServerOptions["logger"];
   readonly database?: Database;
 }
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
 const runParamsSchema = z.object({ runId: z.string().uuid() });
+const artifactParamsSchema = z.object({ artifactId: z.string().uuid() });
+const workflowParamsSchema = z.object({ workflowId: z.string().uuid() });
+const workflowInstanceParamsSchema = z.object({
+  instanceId: z.string().uuid(),
+});
+const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
+const projectParamsSchema = z.object({ projectId: z.string().uuid() });
+const workflowStartSchema = z.object({
+  title: z.string().trim().min(1).max(180),
+});
+const meetingMessageInputSchema = z.object({
+  content: z.string().trim().min(1).max(20_000),
+});
+const meetingCloseInputSchema = z.object({
+  summary: z.string().trim().max(20_000).default(""),
+});
 const listTasksQuerySchema = z.object({
   projectId: z.string().uuid().optional(),
 });
@@ -41,6 +62,7 @@ export function buildApi(options: BuildApiOptions): {
   database: Database;
 } {
   const database = options.database ?? new Database(options.databaseUrl);
+  const fileStore = new LocalFileStore(options.fileStoreRoot);
   const application = new PlatformApplication(
     new PlatformRepositories(database),
   );
@@ -104,6 +126,12 @@ export function buildApi(options: BuildApiOptions): {
     return reply.status(202).send(await application.dispatchTask(id));
   });
 
+  app.post("/api/v1/tasks/:id/review", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = taskReviewInputSchema.parse(request.body);
+    return reply.send(await application.reviewTask(id, input));
+  });
+
   app.get("/api/v1/tasks/:id/runs", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     return reply.send({ items: await application.listTaskRuns(id) });
@@ -140,18 +168,109 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/runs/:runId/artifacts", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
-    const detail = await application.getRunDetail(runId);
-    return reply.send({
-      items: detail.events
-        .filter((event) => event.type === "artifact.created")
-        .map((event) => ({ ...event.data, createdAt: event.createdAt })),
-    });
+    return reply.send({ items: await application.listArtifacts(runId) });
+  });
+
+  app.get("/api/v1/artifacts/:artifactId/download", async (request, reply) => {
+    const { artifactId } = artifactParamsSchema.parse(request.params);
+    const artifact = await application.getArtifact(artifactId);
+    const ref: FileRef = {
+      id: artifact.id,
+      storageKey: artifact.storageKey,
+      name: artifact.name,
+      mimeType: artifact.mimeType,
+      size: artifact.size,
+      sha256: artifact.sha256,
+    };
+    const content = await fileStore.read(ref);
+    return reply
+      .header("content-type", artifact.mimeType)
+      .header(
+        "content-disposition",
+        `attachment; filename="${artifact.name.replaceAll('"', "")}"`,
+      )
+      .send(Buffer.from(content));
   });
 
   app.post("/api/v1/runs/:runId/cancel", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
     await application.cancelRun(runId);
     return reply.status(202).send({ ok: true });
+  });
+
+  app.get("/api/v1/projects/:projectId/memory", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return reply.send({ items: await application.listMemory(projectId) });
+  });
+
+  app.get("/api/v1/workbench", async (_request, reply) => {
+    return reply.send(await application.getWorkbench());
+  });
+
+  app.get("/api/v1/workflows", async (request, reply) => {
+    const { projectId } = listTasksQuerySchema.parse(request.query);
+    if (projectId === undefined) {
+      throw new ApplicationError("invalid_input", "projectId is required", 400);
+    }
+    return reply.send({ items: await application.listWorkflows(projectId) });
+  });
+
+  app.post("/api/v1/workflows", async (request, reply) => {
+    const input = createWorkflowInputSchema.parse(request.body);
+    return reply.status(201).send(await application.createWorkflow(input));
+  });
+
+  app.post("/api/v1/workflows/:workflowId/start", async (request, reply) => {
+    const { workflowId } = workflowParamsSchema.parse(request.params);
+    const { title } = workflowStartSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.startWorkflow(workflowId, title));
+  });
+
+  app.get("/api/v1/workflow-instances/:instanceId", async (request, reply) => {
+    const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+    return reply.send(await application.getWorkflowInstance(instanceId));
+  });
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/advance",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      return reply.send(await application.advanceWorkflow(instanceId));
+    },
+  );
+
+  app.get("/api/v1/meetings", async (request, reply) => {
+    const { projectId } = listTasksQuerySchema.parse(request.query);
+    if (projectId === undefined) {
+      throw new ApplicationError("invalid_input", "projectId is required", 400);
+    }
+    return reply.send({ items: await application.listMeetings(projectId) });
+  });
+
+  app.post("/api/v1/meetings", async (request, reply) => {
+    const input = createMeetingInputSchema.parse(request.body);
+    return reply.status(201).send(await application.createMeeting(input));
+  });
+
+  app.get("/api/v1/meetings/:meetingId", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    return reply.send(await application.getMeeting(meetingId));
+  });
+
+  app.post("/api/v1/meetings/:meetingId/messages", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = meetingMessageInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.postMeetingMessage(meetingId, input.content));
+  });
+
+  app.post("/api/v1/meetings/:meetingId/close", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = meetingCloseInputSchema.parse(request.body);
+    return reply.send(await application.closeMeeting(meetingId, input.summary));
   });
 
   app.get("/api/v1/runs/:runId/stream", async (request, reply) => {

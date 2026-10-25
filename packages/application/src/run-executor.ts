@@ -10,6 +10,7 @@ import {
 import { buildTaskContext } from "@pluginmax/context";
 import type { Agent, Run, Task } from "@pluginmax/contracts";
 import type { PlatformRepositories } from "@pluginmax/database";
+import { LocalFileStore } from "@pluginmax/files";
 
 export class RunCancelledError extends Error {
   constructor() {
@@ -20,6 +21,7 @@ export class RunCancelledError extends Error {
 
 export interface RunExecutorOptions {
   readonly workspaceRoot: string;
+  readonly fileStoreRoot: string;
   readonly dsh: DshSdkAdapterOptions;
 }
 
@@ -37,10 +39,14 @@ function runtimeFor(
 }
 
 export class RunExecutor {
+  private readonly fileStore: LocalFileStore;
+
   constructor(
     private readonly repositories: PlatformRepositories,
     private readonly options: RunExecutorOptions,
-  ) {}
+  ) {
+    this.fileStore = new LocalFileStore(options.fileStoreRoot);
+  }
 
   async execute(runId: string): Promise<void> {
     const run = await this.requireRun(runId);
@@ -99,11 +105,32 @@ export class RunExecutor {
             event.output,
             null,
           );
+          const ref = await this.fileStore.put({
+            workspaceId: run.projectId,
+            name: `${task.title.replace(/[^a-zA-Z0-9._-]+/g, "-")}-result.md`,
+            mimeType: "text/markdown",
+            content: Buffer.from(event.output, "utf8"),
+          });
+          const artifact = await this.repositories.artifacts.save({
+            runId,
+            projectId: run.projectId,
+            ref,
+          });
           await this.repositories.runs.appendEvent(
             runId,
             "run.completed",
             "Run 执行完成，等待人工验收",
             { output: event.output },
+          );
+          await this.repositories.runs.appendEvent(
+            runId,
+            "artifact.created",
+            "最终交付物已保存",
+            {
+              artifactId: artifact.id,
+              name: artifact.name,
+              size: artifact.size,
+            },
           );
           await this.repositories.tasks.setStatus(task.id, "review");
         }
@@ -163,12 +190,6 @@ export class RunExecutor {
         await this.repositories.runs.appendDelta(runId, event.text);
         return;
       case "artifact":
-        await this.repositories.runs.appendEvent(
-          runId,
-          "artifact.created",
-          event.summary,
-          { name: event.name },
-        );
         return;
       case "completed":
         return;

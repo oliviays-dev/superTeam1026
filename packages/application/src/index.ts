@@ -1,12 +1,23 @@
 import { randomUUID } from "node:crypto";
 import type {
   Agent,
+  Artifact,
+  CreateMeetingInput,
   CreateProjectInput,
   CreateTaskInput,
+  CreateWorkflowInput,
+  Meeting,
+  MeetingDetail,
+  MeetingMessage,
+  MemoryTopic,
   Project,
   RunDetail,
   RunInputSnapshot,
   Task,
+  TaskReviewInput,
+  WorkbenchSummary,
+  WorkflowDefinition,
+  WorkflowInstance,
 } from "@pluginmax/contracts";
 import { canTransitionTask, isTerminalRunStatus } from "@pluginmax/domain";
 import type { PlatformRepositories } from "@pluginmax/database";
@@ -147,6 +158,159 @@ export class PlatformApplication {
         409,
       );
     }
+  }
+
+  async reviewTask(taskId: string, input: TaskReviewInput): Promise<Task> {
+    const task = await this.getTask(taskId);
+    if (task.status !== "review") {
+      throw new ApplicationError(
+        "task_not_in_review",
+        "Task is not waiting for review",
+        409,
+      );
+    }
+    if (input.decision === "return" && input.note.trim() === "") {
+      throw new ApplicationError(
+        "review_note_required",
+        "A return decision requires a note",
+        400,
+      );
+    }
+    const runs = await this.repositories.runs.listByTask(taskId);
+    const latestRun = runs.find((run) => run.status === "completed");
+    await this.repositories.reviews.save(taskId, "local-admin", input);
+    if (input.decision === "return") {
+      await this.repositories.tasks.setStatus(taskId, "queued");
+      return this.getTask(taskId);
+    }
+    if (latestRun === undefined || latestRun.output === null) {
+      throw new ApplicationError(
+        "run_output_missing",
+        "Completed run output is unavailable",
+        409,
+      );
+    }
+    await this.repositories.tasks.setStatus(taskId, "done");
+    await this.repositories.memory.publishTask({
+      projectId: task.projectId,
+      taskId: task.id,
+      title: task.title,
+      content: latestRun.output,
+    });
+    return this.getTask(taskId);
+  }
+
+  async listArtifacts(runId: string): Promise<Artifact[]> {
+    return this.repositories.artifacts.listByRun(runId);
+  }
+
+  async getArtifact(id: string): Promise<Artifact> {
+    const artifact = await this.repositories.artifacts.get(id);
+    if (artifact === undefined) {
+      throw new ApplicationError(
+        "artifact_not_found",
+        "Artifact not found",
+        404,
+      );
+    }
+    return artifact;
+  }
+
+  async listMemory(projectId: string): Promise<MemoryTopic[]> {
+    return this.repositories.memory.list(projectId);
+  }
+
+  async getWorkbench(): Promise<WorkbenchSummary> {
+    return this.repositories.workbench.summary();
+  }
+
+  async listWorkflows(projectId: string): Promise<WorkflowDefinition[]> {
+    return this.repositories.workflows.list(projectId);
+  }
+
+  createWorkflow(input: CreateWorkflowInput): Promise<WorkflowDefinition> {
+    return this.repositories.workflows.create(input);
+  }
+
+  async startWorkflow(
+    workflowId: string,
+    title: string,
+  ): Promise<WorkflowInstance> {
+    const workflow = await this.repositories.workflows.get(workflowId);
+    if (workflow === undefined) {
+      throw new ApplicationError(
+        "workflow_not_found",
+        "Workflow not found",
+        404,
+      );
+    }
+    return this.repositories.workflows.start(workflow, title);
+  }
+
+  async getWorkflowInstance(id: string): Promise<WorkflowInstance> {
+    const instance = await this.repositories.workflows.getInstance(id);
+    if (instance === undefined) {
+      throw new ApplicationError(
+        "workflow_instance_not_found",
+        "Workflow instance not found",
+        404,
+      );
+    }
+    return instance;
+  }
+
+  async advanceWorkflow(id: string): Promise<WorkflowInstance> {
+    const instance = await this.repositories.workflows.advance(id);
+    if (instance === undefined) {
+      throw new ApplicationError(
+        "workflow_instance_not_found",
+        "Workflow instance not found",
+        404,
+      );
+    }
+    return instance;
+  }
+
+  async listMeetings(projectId: string): Promise<Meeting[]> {
+    return this.repositories.meetings.list(projectId);
+  }
+
+  async createMeeting(input: CreateMeetingInput): Promise<Meeting> {
+    const agents = await this.repositories.agents.list();
+    return this.repositories.meetings.create(input, agents);
+  }
+
+  async getMeeting(id: string): Promise<MeetingDetail> {
+    const detail = await this.repositories.meetings.detail(id);
+    if (detail === undefined) {
+      throw new ApplicationError("meeting_not_found", "Meeting not found", 404);
+    }
+    return detail;
+  }
+
+  async postMeetingMessage(
+    meetingId: string,
+    content: string,
+  ): Promise<MeetingMessage> {
+    const detail = await this.getMeeting(meetingId);
+    if (detail.meeting.status === "closed") {
+      throw new ApplicationError("meeting_closed", "Meeting is closed", 409);
+    }
+    return this.repositories.meetings.postMessage(
+      meetingId,
+      "human",
+      "local-admin",
+      "Local Admin",
+      content,
+    );
+  }
+
+  async closeMeeting(meetingId: string, summary: string): Promise<Meeting> {
+    const meeting = await this.repositories.meetings.close(meetingId, summary);
+    if (meeting === undefined) {
+      throw new ApplicationError("meeting_not_found", "Meeting not found", 404);
+    }
+    return meeting;
   }
 }
 

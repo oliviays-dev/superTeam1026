@@ -30,6 +30,14 @@ import {
 } from "./rows.js";
 import { DEFAULT_AGENT_ID } from "./schema.js";
 import { ContextRepository } from "./context-repository.js";
+import {
+  ArtifactRepository,
+  MeetingRepository,
+  MemoryRepository,
+  ReviewRepository,
+  WorkbenchRepository,
+  WorkflowRepository,
+} from "./collaboration-repositories.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -429,6 +437,12 @@ export class PlatformRepositories {
   readonly runs: RunRepository;
   readonly jobs: JobRepository;
   readonly contexts: ContextRepository;
+  readonly artifacts: ArtifactRepository;
+  readonly memory: MemoryRepository;
+  readonly reviews: ReviewRepository;
+  readonly workflows: WorkflowRepository;
+  readonly meetings: MeetingRepository;
+  readonly workbench: WorkbenchRepository;
 
   constructor(database: Database) {
     this.projects = new ProjectRepository(database);
@@ -437,5 +451,11 @@ export class PlatformRepositories {
     this.runs = new RunRepository(database);
     this.jobs = new JobRepository(database);
     this.contexts = new ContextRepository(database);
+    this.artifacts = new ArtifactRepository(database);
+    this.memory = new MemoryRepository(database);
+    this.reviews = new ReviewRepository(database);
+    this.workflows = new WorkflowRepository(database);
+    this.meetings = new MeetingRepository(database);
+    this.workbench = new WorkbenchRepository(database);
   }
 }

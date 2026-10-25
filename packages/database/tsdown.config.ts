@@ -6,5 +6,5 @@ export default defineConfig({
   format: "esm",
   outDir: "lib",
   outExtensions: () => ({ js: ".js", dts: ".d.ts" }),
-  external: ["@pluginmax/contracts", "pg"],
+  external: ["@pluginmax/contracts", "@pluginmax/files", "pg"],
 });

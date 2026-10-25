@@ -5,6 +5,7 @@ loadLocalEnv();
 const config = loadConfig();
 const { app } = buildApi({
   databaseUrl: config.databaseUrl,
+  fileStoreRoot: config.fileStoreRoot,
   logger: { level: config.logLevel },
 });
 

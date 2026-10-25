@@ -1,5 +1,6 @@
 import type {
   Agent,
+  Artifact,
   PlatformRunEvent,
   Project,
   Task,
@@ -9,18 +10,26 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Bot,
+  Check,
   CheckCircle2,
   CircleStop,
+  Download,
   FileText,
+  FolderKanban,
+  LayoutDashboard,
   LoaderCircle,
+  MessagesSquare,
   Play,
   Plus,
   RefreshCw,
+  Undo2,
+  Workflow as WorkflowIcon,
   Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   cancelRun,
+  artifactDownloadUrl,
   createProject,
   createTask,
   dispatchTask,
@@ -28,11 +37,20 @@ import {
   getRunContext,
   getRunEvents,
   listAgents,
+  listArtifacts,
   listProjects,
   listTaskRuns,
   listTasks,
+  reviewTask,
   subscribeToRun,
 } from "./api.js";
+import {
+  MeetingsView,
+  WorkbenchView,
+  WorkflowsView,
+} from "./OperationsViews.js";
+
+type AppView = "projects" | "workbench" | "workflows" | "meetings";
 
 const statusText: Record<string, string> = {
   queued: "排队中",
@@ -223,6 +241,11 @@ function RunView({ runId }: { runId: string }) {
     queryFn: () => getRunContext(runId),
     retry: false,
   });
+  const artifactsQuery = useQuery({
+    queryKey: ["run-artifacts", runId],
+    queryFn: () => listArtifacts(runId),
+    enabled: runQuery.data?.run.status === "completed",
+  });
   const run = runQuery.data?.run;
 
   useEffect(() => {
@@ -252,6 +275,9 @@ function RunView({ runId }: { runId: string }) {
         );
         if (terminal.has(event.type.replace("run.", ""))) {
           void queryClient.invalidateQueries({ queryKey: ["run", runId] });
+          void queryClient.invalidateQueries({
+            queryKey: ["run-artifacts", runId],
+          });
           void queryClient.invalidateQueries({ queryKey: ["tasks"] });
           void queryClient.invalidateQueries({ queryKey: ["task-runs"] });
         }
@@ -280,7 +306,7 @@ function RunView({ runId }: { runId: string }) {
         ?.steps as string[] | undefined,
     [events],
   );
-  const artifacts = events.filter((event) => event.type === "artifact.created");
+  const artifacts: Artifact[] = artifactsQuery.data ?? [];
 
   if (run === undefined) {
     return (
@@ -410,15 +436,30 @@ function RunView({ runId }: { runId: string }) {
             <span className="stream-caret" />
           )}
         </pre>
-        {artifacts.length > 0 && (
+        {artifacts.length > 0 ? (
           <div className="artifact-list">
-            {artifacts.map((event) => (
-              <div key={event.id}>
+            {artifacts.map((artifact) => (
+              <a
+                href={artifactDownloadUrl(artifact.id)}
+                key={artifact.id}
+                download
+              >
                 <FileText size={14} />
-                <span>{String(event.data?.name ?? event.summary)}</span>
-              </div>
+                <span>{artifact.name}</span>
+                <Download size={13} />
+              </a>
             ))}
           </div>
+        ) : (
+          events.some((event) => event.type === "artifact.created") && (
+            <button
+              className="text-button"
+              onClick={() => void artifactsQuery.refetch()}
+            >
+              <RefreshCw size={13} />
+              加载交付物
+            </button>
+          )
         )}
       </section>
     </div>
@@ -435,6 +476,8 @@ export function App() {
   const [projectId, setProjectId] = useState("");
   const [taskId, setTaskId] = useState("");
   const [runId, setRunId] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+  const [view, setView] = useState<AppView>("projects");
   const selectedProjectId = projectId || projectsQuery.data?.[0]?.id || "";
   const tasksQuery = useQuery({
     queryKey: ["tasks", selectedProjectId],
@@ -453,6 +496,17 @@ export function App() {
       setRunId(createdRunId);
       void queryClient.invalidateQueries({ queryKey: ["tasks"] });
       void queryClient.invalidateQueries({ queryKey: ["task-runs", taskId] });
+    },
+  });
+  const reviewMutation = useMutation({
+    mutationFn: (decision: "approve" | "return") =>
+      reviewTask(taskId, decision, reviewNote),
+    onSuccess: () => {
+      setReviewNote("");
+      setRunId("");
+      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      void queryClient.invalidateQueries({ queryKey: ["memory"] });
+      void queryClient.invalidateQueries({ queryKey: ["workbench-summary"] });
     },
   });
 
@@ -485,145 +539,244 @@ export function App() {
             <span>Platform V1</span>
           </div>
         </div>
+        <nav className="topnav" aria-label="主导航">
+          <button
+            className={view === "workbench" ? "active" : undefined}
+            onClick={() => setView("workbench")}
+          >
+            <LayoutDashboard size={15} />
+            工作台
+          </button>
+          <button
+            className={view === "projects" ? "active" : undefined}
+            onClick={() => setView("projects")}
+          >
+            <FolderKanban size={15} />
+            项目
+          </button>
+          <button
+            className={view === "workflows" ? "active" : undefined}
+            onClick={() => setView("workflows")}
+          >
+            <WorkflowIcon size={15} />
+            工作流
+          </button>
+          <button
+            className={view === "meetings" ? "active" : undefined}
+            onClick={() => setView("meetings")}
+          >
+            <MessagesSquare size={15} />
+            会议
+          </button>
+        </nav>
         <div className="topbar-status">
           <span className="pulse-dot" />
           Local workspace
         </div>
       </header>
 
-      <main className="workspace-grid">
-        <aside className="project-rail">
-          <div className="rail-heading">
-            <span className="eyebrow">Workspace</span>
-            <h1>项目</h1>
-          </div>
-          <ProjectForm
-            onCreated={(project) => {
-              setProjectId(project.id);
-              setTaskId("");
-              setRunId("");
-            }}
-          />
-          <div className="project-list">
-            {projectsQuery.data?.map((project) => (
-              <button
-                key={project.id}
-                className={`project-row ${
-                  project.id === selectedProjectId ? "active" : ""
-                }`}
-                onClick={() => {
-                  setProjectId(project.id);
-                  setTaskId("");
-                  setRunId("");
-                }}
-              >
-                <span>{project.name}</span>
-                <small>{project.code}</small>
-              </button>
-            ))}
-            {projectsQuery.data?.length === 0 && (
-              <div className="rail-empty">创建第一个项目</div>
-            )}
-          </div>
-        </aside>
-
-        <section className="task-column">
-          {selectedProjectId === "" ? (
-            <div className="empty-state">选择或创建项目</div>
-          ) : (
-            <>
-              <div className="task-column-head">
-                <div>
-                  <span className="eyebrow">Project</span>
-                  <h2>
-                    {
-                      projectsQuery.data?.find(
-                        (project) => project.id === selectedProjectId,
-                      )?.name
-                    }
-                  </h2>
-                </div>
+      {view === "projects" ? (
+        <main className="workspace-grid">
+          <aside className="project-rail">
+            <div className="rail-heading">
+              <span className="eyebrow">Workspace</span>
+              <h1>项目</h1>
+            </div>
+            <ProjectForm
+              onCreated={(project) => {
+                setProjectId(project.id);
+                setTaskId("");
+                setRunId("");
+              }}
+            />
+            <div className="project-list">
+              {projectsQuery.data?.map((project) => (
                 <button
-                  className="icon-button"
-                  type="button"
-                  title="刷新任务"
-                  onClick={() => void tasksQuery.refetch()}
+                  key={project.id}
+                  className={`project-row ${
+                    project.id === selectedProjectId ? "active" : ""
+                  }`}
+                  onClick={() => {
+                    setProjectId(project.id);
+                    setTaskId("");
+                    setRunId("");
+                  }}
                 >
-                  <RefreshCw size={16} />
+                  <span>{project.name}</span>
+                  <small>{project.code}</small>
                 </button>
-              </div>
-              <TaskForm
-                projectId={selectedProjectId}
-                agents={agentsQuery.data ?? []}
-                onCreated={(task) => {
-                  setTaskId(task.id);
-                  setRunId("");
-                }}
-              />
-              <div className="task-list">
-                {tasksQuery.data?.map((task) => (
-                  <button
-                    className={`task-card ${
-                      task.id === taskId ? "active" : ""
-                    }`}
-                    key={task.id}
-                    onClick={() => {
-                      setTaskId(task.id);
-                      setRunId("");
-                    }}
-                  >
-                    <div className="task-card-top">
-                      <span>{task.title}</span>
-                      <StatusBadge status={task.status} />
-                    </div>
-                    <p>{task.description}</p>
-                    <div className="task-card-foot">
-                      <span>{formatDateTime(task.updatedAt)}</span>
-                      <span>{task.acceptance.length} 项验收</span>
-                    </div>
-                  </button>
-                ))}
-                {tasksQuery.data?.length === 0 && (
-                  <div className="empty-state compact">当前项目还没有任务</div>
-                )}
-              </div>
-            </>
-          )}
-        </section>
+              ))}
+              {projectsQuery.data?.length === 0 && (
+                <div className="rail-empty">创建第一个项目</div>
+              )}
+            </div>
+          </aside>
 
-        <section className="run-column">
-          {selectedTask !== undefined && (
-            <div className="task-actionbar">
-              <div>
-                <span className="eyebrow">Selected task</span>
-                <strong>{selectedTask.title}</strong>
-              </div>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={dispatchMutation.isPending || taskId === ""}
-                onClick={() => dispatchMutation.mutate()}
-              >
-                {dispatchMutation.isPending ? (
-                  <LoaderCircle className="spin" size={16} />
+          <section className="task-column">
+            {selectedProjectId === "" ? (
+              <div className="empty-state">选择或创建项目</div>
+            ) : (
+              <>
+                <div className="task-column-head">
+                  <div>
+                    <span className="eyebrow">Project</span>
+                    <h2>
+                      {
+                        projectsQuery.data?.find(
+                          (project) => project.id === selectedProjectId,
+                        )?.name
+                      }
+                    </h2>
+                  </div>
+                  <button
+                    className="icon-button"
+                    type="button"
+                    title="刷新任务"
+                    onClick={() => void tasksQuery.refetch()}
+                  >
+                    <RefreshCw size={16} />
+                  </button>
+                </div>
+                <TaskForm
+                  projectId={selectedProjectId}
+                  agents={agentsQuery.data ?? []}
+                  onCreated={(task) => {
+                    setTaskId(task.id);
+                    setRunId("");
+                  }}
+                />
+                <div className="task-list">
+                  {tasksQuery.data?.map((task) => (
+                    <button
+                      className={`task-card ${
+                        task.id === taskId ? "active" : ""
+                      }`}
+                      key={task.id}
+                      onClick={() => {
+                        setTaskId(task.id);
+                        setRunId("");
+                      }}
+                    >
+                      <div className="task-card-top">
+                        <span>{task.title}</span>
+                        <StatusBadge status={task.status} />
+                      </div>
+                      <p>{task.description}</p>
+                      <div className="task-card-foot">
+                        <span>{formatDateTime(task.updatedAt)}</span>
+                        <span>{task.acceptance.length} 项验收</span>
+                      </div>
+                    </button>
+                  ))}
+                  {tasksQuery.data?.length === 0 && (
+                    <div className="empty-state compact">
+                      当前项目还没有任务
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
+
+          <section className="run-column">
+            {selectedTask !== undefined && (
+              <div className="task-actionbar">
+                <div>
+                  <span className="eyebrow">Selected task</span>
+                  <strong>{selectedTask.title}</strong>
+                </div>
+                {selectedTask.status === "review" ? (
+                  <div className="review-actions">
+                    <input
+                      value={reviewNote}
+                      onChange={(event) => setReviewNote(event.target.value)}
+                      placeholder="验收意见或退回原因"
+                    />
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      disabled={reviewMutation.isPending}
+                      onClick={() => reviewMutation.mutate("return")}
+                    >
+                      <Undo2 size={15} />
+                      退回
+                    </button>
+                    <button
+                      className="primary-button"
+                      type="button"
+                      disabled={reviewMutation.isPending}
+                      onClick={() => reviewMutation.mutate("approve")}
+                    >
+                      <Check size={15} />
+                      验收通过
+                    </button>
+                  </div>
                 ) : (
-                  <Play size={16} />
+                  <button
+                    className="primary-button"
+                    type="button"
+                    disabled={
+                      dispatchMutation.isPending ||
+                      taskId === "" ||
+                      selectedTask.status !== "queued"
+                    }
+                    onClick={() => dispatchMutation.mutate()}
+                  >
+                    {dispatchMutation.isPending ? (
+                      <LoaderCircle className="spin" size={16} />
+                    ) : (
+                      <Play size={16} />
+                    )}
+                    派发执行
+                  </button>
                 )}
-                派发执行
-              </button>
-            </div>
-          )}
-          {runId !== "" ? (
-            <RunView runId={runId} />
-          ) : (
-            <div className="empty-state run-empty">
-              <Activity size={28} />
-              <strong>还没有运行记录</strong>
-              <span>选择任务并派发后，这里会显示输入、进展和输出。</span>
-            </div>
-          )}
-        </section>
-      </main>
+              </div>
+            )}
+            {runId !== "" ? (
+              <RunView runId={runId} />
+            ) : (
+              <div className="empty-state run-empty">
+                <Activity size={28} />
+                <strong>还没有运行记录</strong>
+                <span>选择任务并派发后，这里会显示输入、进展和输出。</span>
+              </div>
+            )}
+          </section>
+        </main>
+      ) : view === "workbench" ? (
+        <WorkbenchView
+          projects={projectsQuery.data ?? []}
+          agents={agentsQuery.data ?? []}
+          projectId={selectedProjectId}
+          onProjectChange={(nextProjectId) => {
+            setProjectId(nextProjectId);
+            setTaskId("");
+            setRunId("");
+          }}
+        />
+      ) : view === "workflows" ? (
+        <WorkflowsView
+          projects={projectsQuery.data ?? []}
+          agents={agentsQuery.data ?? []}
+          projectId={selectedProjectId}
+          onProjectChange={(nextProjectId) => {
+            setProjectId(nextProjectId);
+            setTaskId("");
+            setRunId("");
+          }}
+        />
+      ) : (
+        <MeetingsView
+          projects={projectsQuery.data ?? []}
+          agents={agentsQuery.data ?? []}
+          projectId={selectedProjectId}
+          onProjectChange={(nextProjectId) => {
+            setProjectId(nextProjectId);
+            setTaskId("");
+            setRunId("");
+          }}
+        />
+      )}
     </div>
   );
 }

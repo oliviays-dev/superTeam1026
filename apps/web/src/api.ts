@@ -1,15 +1,24 @@
 import type {
   Agent,
+  Artifact,
   ContextPack,
   ContextReceipt,
   CreateProjectInput,
   CreateTaskInput,
+  CreateWorkflowInput,
+  Meeting,
+  MeetingDetail,
+  MeetingMessage,
+  MemoryTopic,
   PlatformRunEvent,
   Project,
   Run,
   RunDelta,
   RunDetail,
   Task,
+  WorkbenchSummary,
+  WorkflowDefinition,
+  WorkflowInstance,
 } from "@pluginmax/contracts";
 
 const API_BASE = "/api/v1";
@@ -78,6 +87,17 @@ export function dispatchTask(
   return request(`/tasks/${taskId}/dispatch`, { method: "POST" });
 }
 
+export function reviewTask(
+  taskId: string,
+  decision: "approve" | "return",
+  note: string,
+): Promise<Task> {
+  return request(`/tasks/${taskId}/review`, {
+    method: "POST",
+    body: JSON.stringify({ decision, note }),
+  });
+}
+
 export async function listTaskRuns(taskId: string): Promise<Run[]> {
   return (await request<ListResponse<Run>>(`/tasks/${taskId}/runs`)).items;
 }
@@ -104,6 +124,104 @@ export function getRunEvents(
 
 export function cancelRun(runId: string): Promise<{ ok: true }> {
   return request(`/runs/${runId}/cancel`, { method: "POST" });
+}
+
+export async function listArtifacts(runId: string): Promise<Artifact[]> {
+  return (await request<ListResponse<Artifact>>(`/runs/${runId}/artifacts`))
+    .items;
+}
+
+export function artifactDownloadUrl(artifactId: string): string {
+  return `${API_BASE}/artifacts/${artifactId}/download`;
+}
+
+export async function listMemory(projectId: string): Promise<MemoryTopic[]> {
+  return (
+    await request<ListResponse<MemoryTopic>>(`/projects/${projectId}/memory`)
+  ).items;
+}
+
+export function getWorkbench(): Promise<WorkbenchSummary> {
+  return request("/workbench");
+}
+
+export async function listWorkflows(
+  projectId: string,
+): Promise<WorkflowDefinition[]> {
+  return (
+    await request<ListResponse<WorkflowDefinition>>(
+      `/workflows?projectId=${encodeURIComponent(projectId)}`,
+    )
+  ).items;
+}
+
+export function createWorkflow(
+  input: CreateWorkflowInput,
+): Promise<WorkflowDefinition> {
+  return request("/workflows", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function startWorkflow(
+  workflowId: string,
+  title: string,
+): Promise<WorkflowInstance> {
+  return request(`/workflows/${workflowId}/start`, {
+    method: "POST",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function advanceWorkflow(instanceId: string): Promise<WorkflowInstance> {
+  return request(`/workflow-instances/${instanceId}/advance`, {
+    method: "POST",
+  });
+}
+
+export async function listMeetings(projectId: string): Promise<Meeting[]> {
+  return (
+    await request<ListResponse<Meeting>>(
+      `/meetings?projectId=${encodeURIComponent(projectId)}`,
+    )
+  ).items;
+}
+
+export function createMeeting(input: {
+  projectId: string;
+  title: string;
+  agenda: string;
+  agentIds: string[];
+}): Promise<Meeting> {
+  return request("/meetings", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getMeeting(id: string): Promise<MeetingDetail> {
+  return request(`/meetings/${id}`);
+}
+
+export function postMeetingMessage(
+  meetingId: string,
+  content: string,
+): Promise<MeetingMessage> {
+  return request(`/meetings/${meetingId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function closeMeeting(
+  meetingId: string,
+  summary: string,
+): Promise<Meeting> {
+  return request(`/meetings/${meetingId}/close`, {
+    method: "POST",
+    body: JSON.stringify({ summary }),
+  });
 }
 
 export function subscribeToRun(

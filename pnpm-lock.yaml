@@ -44,6 +44,9 @@ importers:
       '@pluginmax/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@pluginmax/files':
+        specifier: workspace:*
+        version: link:../../packages/files
       fastify:
         specifier: ^5.6.2
         version: 5.12.7
@@ -126,6 +129,9 @@ importers:
       '@pluginmax/domain':
         specifier: workspace:*
         version: link:../domain
+      '@pluginmax/files':
+        specifier: workspace:*
+        version: link:../files
 
   packages/config: {}
 
@@ -146,6 +152,9 @@ importers:
       '@pluginmax/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@pluginmax/files':
+        specifier: workspace:*
+        version: link:../files
       pg:
         specifier: ^8.16.3
         version: 8.23.1
