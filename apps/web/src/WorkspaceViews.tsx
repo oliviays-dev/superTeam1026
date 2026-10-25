@@ -21,6 +21,7 @@ import {
   Search,
   Send,
   Undo2,
+  UsersRound,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -37,6 +38,7 @@ import {
   updateProject,
   updateTask,
 } from "./api.js";
+import { ProjectMembershipPanel } from "./ProjectMembershipPanel.js";
 import { RunView } from "./RunView.js";
 
 interface SharedViewProps {
@@ -272,7 +274,9 @@ export function ProjectsView({
   onOpenTask: (taskId: string, projectId: string) => void;
 }) {
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<"tasks" | "memory" | "overview">("overview");
+  const [tab, setTab] = useState<"tasks" | "memory" | "members" | "overview">(
+    "overview",
+  );
   const [editOpen, setEditOpen] = useState(false);
   const selectedProjectId = projectId || projects[0]?.id || "";
   const tasksQuery = useQuery({
@@ -442,6 +446,14 @@ export function ProjectsView({
                 >
                   项目记忆 <span>{memory.length}</span>
                 </button>
+                <button
+                  className={tab === "members" ? "active" : ""}
+                  type="button"
+                  onClick={() => setTab("members")}
+                >
+                  <UsersRound size={13} />
+                  成员与角色
+                </button>
               </div>
 
               {tab === "overview" && (
@@ -503,6 +515,12 @@ export function ProjectsView({
                 />
               )}
               {tab === "memory" && <ProjectMemoryList memory={memory} />}
+              {tab === "members" && (
+                <ProjectMembershipPanel
+                  projectId={project.id}
+                  agents={agents}
+                />
+              )}
             </>
           )}
         </section>

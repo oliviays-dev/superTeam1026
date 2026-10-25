@@ -1366,6 +1366,278 @@ code {
   font-size: 10.5px;
 }
 
+.project-membership {
+  display: grid;
+  gap: 10px;
+}
+
+.membership-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.membership-toolbar > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.membership-toolbar strong {
+  font-size: 13px;
+}
+
+.membership-toolbar span {
+  color: var(--pm-label-tertiary);
+  font-size: 10.5px;
+}
+
+.membership-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+}
+
+.membership-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(240px, 0.75fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.membership-member-list {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.membership-member-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 10px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 8px;
+  background: var(--pm-bg-layer-1);
+}
+
+.membership-member-row.status-inactive {
+  opacity: 0.62;
+}
+
+.membership-avatar {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--pm-accent);
+  background: color-mix(in srgb, var(--pm-accent) 13%, transparent);
+}
+
+.membership-avatar.agent {
+  color: var(--pm-purple);
+  background: color-mix(in srgb, var(--pm-purple) 14%, transparent);
+}
+
+.membership-member-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.membership-member-copy > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.membership-member-copy strong {
+  font-size: 12.5px;
+}
+
+.membership-member-copy p {
+  margin: 0;
+  color: var(--pm-label-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.membership-role-chips {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.membership-role-chips em {
+  color: var(--pm-label-tertiary);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.role-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--pm-accent) 28%, transparent);
+  border-radius: 5px;
+  color: var(--pm-accent);
+  background: color-mix(in srgb, var(--pm-accent) 8%, transparent);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.membership-row-actions {
+  display: flex;
+  gap: 3px;
+}
+
+.membership-role-panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 8px;
+  background: var(--pm-bg-layer-1);
+}
+
+.membership-role-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px;
+  border-bottom: 1px solid var(--pm-border-l2);
+  background: var(--pm-bg-layer-2);
+}
+
+.membership-role-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.membership-role-head strong {
+  font-size: 12px;
+}
+
+.membership-role-head span {
+  color: var(--pm-label-tertiary);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.membership-role-head > svg {
+  flex: none;
+  color: var(--pm-label-tertiary);
+}
+
+.membership-role-list {
+  display: grid;
+}
+
+.membership-role-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--pm-border-l2);
+}
+
+.membership-role-row:last-child {
+  border-bottom: 0;
+}
+
+.membership-role-row > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.membership-role-row strong {
+  overflow: hidden;
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.membership-role-row small {
+  color: var(--pm-label-tertiary);
+  font-size: 10px;
+}
+
+.membership-role-row > div {
+  flex: none;
+  display: flex;
+  gap: 3px;
+}
+
+.role-checkboxes {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--pm-border-l3);
+  border-radius: 7px;
+}
+
+.role-checkboxes legend {
+  padding: 0 5px;
+  color: var(--pm-label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.role-checkboxes > p {
+  margin: 0;
+  color: var(--pm-label-tertiary);
+  font-size: 11px;
+}
+
+.role-checkbox {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.role-checkbox input {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--pm-button-primary);
+}
+
+.role-checkbox > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.role-checkbox strong {
+  font-size: 11.5px;
+}
+
+.role-checkbox small {
+  color: var(--pm-label-tertiary);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
 .memory-list {
   display: grid;
   gap: 7px;
@@ -2908,5 +3180,38 @@ code {
   .agent-activity-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 3px;
+  }
+}
+
+@media (max-width: 860px) {
+  .membership-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .membership-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .membership-toolbar-actions {
+    width: 100%;
+  }
+
+  .membership-toolbar-actions .pm-btn {
+    flex: 1;
+    justify-content: center;
+  }
+
+  .membership-member-row {
+    grid-template-columns: 32px minmax(0, 1fr) auto;
+    gap: 8px;
+    padding: 9px;
+  }
+
+  .membership-avatar {
+    width: 32px;
+    height: 32px;
   }
 }

@@ -10,6 +10,7 @@ The initial implementation provides:
 - A separate agent worker with a deterministic fake runtime.
 - A normalized run event model ready for DSH and external runtimes.
 - Immutable task ContextPacks with source receipts.
+- Project membership, responsibilities, project roles, and owner protection.
 - A pinned DeepSeek Harness SDK runtime adapter.
 - Task review, durable Markdown artifacts, and downloadable deliverables.
 - Project memory published on task approval.
@@ -60,6 +61,12 @@ With API and Worker running:
 
 ```sh
 pnpm test:e2e
+```
+
+With API running:
+
+```sh
+pnpm test:membership
 ```
 
 ## Architecture

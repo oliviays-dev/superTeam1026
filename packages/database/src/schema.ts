@@ -319,3 +319,85 @@ CREATE TABLE IF NOT EXISTS task_messages (
 CREATE INDEX IF NOT EXISTS task_messages_task_idx
   ON task_messages(task_id, created_at);
 `;
+
+export const PROJECT_MEMBERSHIP_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS project_roles (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS project_members (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('human', 'agent')),
+  actor_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  responsibility TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'inactive')),
+  is_owner BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, kind, actor_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_member_roles (
+  project_member_id UUID NOT NULL
+    REFERENCES project_members(id) ON DELETE CASCADE,
+  role_id UUID NOT NULL
+    REFERENCES project_roles(id) ON DELETE CASCADE,
+  PRIMARY KEY (project_member_id, role_id)
+);
+
+CREATE INDEX IF NOT EXISTS project_members_project_idx
+  ON project_members(project_id, status);
+
+CREATE INDEX IF NOT EXISTS project_member_roles_role_idx
+  ON project_member_roles(role_id);
+
+INSERT INTO project_roles (
+  id, project_id, name, description, created_at, updated_at
+)
+SELECT
+  gen_random_uuid(),
+  project.id,
+  '项目负责人',
+  '负责项目目标、范围、成员和最终验收。',
+  NOW(),
+  NOW()
+FROM projects AS project
+ON CONFLICT (project_id, name) DO NOTHING;
+
+INSERT INTO project_members (
+  id, project_id, kind, actor_id, name, responsibility,
+  status, is_owner, created_at, updated_at
+)
+SELECT
+  gen_random_uuid(),
+  project.id,
+  'human',
+  'local-admin',
+  'Local Admin',
+  '负责项目目标、范围、成员和最终验收。',
+  'active',
+  TRUE,
+  NOW(),
+  NOW()
+FROM projects AS project
+ON CONFLICT (project_id, kind, actor_id) DO NOTHING;
+
+INSERT INTO project_member_roles (project_member_id, role_id)
+SELECT member.id, role.id
+FROM project_members AS member
+JOIN project_roles AS role
+  ON role.project_id = member.project_id
+ AND role.name = '项目负责人'
+WHERE member.kind = 'human'
+  AND member.actor_id = 'local-admin'
+ON CONFLICT DO NOTHING;
+`;

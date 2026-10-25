@@ -10,6 +10,11 @@ export {
 } from "./collaboration-repositories.js";
 export { migrate } from "./migrate.js";
 export {
+  ProjectMembershipRepository,
+  type DeleteProjectRoleResult,
+  type ResolvedCreateProjectMemberInput,
+} from "./project-membership-repository.js";
+export {
   AgentRepository,
   JobRepository,
   PlatformRepositories,

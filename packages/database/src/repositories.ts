@@ -41,6 +41,7 @@ import {
 } from "./rows.js";
 import { DEFAULT_AGENT_ID } from "./schema.js";
 import { ContextRepository } from "./context-repository.js";
+import { ProjectMembershipRepository } from "./project-membership-repository.js";
 import {
   ArtifactRepository,
   MeetingRepository,
@@ -73,14 +74,38 @@ export class ProjectRepository {
     const id = randomUUID();
     const code =
       input.code ?? `PRJ-${Date.now().toString(36).toUpperCase().slice(-6)}`;
-    const result = await this.database.query<ProjectRow>(
-      `INSERT INTO projects (
-         id, name, code, description, status, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
-       RETURNING *`,
-      [id, input.name, code, input.description],
-    );
-    return projectFromRow(result.rows[0]!);
+    return this.database.transaction(async (client) => {
+      const result = await client.query<ProjectRow>(
+        `INSERT INTO projects (
+           id, name, code, description, status, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, 'active', NOW(), NOW())
+         RETURNING *`,
+        [id, input.name, code, input.description],
+      );
+      const roleId = randomUUID();
+      const memberId = randomUUID();
+      const responsibility = "负责项目目标、范围、成员和最终验收。";
+      await client.query(
+        `INSERT INTO project_roles (
+           id, project_id, name, description, created_at, updated_at
+         ) VALUES ($1, $2, '项目负责人', $3, NOW(), NOW())`,
+        [roleId, id, responsibility],
+      );
+      await client.query(
+        `INSERT INTO project_members (
+           id, project_id, kind, actor_id, name, responsibility,
+           status, is_owner, created_at, updated_at
+         ) VALUES ($1, $2, 'human', 'local-admin', 'Local Admin', $3,
+                   'active', TRUE, NOW(), NOW())`,
+        [memberId, id, responsibility],
+      );
+      await client.query(
+        `INSERT INTO project_member_roles (project_member_id, role_id)
+         VALUES ($1, $2)`,
+        [memberId, roleId],
+      );
+      return projectFromRow(result.rows[0]!);
+    });
   }
 
   async update(
@@ -686,6 +711,7 @@ export class PlatformRepositories {
   readonly runs: RunRepository;
   readonly jobs: JobRepository;
   readonly contexts: ContextRepository;
+  readonly projectMemberships: ProjectMembershipRepository;
   readonly artifacts: ArtifactRepository;
   readonly memory: MemoryRepository;
   readonly reviews: ReviewRepository;
@@ -700,6 +726,7 @@ export class PlatformRepositories {
     this.runs = new RunRepository(database);
     this.jobs = new JobRepository(database);
     this.contexts = new ContextRepository(database);
+    this.projectMemberships = new ProjectMembershipRepository(database);
     this.artifacts = new ArtifactRepository(database);
     this.memory = new MemoryRepository(database);
     this.reviews = new ReviewRepository(database);

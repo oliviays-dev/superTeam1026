@@ -5,6 +5,8 @@ import type {
   ContextPack,
   ContextReceipt,
   CreateAgentInput,
+  CreateProjectMemberInput,
+  CreateProjectRoleInput,
   CreateTaskMessageInput,
   CreateProjectInput,
   CreateTaskInput,
@@ -15,6 +17,8 @@ import type {
   MemoryTopic,
   PlatformRunEvent,
   Project,
+  ProjectMember,
+  ProjectRole,
   Run,
   RunDelta,
   RunDetail,
@@ -22,7 +26,9 @@ import type {
   TaskDetail,
   TaskMessage,
   UpdateAgentInput,
+  UpdateProjectMemberInput,
   UpdateProjectInput,
+  UpdateProjectRoleInput,
   UpdateTaskInput,
   WorkbenchSummary,
   WorkflowDefinition,
@@ -56,7 +62,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } | null;
     throw new Error(body?.message ?? `Request failed: ${response.status}`);
   }
-  return (await response.json()) as T;
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  return (text === "" ? undefined : JSON.parse(text)) as T;
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -77,6 +85,82 @@ export function updateProject(
   return request(`/projects/${projectId}`, {
     method: "PATCH",
     body: JSON.stringify(input),
+  });
+}
+
+export async function listProjectMembers(
+  projectId: string,
+): Promise<ProjectMember[]> {
+  return (
+    await request<ListResponse<ProjectMember>>(`/projects/${projectId}/members`)
+  ).items;
+}
+
+export function createProjectMember(
+  projectId: string,
+  input: CreateProjectMemberInput,
+): Promise<ProjectMember> {
+  return request(`/projects/${projectId}/members`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateProjectMember(
+  projectId: string,
+  memberId: string,
+  input: UpdateProjectMemberInput,
+): Promise<ProjectMember> {
+  return request(`/projects/${projectId}/members/${memberId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteProjectMember(
+  projectId: string,
+  memberId: string,
+): Promise<void> {
+  await request<void>(`/projects/${projectId}/members/${memberId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listProjectRoles(
+  projectId: string,
+): Promise<ProjectRole[]> {
+  return (
+    await request<ListResponse<ProjectRole>>(`/projects/${projectId}/roles`)
+  ).items;
+}
+
+export function createProjectRole(
+  projectId: string,
+  input: CreateProjectRoleInput,
+): Promise<ProjectRole> {
+  return request(`/projects/${projectId}/roles`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateProjectRole(
+  projectId: string,
+  roleId: string,
+  input: UpdateProjectRoleInput,
+): Promise<ProjectRole> {
+  return request(`/projects/${projectId}/roles/${roleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteProjectRole(
+  projectId: string,
+  roleId: string,
+): Promise<void> {
+  await request<void>(`/projects/${projectId}/roles/${roleId}`, {
+    method: "DELETE",
   });
 }
 

@@ -4,13 +4,17 @@ import {
   agentStatusInputSchema,
   createAgentInputSchema,
   createMeetingInputSchema,
+  createProjectMemberInputSchema,
   createProjectInputSchema,
+  createProjectRoleInputSchema,
   createTaskMessageInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
   taskReviewInputSchema,
   updateAgentInputSchema,
+  updateProjectMemberInputSchema,
   updateProjectInputSchema,
+  updateProjectRoleInputSchema,
   updateTaskInputSchema,
 } from "@pluginmax/contracts";
 import { ApplicationError, PlatformApplication } from "@pluginmax/application";
@@ -38,6 +42,14 @@ const workflowInstanceParamsSchema = z.object({
 });
 const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
 const projectParamsSchema = z.object({ projectId: z.string().uuid() });
+const projectMemberParamsSchema = z.object({
+  projectId: z.string().uuid(),
+  memberId: z.string().uuid(),
+});
+const projectRoleParamsSchema = z.object({
+  projectId: z.string().uuid(),
+  roleId: z.string().uuid(),
+});
 const workflowStartSchema = z.object({
   title: z.string().trim().min(1).max(180),
 });
@@ -94,6 +106,24 @@ export function buildApi(options: BuildApiOptions): {
         .status(error.statusCode)
         .send(apiError(String(request.id), error.code, error.message));
     }
+    const statusCode =
+      typeof error === "object" &&
+      error !== null &&
+      "statusCode" in error &&
+      typeof error.statusCode === "number"
+        ? error.statusCode
+        : undefined;
+    if (statusCode !== undefined && statusCode >= 400 && statusCode < 500) {
+      return reply
+        .status(statusCode)
+        .send(
+          apiError(
+            String(request.id),
+            "invalid_request",
+            error instanceof Error ? error.message : "Invalid request",
+          ),
+        );
+    }
     request.log.error({ error }, "request failed");
     return reply
       .status(500)
@@ -129,6 +159,84 @@ export function buildApi(options: BuildApiOptions): {
     const input = updateProjectInputSchema.parse(request.body);
     return reply.send(await application.updateProject(projectId, input));
   });
+
+  app.get("/api/v1/projects/:projectId/roles", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return reply.send({
+      items: await application.listProjectRoles(projectId),
+    });
+  });
+
+  app.post("/api/v1/projects/:projectId/roles", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const input = createProjectRoleInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.createProjectRole(projectId, input));
+  });
+
+  app.patch(
+    "/api/v1/projects/:projectId/roles/:roleId",
+    async (request, reply) => {
+      const { projectId, roleId } = projectRoleParamsSchema.parse(
+        request.params,
+      );
+      const input = updateProjectRoleInputSchema.parse(request.body);
+      return reply.send(
+        await application.updateProjectRole(projectId, roleId, input),
+      );
+    },
+  );
+
+  app.delete(
+    "/api/v1/projects/:projectId/roles/:roleId",
+    async (request, reply) => {
+      const { projectId, roleId } = projectRoleParamsSchema.parse(
+        request.params,
+      );
+      await application.deleteProjectRole(projectId, roleId);
+      return reply.status(204).send();
+    },
+  );
+
+  app.get("/api/v1/projects/:projectId/members", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return reply.send({
+      items: await application.listProjectMembers(projectId),
+    });
+  });
+
+  app.post("/api/v1/projects/:projectId/members", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const input = createProjectMemberInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.createProjectMember(projectId, input));
+  });
+
+  app.patch(
+    "/api/v1/projects/:projectId/members/:memberId",
+    async (request, reply) => {
+      const { projectId, memberId } = projectMemberParamsSchema.parse(
+        request.params,
+      );
+      const input = updateProjectMemberInputSchema.parse(request.body);
+      return reply.send(
+        await application.updateProjectMember(projectId, memberId, input),
+      );
+    },
+  );
+
+  app.delete(
+    "/api/v1/projects/:projectId/members/:memberId",
+    async (request, reply) => {
+      const { projectId, memberId } = projectMemberParamsSchema.parse(
+        request.params,
+      );
+      await application.deleteProjectMember(projectId, memberId);
+      return reply.status(204).send();
+    },
+  );
 
   app.get("/api/v1/agents", async (request, reply) => {
     const { includeDisabled } = listAgentsQuerySchema.parse(request.query);

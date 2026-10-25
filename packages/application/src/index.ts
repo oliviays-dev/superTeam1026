@@ -5,7 +5,9 @@ import type {
   Artifact,
   CreateAgentInput,
   CreateMeetingInput,
+  CreateProjectMemberInput,
   CreateProjectInput,
+  CreateProjectRoleInput,
   CreateTaskInput,
   CreateTaskMessageInput,
   CreateWorkflowInput,
@@ -14,6 +16,8 @@ import type {
   MeetingMessage,
   MemoryTopic,
   Project,
+  ProjectMember,
+  ProjectRole,
   RunDetail,
   RunInputSnapshot,
   Task,
@@ -21,13 +25,21 @@ import type {
   TaskMessage,
   TaskReviewInput,
   UpdateAgentInput,
+  UpdateProjectMemberInput,
   UpdateProjectInput,
+  UpdateProjectRoleInput,
   UpdateTaskInput,
   WorkbenchSummary,
   WorkflowDefinition,
   WorkflowInstance,
 } from "@pluginmax/contracts";
-import { canTransitionTask, isTerminalRunStatus } from "@pluginmax/domain";
+import {
+  assertProjectMemberCanBeRemoved,
+  canTransitionTask,
+  isTerminalRunStatus,
+  normalizeProjectRoleIds,
+  ProjectMembershipRuleError,
+} from "@pluginmax/domain";
 import type { PlatformRepositories } from "@pluginmax/database";
 
 export class ApplicationError extends Error {
@@ -41,6 +53,15 @@ export class ApplicationError extends Error {
   }
 }
 
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "23505"
+  );
+}
+
 export class PlatformApplication {
   constructor(private readonly repositories: PlatformRepositories) {}
 
@@ -50,6 +71,239 @@ export class PlatformApplication {
 
   createProject(input: CreateProjectInput): Promise<Project> {
     return this.repositories.projects.create(input);
+  }
+
+  async listProjectRoles(projectId: string): Promise<ProjectRole[]> {
+    await this.requireProject(projectId);
+    return this.repositories.projectMemberships.listRoles(projectId);
+  }
+
+  async createProjectRole(
+    projectId: string,
+    input: CreateProjectRoleInput,
+  ): Promise<ProjectRole> {
+    await this.requireProject(projectId);
+    try {
+      return await this.repositories.projectMemberships.createRole(
+        projectId,
+        input,
+      );
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ApplicationError(
+          "project_role_name_conflict",
+          "A project role with this name already exists",
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async updateProjectRole(
+    projectId: string,
+    roleId: string,
+    input: UpdateProjectRoleInput,
+  ): Promise<ProjectRole> {
+    await this.requireProject(projectId);
+    try {
+      const role = await this.repositories.projectMemberships.updateRole(
+        projectId,
+        roleId,
+        input,
+      );
+      if (role === undefined) {
+        throw new ApplicationError(
+          "project_role_not_found",
+          "Project role not found",
+          404,
+        );
+      }
+      return role;
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ApplicationError(
+          "project_role_name_conflict",
+          "A project role with this name already exists",
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async deleteProjectRole(projectId: string, roleId: string): Promise<void> {
+    await this.requireProject(projectId);
+    const result = await this.repositories.projectMemberships.deleteRole(
+      projectId,
+      roleId,
+    );
+    if (result === "assigned") {
+      throw new ApplicationError(
+        "project_role_in_use",
+        "Remove the role from project members before deleting it",
+        409,
+      );
+    }
+    if (result === "not_found") {
+      throw new ApplicationError(
+        "project_role_not_found",
+        "Project role not found",
+        404,
+      );
+    }
+  }
+
+  async listProjectMembers(projectId: string): Promise<ProjectMember[]> {
+    await this.requireProject(projectId);
+    return this.repositories.projectMemberships.listMembers(projectId);
+  }
+
+  async createProjectMember(
+    projectId: string,
+    input: CreateProjectMemberInput,
+  ): Promise<ProjectMember> {
+    await this.requireProject(projectId);
+    const roles =
+      await this.repositories.projectMemberships.listRoles(projectId);
+    let roleIds: string[] = [];
+    guardMembershipRule(() => {
+      roleIds = normalizeProjectRoleIds(projectId, input.roleIds, roles);
+    });
+
+    let actorId = "local-admin";
+    let name = input.name ?? "Local Admin";
+    if (input.kind === "agent") {
+      if (input.agentId === undefined) {
+        throw new ApplicationError(
+          "agent_id_required",
+          "agentId is required for agent members",
+          400,
+        );
+      }
+      const agent = await this.repositories.agents.get(input.agentId, true);
+      if (agent === undefined || agent.status !== "active") {
+        throw new ApplicationError(
+          "agent_unavailable",
+          "Only an active agent can join a project",
+          409,
+        );
+      }
+      actorId = agent.id;
+      name = agent.name;
+    }
+
+    try {
+      return await this.repositories.projectMemberships.createMember(
+        projectId,
+        {
+          kind: input.kind,
+          actorId,
+          name,
+          responsibility: input.responsibility,
+          roleIds,
+        },
+      );
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ApplicationError(
+          "project_member_exists",
+          "This actor is already a project member",
+          409,
+        );
+      }
+      if (
+        error instanceof Error &&
+        error.message === "project role scope mismatch"
+      ) {
+        throw new ApplicationError(
+          "project_role_scope_mismatch",
+          "All selected roles must belong to the project",
+          400,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async updateProjectMember(
+    projectId: string,
+    memberId: string,
+    input: UpdateProjectMemberInput,
+  ): Promise<ProjectMember> {
+    await this.requireProject(projectId);
+    const member = await this.repositories.projectMemberships.getMember(
+      projectId,
+      memberId,
+    );
+    if (member === undefined) {
+      throw new ApplicationError(
+        "project_member_not_found",
+        "Project member not found",
+        404,
+      );
+    }
+    if (input.status === "inactive") {
+      guardMembershipRule(() => assertProjectMemberCanBeRemoved(member));
+    }
+    let roleIds: string[] | undefined;
+    if (input.roleIds !== undefined) {
+      const roles =
+        await this.repositories.projectMemberships.listRoles(projectId);
+      guardMembershipRule(() => {
+        roleIds = normalizeProjectRoleIds(projectId, input.roleIds!, roles);
+      });
+    }
+    try {
+      const updated = await this.repositories.projectMemberships.updateMember(
+        projectId,
+        memberId,
+        { ...input, ...(roleIds === undefined ? {} : { roleIds }) },
+      );
+      if (updated === undefined) {
+        throw new ApplicationError(
+          "project_member_not_found",
+          "Project member not found",
+          404,
+        );
+      }
+      return updated;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "project role scope mismatch"
+      ) {
+        throw new ApplicationError(
+          "project_role_scope_mismatch",
+          "All selected roles must belong to the project",
+          400,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async deleteProjectMember(
+    projectId: string,
+    memberId: string,
+  ): Promise<void> {
+    await this.requireProject(projectId);
+    const member = await this.repositories.projectMemberships.getMember(
+      projectId,
+      memberId,
+    );
+    if (member === undefined) {
+      throw new ApplicationError(
+        "project_member_not_found",
+        "Project member not found",
+        404,
+      );
+    }
+    guardMembershipRule(() => assertProjectMemberCanBeRemoved(member));
+    await this.repositories.projectMemberships.deleteMember(
+      projectId,
+      memberId,
+    );
   }
 
   async updateProject(id: string, input: UpdateProjectInput): Promise<Project> {
@@ -345,6 +599,14 @@ export class PlatformApplication {
     return this.repositories.workbench.summary();
   }
 
+  private async requireProject(projectId: string): Promise<Project> {
+    const project = await this.repositories.projects.get(projectId);
+    if (project === undefined) {
+      throw new ApplicationError("project_not_found", "Project not found", 404);
+    }
+    return project;
+  }
+
   async listWorkflows(projectId: string): Promise<WorkflowDefinition[]> {
     return this.repositories.workflows.list(projectId);
   }
@@ -432,6 +694,30 @@ export class PlatformApplication {
       throw new ApplicationError("meeting_not_found", "Meeting not found", 404);
     }
     return meeting;
+  }
+}
+
+function guardMembershipRule(operation: () => void): void {
+  try {
+    operation();
+  } catch (error) {
+    if (
+      error instanceof ProjectMembershipRuleError &&
+      error.code === "project_owner_required"
+    ) {
+      throw new ApplicationError("project_owner_required", error.message, 409);
+    }
+    if (
+      error instanceof ProjectMembershipRuleError &&
+      error.code === "project_role_scope_mismatch"
+    ) {
+      throw new ApplicationError(
+        "project_role_scope_mismatch",
+        error.message,
+        400,
+      );
+    }
+    throw error;
   }
 }
 

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  ProjectMembershipRuleError,
+  assertProjectMemberCanBeRemoved,
   canTransitionTask,
   isTerminalRunStatus,
+  normalizeProjectRoleIds,
   projectCode,
 } from "./index.js";
+import type { ProjectMember, ProjectRole } from "@pluginmax/contracts";
 
 describe("task transitions", () => {
   it("allows the task execution path", () => {
@@ -28,5 +32,56 @@ describe("run status", () => {
 describe("project code", () => {
   it("creates a stable visible code", () => {
     expect(projectCode("Supply Chain", 7)).toBe("SUPPLY-CHAIN-0007");
+  });
+});
+
+const projectRole: ProjectRole = {
+  id: "00000000-0000-4000-8000-000000000101",
+  projectId: "00000000-0000-4000-8000-000000000001",
+  name: "Developer",
+  description: "",
+  createdAt: "2026-10-25T08:00:00.000Z",
+  updatedAt: "2026-10-25T08:00:00.000Z",
+};
+
+const ownerMember: ProjectMember = {
+  id: "00000000-0000-4000-8000-000000000201",
+  projectId: projectRole.projectId,
+  kind: "human",
+  actorId: "local-admin",
+  name: "Local Admin",
+  responsibility: "Project owner",
+  status: "active",
+  owner: true,
+  roles: [projectRole],
+  createdAt: "2026-10-25T08:00:00.000Z",
+  updatedAt: "2026-10-25T08:00:00.000Z",
+};
+
+describe("project membership rules", () => {
+  it("deduplicates role assignments while preserving their order", () => {
+    expect(
+      normalizeProjectRoleIds(
+        projectRole.projectId,
+        [projectRole.id, projectRole.id],
+        [projectRole],
+      ),
+    ).toEqual([projectRole.id]);
+  });
+
+  it("rejects roles owned by another project", () => {
+    expect(() =>
+      normalizeProjectRoleIds(
+        "00000000-0000-4000-8000-000000000002",
+        [projectRole.id],
+        [projectRole],
+      ),
+    ).toThrow(ProjectMembershipRuleError);
+  });
+
+  it("protects the project owner", () => {
+    expect(() => assertProjectMemberCanBeRemoved(ownerMember)).toThrow(
+      "project owner cannot be removed",
+    );
   });
 });

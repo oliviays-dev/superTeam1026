@@ -5,6 +5,95 @@ import {
   type Agent,
 } from "./platform.js";
 
+export const projectRoleSchema = z.object({
+  id: z.string().uuid(),
+  projectId: z.string().uuid(),
+  name: z.string().trim().min(1).max(80),
+  description: z.string().trim().max(1_000),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type ProjectRole = z.infer<typeof projectRoleSchema>;
+
+export const createProjectRoleInputSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  description: z.string().trim().max(1_000).default(""),
+});
+export type CreateProjectRoleInput = z.infer<
+  typeof createProjectRoleInputSchema
+>;
+
+export const updateProjectRoleInputSchema =
+  createProjectRoleInputSchema.partial();
+export type UpdateProjectRoleInput = z.infer<
+  typeof updateProjectRoleInputSchema
+>;
+
+export const projectMemberKindSchema = z.enum(["human", "agent"]);
+export type ProjectMemberKind = z.infer<typeof projectMemberKindSchema>;
+
+export const projectMemberStatusSchema = z.enum(["active", "inactive"]);
+export type ProjectMemberStatus = z.infer<typeof projectMemberStatusSchema>;
+
+export const projectMemberSchema = z.object({
+  id: z.string().uuid(),
+  projectId: z.string().uuid(),
+  kind: projectMemberKindSchema,
+  actorId: z.string().trim().min(1).max(180),
+  name: z.string().trim().min(1).max(160),
+  responsibility: z.string().trim().max(2_000),
+  status: projectMemberStatusSchema,
+  owner: z.boolean(),
+  roles: z.array(projectRoleSchema).max(30),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type ProjectMember = z.infer<typeof projectMemberSchema>;
+
+const roleIdsSchema = z
+  .array(z.string().uuid())
+  .max(30)
+  .default([])
+  .transform((roleIds) => [...new Set(roleIds)]);
+
+export const createProjectMemberInputSchema = z
+  .object({
+    kind: projectMemberKindSchema,
+    agentId: z.string().uuid().optional(),
+    name: z.string().trim().min(1).max(160).optional(),
+    responsibility: z.string().trim().max(2_000).default(""),
+    roleIds: roleIdsSchema,
+  })
+  .superRefine((input, context) => {
+    if (input.kind === "agent" && input.agentId === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentId"],
+        message: "agentId is required for agent members",
+      });
+    }
+    if (input.kind === "human" && input.agentId !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentId"],
+        message: "agentId is only valid for agent members",
+      });
+    }
+  });
+export type CreateProjectMemberInput = z.infer<
+  typeof createProjectMemberInputSchema
+>;
+
+export const updateProjectMemberInputSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional(),
+  responsibility: z.string().trim().max(2_000).optional(),
+  status: projectMemberStatusSchema.optional(),
+  roleIds: roleIdsSchema.optional(),
+});
+export type UpdateProjectMemberInput = z.infer<
+  typeof updateProjectMemberInputSchema
+>;
+
 export const taskReviewInputSchema = z.object({
   decision: z.enum(["approve", "return"]),
   note: z.string().trim().max(4_000).default(""),

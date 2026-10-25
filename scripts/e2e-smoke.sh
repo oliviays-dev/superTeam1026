@@ -33,6 +33,31 @@ project_updated="$(
 )"
 project_description="$(printf '%s' "$project_updated" | jq -r '.description')"
 
+role_json="$(
+  curl -fsS -X POST "$API_BASE/projects/$project_id/roles" \
+    -H "content-type: application/json" \
+    -d "{\"name\":\"E2E Reviewer $STAMP\",\"description\":\"Project membership smoke role\"}"
+)"
+role_id="$(printf '%s' "$role_json" | jq -r '.id')"
+member_json="$(
+  curl -fsS -X POST "$API_BASE/projects/$project_id/members" \
+    -H "content-type: application/json" \
+    -d "{\"kind\":\"agent\",\"agentId\":\"$agent_id\",\"responsibility\":\"Membership smoke\",\"roleIds\":[\"$role_id\"]}"
+)"
+member_id="$(printf '%s' "$member_json" | jq -r '.id')"
+member_updated="$(
+  curl -fsS -X PATCH "$API_BASE/projects/$project_id/members/$member_id" \
+    -H "content-type: application/json" \
+    -d "{\"responsibility\":\"Updated membership smoke\",\"roleIds\":[\"$role_id\"]}"
+)"
+member_responsibility="$(printf '%s' "$member_updated" | jq -r '.responsibility')"
+members_json="$(curl -fsS "$API_BASE/projects/$project_id/members")"
+project_member_count="$(printf '%s' "$members_json" | jq '.items | length')"
+project_owner_count="$(printf '%s' "$members_json" | jq '[.items[] | select(.owner)] | length')"
+project_role_count="$(
+  curl -fsS "$API_BASE/projects/$project_id/roles" | jq '.items | length'
+)"
+
 task_json="$(
   curl -fsS -X POST "$API_BASE/tasks" \
     -H "content-type: application/json" \
@@ -138,7 +163,7 @@ agent_disabled="$(
 agent_final_status="$(printf '%s' "$agent_disabled" | jq -r '.agent.status')"
 agent_final_version="$(printf '%s' "$agent_disabled" | jq -r '.agent.version')"
 
-if [[ "$agent_version" -ne 2 || "$agent_event_count" -lt 2 || "$project_description" != "Automated engineering smoke test with project updates" || "$task_acceptance_count" -ne 3 || "$task_message_count" -lt 1 || "$approved_status" != "done" || "$memory_count" -lt 1 || "$workflow_status" != "completed" || "$meeting_messages" -lt 1 || "$meeting_participants" -lt 2 || "$agent_final_status" != "disabled" || "$agent_final_version" -ne 3 ]]; then
+if [[ "$agent_version" -ne 2 || "$agent_event_count" -lt 2 || "$project_description" != "Automated engineering smoke test with project updates" || "$project_member_count" -lt 2 || "$project_owner_count" -ne 1 || "$project_role_count" -lt 2 || "$member_responsibility" != "Updated membership smoke" || "$task_acceptance_count" -ne 3 || "$task_message_count" -lt 1 || "$approved_status" != "done" || "$memory_count" -lt 1 || "$workflow_status" != "completed" || "$meeting_messages" -lt 1 || "$meeting_participants" -lt 2 || "$agent_final_status" != "disabled" || "$agent_final_version" -ne 3 ]]; then
   printf 'full e2e verification failed\n' >&2
   exit 1
 fi
@@ -149,6 +174,9 @@ printf 'agent_version=%s\n' "$agent_final_version"
 printf 'agent_events=%s\n' "$agent_event_count"
 printf 'project_id=%s\n' "$project_id"
 printf 'project_description=%s\n' "$project_description"
+printf 'project_members=%s\n' "$project_member_count"
+printf 'project_roles=%s\n' "$project_role_count"
+printf 'project_member_id=%s\n' "$member_id"
 printf 'task_id=%s\n' "$task_id"
 printf 'task_acceptance=%s\n' "$task_acceptance_count"
 printf 'task_messages=%s\n' "$task_message_count"
