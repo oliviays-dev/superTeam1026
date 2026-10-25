@@ -6,7 +6,17 @@ export interface PlatformConfig {
   readonly fileStoreRoot: string;
   readonly workerPollIntervalMs: number;
   readonly workerLeaseSeconds: number;
+  readonly workerLeaseRenewIntervalMs: number;
   readonly workerRecoveryBatchSize: number;
+  readonly workerConcurrency: number;
+  readonly workerShutdownGraceMs: number;
+  readonly workerRetryBaseDelayMs: number;
+  readonly workerRetryMaxDelayMs: number;
+  readonly workerHeartbeatIntervalMs: number;
+  readonly workerHeartbeatStaleAfterSeconds: number;
+  readonly idempotencyRetentionSeconds: number;
+  readonly idempotencyCleanupBatchSize: number;
+  readonly idempotencyCleanupIntervalMs: number;
   readonly workflowSweepIntervalMs: number;
   readonly workflowSweepBatchSize: number;
   readonly workflowSweepLeaseSeconds: number;
@@ -77,10 +87,60 @@ export function loadConfig(
       60,
       "WORKER_LEASE_SECONDS",
     ),
+    workerLeaseRenewIntervalMs: integer(
+      env.WORKER_LEASE_RENEW_INTERVAL_MS,
+      10_000,
+      "WORKER_LEASE_RENEW_INTERVAL_MS",
+    ),
     workerRecoveryBatchSize: integer(
       env.WORKER_RECOVERY_BATCH_SIZE,
       20,
       "WORKER_RECOVERY_BATCH_SIZE",
+    ),
+    workerConcurrency: integer(
+      env.WORKER_CONCURRENCY,
+      4,
+      "WORKER_CONCURRENCY",
+    ),
+    workerShutdownGraceMs: integer(
+      env.WORKER_SHUTDOWN_GRACE_MS,
+      30_000,
+      "WORKER_SHUTDOWN_GRACE_MS",
+    ),
+    workerRetryBaseDelayMs: integer(
+      env.WORKER_RETRY_BASE_DELAY_MS,
+      1_000,
+      "WORKER_RETRY_BASE_DELAY_MS",
+    ),
+    workerRetryMaxDelayMs: integer(
+      env.WORKER_RETRY_MAX_DELAY_MS,
+      60_000,
+      "WORKER_RETRY_MAX_DELAY_MS",
+    ),
+    workerHeartbeatIntervalMs: integer(
+      env.WORKER_HEARTBEAT_INTERVAL_MS,
+      5_000,
+      "WORKER_HEARTBEAT_INTERVAL_MS",
+    ),
+    workerHeartbeatStaleAfterSeconds: integer(
+      env.WORKER_HEARTBEAT_STALE_AFTER_SECONDS,
+      30,
+      "WORKER_HEARTBEAT_STALE_AFTER_SECONDS",
+    ),
+    idempotencyRetentionSeconds: integer(
+      env.IDEMPOTENCY_RETENTION_SECONDS,
+      604_800,
+      "IDEMPOTENCY_RETENTION_SECONDS",
+    ),
+    idempotencyCleanupBatchSize: integer(
+      env.IDEMPOTENCY_CLEANUP_BATCH_SIZE,
+      500,
+      "IDEMPOTENCY_CLEANUP_BATCH_SIZE",
+    ),
+    idempotencyCleanupIntervalMs: integer(
+      env.IDEMPOTENCY_CLEANUP_INTERVAL_MS,
+      3_600_000,
+      "IDEMPOTENCY_CLEANUP_INTERVAL_MS",
     ),
     workflowSweepIntervalMs: integer(
       env.WORKFLOW_SWEEP_INTERVAL_MS,

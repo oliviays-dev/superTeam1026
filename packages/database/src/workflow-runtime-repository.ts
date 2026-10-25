@@ -63,6 +63,14 @@ interface WorkflowApprovalRow {
   status: WorkflowApproval["status"];
   delegated_from: string | null;
   transferred_to: string | null;
+  due_at: Date | null;
+  remind_at: Date | null;
+  reminded_at: Date | null;
+  escalate_at: Date | null;
+  escalated_at: Date | null;
+  escalation_role_id: string | null;
+  expires_at: Date | null;
+  expired_at: Date | null;
   note: string;
   acted_by: string | null;
   acted_at: Date | null;
@@ -105,6 +113,14 @@ export interface SaveWorkflowRuntimeInput {
     readonly summary: string;
     readonly data?: Record<string, unknown> | null;
   }>;
+}
+
+export interface ApprovalSlaGroup {
+  readonly instanceId: string;
+  readonly nodeId: string;
+  readonly round: number;
+  readonly count: number;
+  readonly escalationRoleId?: string;
 }
 
 export class WorkflowRuntimeRepository {
@@ -461,6 +477,11 @@ export class WorkflowRuntimeRepository {
       readonly roleId?: string;
       readonly kind?: WorkflowApproval["kind"];
       readonly delegatedFrom?: string;
+      readonly dueAt?: string;
+      readonly remindAt?: string;
+      readonly escalateAt?: string;
+      readonly escalationRoleId?: string;
+      readonly expiresAt?: string;
     }>,
   ): Promise<void> {
     await this.database.transaction(async (client) => {
@@ -468,11 +489,12 @@ export class WorkflowRuntimeRepository {
         await client.query(
           `INSERT INTO workflow_approvals (
              id, instance_id, node_id, round, approver_id,
-             approver_role_id, kind, status, delegated_from, note,
-             acted_by, acted_at, created_at
+             approver_role_id, kind, status, delegated_from, due_at, remind_at,
+             escalate_at, escalation_role_id, expires_at, note, acted_by,
+             acted_at, created_at
            ) VALUES (
-             $1, $2, $3, $4, $5, $6, $7, 'pending', $8, '',
-             NULL, NULL, NOW()
+             $1, $2, $3, $4, $5, $6, $7, 'pending', $8,
+             $9, $10, $11, $12, $13, '', NULL, NULL, NOW()
            )
            ON CONFLICT (instance_id, node_id, round, approver_id) DO NOTHING`,
           [
@@ -484,9 +506,235 @@ export class WorkflowRuntimeRepository {
             approver.roleId ?? null,
             approver.kind ?? "primary",
             approver.delegatedFrom ?? null,
+            approver.dueAt ??
+              new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+            approver.remindAt ??
+              new Date(Date.now() + 30 * 60 * 1_000).toISOString(),
+            approver.escalateAt ?? null,
+            approver.escalationRoleId ?? null,
+            approver.expiresAt ??
+              new Date(Date.now() + 2 * 60 * 60 * 1_000).toISOString(),
           ],
         );
       }
+    });
+  }
+
+  async remindDueApprovals(limit: number): Promise<ApprovalSlaGroup[]> {
+    const result = await this.database.query<{
+      instance_id: string;
+      node_id: string;
+      round: number;
+      count: number;
+    }>(
+      `WITH due AS (
+         SELECT id
+         FROM workflow_approvals
+         WHERE status = 'pending'
+           AND reminded_at IS NULL
+           AND remind_at IS NOT NULL
+           AND remind_at <= NOW()
+         ORDER BY remind_at
+         FOR UPDATE SKIP LOCKED
+         LIMIT $1
+       ),
+       updated AS (
+         UPDATE workflow_approvals AS approval
+         SET reminded_at = NOW(), revision = revision + 1
+         FROM due
+         WHERE approval.id = due.id
+         RETURNING approval.instance_id, approval.node_id, approval.round
+       )
+       SELECT
+         instance_id,
+         node_id,
+         round,
+         COUNT(*)::integer AS count
+       FROM updated
+       GROUP BY instance_id, node_id, round
+       ORDER BY instance_id, node_id, round`,
+      [limit],
+    );
+    return result.rows.map((row) => ({
+      instanceId: row.instance_id,
+      nodeId: row.node_id,
+      round: row.round,
+      count: row.count,
+    }));
+  }
+
+  async escalateDueApprovals(limit: number): Promise<ApprovalSlaGroup[]> {
+    return this.database.transaction(async (client) => {
+      const candidates = await client.query<{
+        instance_id: string;
+        node_id: string;
+        round: number;
+      }>(
+        `SELECT DISTINCT ON (approval.instance_id, approval.node_id, approval.round)
+           approval.instance_id,
+           approval.node_id,
+           approval.round
+         FROM workflow_approvals AS approval
+         JOIN workflow_instances AS instance ON instance.id = approval.instance_id
+         WHERE approval.status = 'pending'
+           AND approval.escalated_at IS NULL
+           AND approval.escalate_at IS NOT NULL
+           AND approval.escalate_at <= NOW()
+           AND approval.escalation_role_id IS NOT NULL
+           AND instance.status IN ('active', 'waiting')
+         ORDER BY
+           approval.instance_id,
+           approval.node_id,
+           approval.round,
+           approval.escalate_at
+         LIMIT $1`,
+        [limit],
+      );
+      const escalated: ApprovalSlaGroup[] = [];
+      for (const candidate of candidates.rows) {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext($1))",
+          [candidate.instance_id],
+        );
+        const approvals = await client.query<WorkflowApprovalRow>(
+          `SELECT *
+           FROM workflow_approvals
+           WHERE instance_id = $1
+             AND node_id = $2
+             AND round = $3
+             AND status = 'pending'
+           FOR UPDATE`,
+          [candidate.instance_id, candidate.node_id, candidate.round],
+        );
+        const first = approvals.rows.find(
+          (approval) =>
+            approval.escalated_at === null &&
+            approval.escalation_role_id !== null &&
+            approval.escalate_at !== null &&
+            approval.escalate_at.getTime() <= Date.now(),
+        );
+        if (first === undefined || first.escalation_role_id === null) continue;
+        const updated = await client.query(
+          `UPDATE workflow_approvals
+           SET escalated_at = NOW(), revision = revision + 1
+           WHERE instance_id = $1
+             AND node_id = $2
+             AND round = $3
+             AND status = 'pending'
+             AND escalated_at IS NULL`,
+          [candidate.instance_id, candidate.node_id, candidate.round],
+        );
+        if ((updated.rowCount ?? 0) === 0) continue;
+        const members = await client.query<{
+          actor_id: string;
+          role_id: string;
+        }>(
+          `SELECT DISTINCT member.actor_id, member_role.role_id
+           FROM workflow_instances AS instance
+           JOIN project_members AS member
+             ON member.project_id = instance.project_id
+           JOIN project_member_roles AS member_role
+             ON member_role.project_member_id = member.id
+           WHERE instance.id = $1
+             AND member.kind = 'human'
+             AND member.status = 'active'
+             AND member_role.role_id = $2`,
+          [candidate.instance_id, first.escalation_role_id],
+        );
+        for (const member of members.rows) {
+          await client.query(
+            `INSERT INTO workflow_approvals (
+               id, instance_id, node_id, round, approver_id,
+               approver_role_id, kind, status, delegated_from, due_at,
+               remind_at, escalate_at, escalation_role_id, expires_at,
+               note, acted_by, acted_at, created_at
+             ) VALUES (
+               $1, $2, $3, $4, $5, $6, 'escalation', 'pending', $7,
+               $8, $9, $10, $11, $12, '', NULL, NULL, NOW()
+             )
+             ON CONFLICT (instance_id, node_id, round, approver_id) DO NOTHING`,
+            [
+              randomUUID(),
+              candidate.instance_id,
+              candidate.node_id,
+              candidate.round,
+              member.actor_id,
+              member.role_id,
+              first.approver_id,
+              new Date(Date.now() + 60 * 60 * 1_000),
+              new Date(Date.now() + 30 * 60 * 1_000),
+              null,
+              member.role_id,
+              first.expires_at,
+            ],
+          );
+        }
+        escalated.push({
+          instanceId: candidate.instance_id,
+          nodeId: candidate.node_id,
+          round: candidate.round,
+          count: (updated.rowCount ?? 0) + members.rowCount!,
+          escalationRoleId: first.escalation_role_id,
+        });
+      }
+      return escalated;
+    });
+  }
+
+  async expireDueApprovals(limit: number): Promise<ApprovalSlaGroup[]> {
+    return this.database.transaction(async (client) => {
+      const candidates = await client.query<{
+        instance_id: string;
+        node_id: string;
+        round: number;
+      }>(
+        `SELECT DISTINCT ON (approval.instance_id, approval.node_id, approval.round)
+           approval.instance_id,
+           approval.node_id,
+           approval.round
+         FROM workflow_approvals AS approval
+         JOIN workflow_instances AS instance ON instance.id = approval.instance_id
+         WHERE approval.status = 'pending'
+           AND approval.expires_at IS NOT NULL
+           AND approval.expires_at <= NOW()
+           AND instance.status IN ('active', 'waiting')
+         ORDER BY
+           approval.instance_id,
+           approval.node_id,
+           approval.round,
+           approval.expires_at
+         LIMIT $1`,
+        [limit],
+      );
+      const expired: ApprovalSlaGroup[] = [];
+      for (const candidate of candidates.rows) {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtext($1))",
+          [candidate.instance_id],
+        );
+        const updated = await client.query(
+          `UPDATE workflow_approvals
+           SET
+             status = 'expired',
+             expired_at = NOW(),
+             revision = revision + 1
+           WHERE instance_id = $1
+             AND node_id = $2
+             AND round = $3
+             AND status = 'pending'
+             AND expires_at IS NOT NULL
+             AND expires_at <= NOW()`,
+          [candidate.instance_id, candidate.node_id, candidate.round],
+        );
+        if ((updated.rowCount ?? 0) === 0) continue;
+        expired.push({
+          instanceId: candidate.instance_id,
+          nodeId: candidate.node_id,
+          round: candidate.round,
+          count: updated.rowCount ?? 0,
+        });
+      }
+      return expired;
     });
   }
 
@@ -813,6 +1061,14 @@ function approvalFromRow(row: WorkflowApprovalRow): WorkflowApproval {
     status: row.status,
     delegatedFrom: row.delegated_from,
     transferredTo: row.transferred_to,
+    dueAt: row.due_at?.toISOString() ?? null,
+    remindAt: row.remind_at?.toISOString() ?? null,
+    remindedAt: row.reminded_at?.toISOString() ?? null,
+    escalateAt: row.escalate_at?.toISOString() ?? null,
+    escalatedAt: row.escalated_at?.toISOString() ?? null,
+    escalationRoleId: row.escalation_role_id,
+    expiresAt: row.expires_at?.toISOString() ?? null,
+    expiredAt: row.expired_at?.toISOString() ?? null,
     note: row.note,
     actedBy: row.acted_by,
     actedAt: row.acted_at?.toISOString() ?? null,

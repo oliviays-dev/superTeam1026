@@ -99,6 +99,9 @@ importers:
       '@pluginmax/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@pluginmax/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@pluginmax/database':
         specifier: workspace:*
         version: link:../../packages/database

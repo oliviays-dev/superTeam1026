@@ -126,6 +126,12 @@ describe("workflow markdown validation", () => {
 - timeout: 2m
 - max-attempts: 3
 - retry-backoff: 15s
+- approval-due: 30m
+- approval-remind: 10m
+- approval-escalate-after: 40m
+- approval-escalation-role: 00000000-0000-4000-8000-000000000101
+- approval-expire-after: 1h
+- approval-expire-action: block
 
 ### 判断
 
@@ -160,6 +166,12 @@ describe("workflow markdown validation", () => {
       timeoutSeconds: 120,
       maxAttempts: 3,
       retryBackoffSeconds: 15,
+      approvalDueSeconds: 1_800,
+      approvalRemindSeconds: 600,
+      approvalEscalateAfterSeconds: 2_400,
+      approvalEscalationRoleId: "00000000-0000-4000-8000-000000000101",
+      approvalExpireSeconds: 3_600,
+      approvalExpireAction: "block",
     });
     expect(result.graph?.nodes[2]?.loopLimit).toBe(2);
     expect(result.graph?.nodes[3]).toMatchObject({

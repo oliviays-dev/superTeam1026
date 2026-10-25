@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   Agent,
   AgentDetail,
+  ApprovalSlaSweepResult,
   Artifact,
   CosignWorkflowApprovalInput,
   CreateAgentInput,
@@ -2429,6 +2430,172 @@ export class PlatformApplication {
     };
   }
 
+  async sweepApprovalSla(
+    actorId: string,
+    batchSize = 100,
+  ): Promise<ApprovalSlaSweepResult> {
+    const startedAt = new Date();
+    const affectedInstances = new Set<string>();
+    let reminded = 0;
+    let escalated = 0;
+    let expired = 0;
+    try {
+      const reminders =
+        await this.repositories.workflowRuntime.remindDueApprovals(batchSize);
+      for (const group of reminders) {
+        reminded += group.count;
+        affectedInstances.add(group.instanceId);
+        await this.repositories.workflowRuntime.appendAudit(
+          group.instanceId,
+          actorId,
+          {
+            kind: "approval.reminded",
+            nodeId: group.nodeId,
+            summary: `审批 SLA 即将到期，已提醒 ${group.count} 位审批人`,
+            data: {
+              round: group.round,
+              count: group.count,
+              policy: "approval_reminder",
+            },
+          },
+        );
+      }
+      const escalations =
+        await this.repositories.workflowRuntime.escalateDueApprovals(
+          batchSize,
+        );
+      for (const group of escalations) {
+        escalated += Math.max(1, group.count);
+        affectedInstances.add(group.instanceId);
+        await this.repositories.workflowRuntime.appendAudit(
+          group.instanceId,
+          actorId,
+          {
+            kind: "approval.escalated",
+            nodeId: group.nodeId,
+            summary: group.escalationRoleId
+              ? `审批已超时，升级至项目角色 ${group.escalationRoleId}`
+              : "审批已超时并执行角色升级",
+            data: {
+              round: group.round,
+              count: group.count,
+              escalationRoleId: group.escalationRoleId ?? null,
+            },
+          },
+        );
+      }
+      const expirations =
+        await this.repositories.workflowRuntime.expireDueApprovals(batchSize);
+      for (const group of expirations) {
+        expired += group.count;
+        affectedInstances.add(group.instanceId);
+        await this.resolveExpiredApproval(group, actorId);
+      }
+      const result = {
+        reminded,
+        escalated,
+        expired,
+        affectedInstances: affectedInstances.size,
+      };
+      await this.repositories.runtimeReliability.recordMaintenance({
+        kind: "approval_sla",
+        status: "completed",
+        processedCount: reminded + escalated + expired,
+        metrics: result,
+        startedAt,
+      });
+      return result;
+    } catch (error) {
+      await this.repositories.runtimeReliability.recordMaintenance({
+        kind: "approval_sla",
+        status: "failed",
+        processedCount: reminded + escalated + expired,
+        error: error instanceof Error ? error.message : String(error),
+        metrics: {
+          reminded,
+          escalated,
+          expired,
+          affectedInstances: affectedInstances.size,
+        },
+        startedAt,
+      });
+      throw error;
+    }
+  }
+
+  private async resolveExpiredApproval(
+    group: {
+      readonly instanceId: string;
+      readonly nodeId: string;
+      readonly round: number;
+      readonly count: number;
+    },
+    actorId: string,
+  ): Promise<void> {
+    const instance = await this.getWorkflowInstance(group.instanceId);
+    if (instance.graph === null) return;
+    const node = instance.runtime.nodes.find(
+      (candidate) => candidate.nodeId === group.nodeId,
+    );
+    if (
+      node === undefined ||
+      node.status !== "waiting_approval" ||
+      node.visits !== group.round
+    ) {
+      return;
+    }
+    const definition = requireGraphNode(instance.graph, node.nodeId);
+    const action = definition.approvalExpireAction ?? "reject";
+    if (action === "block") {
+      const runtime = cloneRuntime(instance.runtime);
+      const runtimeNode = requireRuntimeNode(runtime, node.nodeId);
+      runtimeNode.status = "blocked";
+      runtimeNode.error = "审批已超过 SLA 截止时间";
+      runtimeNode.endedAt = new Date().toISOString();
+      await this.repositories.workflowRuntime.save(
+        instance.id,
+        instance.revision,
+        {
+          runtime,
+          status: "blocked",
+          failureReason: runtimeNode.error,
+          actorId,
+          audits: [
+            {
+              kind: "approval.expired",
+              nodeId: node.nodeId,
+              summary: `审批“${node.name}”已过期，流程按策略阻塞`,
+              data: { round: group.round, count: group.count, action },
+            },
+          ],
+        },
+      );
+      return;
+    }
+    const transition = transitionWorkflowNode({
+      graph: instance.graph,
+      runtime: instance.runtime,
+      nodeId: node.nodeId,
+      actorId,
+      approvalResult: "rejected",
+      output: "审批已超过 SLA 截止时间，按过期策略拒绝",
+    });
+    const saved = await this.saveRuntimeTransition(
+      instance,
+      transition,
+      actorId,
+      [
+        {
+          kind: "approval.expired",
+          nodeId: node.nodeId,
+          summary: `审批“${node.name}”已过期，流程按策略拒绝`,
+          data: { round: group.round, count: group.count, action },
+        },
+      ],
+    );
+    await this.activateWorkflowRuntime(saved, actorId);
+  }
+
   private async activateWorkflowRuntime(
     initial: WorkflowInstance,
     actorId: string,
@@ -2495,6 +2662,7 @@ export class PlatformApplication {
         continue;
       }
       if (node.type === "approval") {
+        const sla = approvalSlaDeadlines(definition);
         const approvers = await this.resolveWorkflowApprovers(
           instance.projectId,
           definition,
@@ -2523,13 +2691,50 @@ export class PlatformApplication {
           );
           return saved ?? instance;
         }
+        if (definition.approvalEscalationRoleId !== undefined) {
+          const roles = await this.repositories.projectMemberships.listRoles(
+            instance.projectId,
+          );
+          if (
+            !roles.some(
+              (role) => role.id === definition.approvalEscalationRoleId,
+            )
+          ) {
+            node.status = "failed";
+            node.error = "审批升级角色不属于当前项目";
+            node.endedAt = new Date().toISOString();
+            const status = deriveWorkflowInstanceStatus(runtime);
+            const saved = await this.repositories.workflowRuntime.save(
+              instance.id,
+              instance.revision,
+              {
+                runtime,
+                status,
+                failureReason: node.error,
+                actorId,
+                audits: [
+                  {
+                    kind: "node.failed",
+                    nodeId: node.nodeId,
+                    summary: node.error,
+                  },
+                ],
+              },
+            );
+            return saved ?? instance;
+          }
+        }
         node.status = "waiting_approval";
         node.startedAt ??= new Date().toISOString();
+        node.timeoutAt = sla.dueAt;
         await this.repositories.workflowRuntime.createApprovals(
           instance.id,
           node.nodeId,
           node.visits,
-          approvers,
+          approvers.map((approver) => ({
+            ...approver,
+            ...sla,
+          })),
         );
         const status = deriveWorkflowInstanceStatus(runtime);
         const saved = await this.repositories.workflowRuntime.save(
@@ -2547,6 +2752,10 @@ export class PlatformApplication {
                 data: {
                   approvers: approvers.map((approver) => approver.actorId),
                   policy: definition.approvalPolicy,
+                  dueAt: sla.dueAt,
+                  remindAt: sla.remindAt,
+                  escalateAt: sla.escalateAt,
+                  expiresAt: sla.expiresAt,
                 },
               },
             ],
@@ -3251,6 +3460,36 @@ function requireGraphNode(
     );
   }
   return node;
+}
+
+function approvalSlaDeadlines(definition: WorkflowGraphNode): {
+  readonly dueAt: string;
+  readonly remindAt: string;
+  readonly escalateAt?: string;
+  readonly escalationRoleId?: string;
+  readonly expiresAt: string;
+} {
+  const now = Date.now();
+  const dueSeconds = definition.approvalDueSeconds ?? 3_600;
+  const remindSeconds =
+    definition.approvalRemindSeconds ?? Math.max(1, Math.floor(dueSeconds / 2));
+  const expireSeconds =
+    definition.approvalExpireSeconds ?? Math.max(dueSeconds, dueSeconds * 2);
+  return {
+    dueAt: new Date(now + dueSeconds * 1_000).toISOString(),
+    remindAt: new Date(now + remindSeconds * 1_000).toISOString(),
+    ...(definition.approvalEscalateAfterSeconds === undefined
+      ? {}
+      : {
+          escalateAt: new Date(
+            now + definition.approvalEscalateAfterSeconds * 1_000,
+          ).toISOString(),
+        }),
+    ...(definition.approvalEscalationRoleId === undefined
+      ? {}
+      : { escalationRoleId: definition.approvalEscalationRoleId }),
+    expiresAt: new Date(now + expireSeconds * 1_000).toISOString(),
+  };
 }
 
 function timeoutAt(seconds: number): string {

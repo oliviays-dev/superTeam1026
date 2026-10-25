@@ -6,6 +6,7 @@ import type {
   CreateProjectInput,
   CreateTaskInput,
   CreateTaskMessageInput,
+  Job,
   PlatformRunEvent,
   PlatformRunEventType,
   Project,
@@ -53,6 +54,7 @@ import {
 import { TaskCollaborationRepository } from "./task-collaboration-repository.js";
 import { WorkflowIdempotencyRepository } from "./workflow-idempotency-repository.js";
 import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
+import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -741,11 +743,72 @@ export interface ClaimedJob {
   readonly id: string;
   readonly runId: string;
   readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly leaseToken: string;
+  readonly recoveredRun: boolean;
 }
 
 export interface RecoveredExpiredJob {
   readonly jobId: string;
   readonly runId: string;
+  readonly attempts: number;
+  readonly outcome: "retry_scheduled" | "dead_letter";
+}
+
+export interface FailedJobResult {
+  readonly outcome: "retry_scheduled" | "dead_letter" | "ignored";
+  readonly availableAt?: string;
+}
+
+interface JobRow {
+  id: string;
+  run_id: string;
+  kind: string;
+  status: Job["status"];
+  attempts: number;
+  max_attempts: number;
+  available_at: Date;
+  lease_owner: string | null;
+  lease_expires_at: Date | null;
+  last_heartbeat_at: Date | null;
+  last_error: string | null;
+  recovery_count: number;
+  manual_recovery_count: number;
+  created_at: Date;
+  updated_at: Date;
+  completed_at: Date | null;
+  dead_letter_at: Date | null;
+}
+
+function jobFromRow(row: JobRow): Job {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    kind: row.kind,
+    status: row.status,
+    attempts: row.attempts,
+    maxAttempts: row.max_attempts,
+    availableAt: row.available_at.toISOString(),
+    leaseOwner: row.lease_owner,
+    leaseExpiresAt: row.lease_expires_at?.toISOString() ?? null,
+    lastHeartbeatAt: row.last_heartbeat_at?.toISOString() ?? null,
+    lastError: row.last_error,
+    recoveryCount: row.recovery_count,
+    manualRecoveryCount: row.manual_recovery_count,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+    completedAt: row.completed_at?.toISOString() ?? null,
+    deadLetterAt: row.dead_letter_at?.toISOString() ?? null,
+  };
+}
+
+export function jobRetryDelayMs(
+  attempts: number,
+  baseDelayMs: number,
+  maxDelayMs: number,
+): number {
+  const exponent = Math.max(0, attempts - 1);
+  return Math.min(maxDelayMs, baseDelayMs * 2 ** exponent);
 }
 
 export class JobRepository {
@@ -754,101 +817,67 @@ export class JobRepository {
   async claimNext(
     owner: string,
     leaseSeconds: number,
+    baseBackoffMs = 1_000,
   ): Promise<ClaimedJob | undefined> {
-    const result = await this.database.query<{
-      id: string;
-      run_id: string;
-      attempts: number;
-    }>(
-      `WITH candidate AS (
-         SELECT id
-         FROM jobs
-         WHERE status = 'queued'
-         ORDER BY available_at
-         FOR UPDATE SKIP LOCKED
-         LIMIT 1
-       )
-       UPDATE jobs AS job
-       SET
-         status = 'running',
-         attempts = job.attempts + 1,
-         lease_owner = $1,
-         lease_expires_at = NOW() + ($2 || ' seconds')::interval,
-         updated_at = NOW()
-       FROM candidate
-       WHERE job.id = candidate.id
-       RETURNING job.id, job.run_id, job.attempts`,
-      [owner, leaseSeconds],
-    );
-    const row = result.rows[0];
-    return row === undefined
-      ? undefined
-      : { id: row.id, runId: row.run_id, attempts: row.attempts };
-  }
-
-  async complete(id: string): Promise<void> {
-    await this.database.query(
-      `UPDATE jobs
-       SET status = 'completed', lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
-       WHERE id = $1 AND status = 'running'`,
-      [id],
-    );
-  }
-
-  async fail(id: string, error: string): Promise<void> {
-    await this.database.query(
-      `UPDATE jobs
-       SET status = 'failed', last_error = $2,
-           lease_owner = NULL, lease_expires_at = NULL, updated_at = NOW()
-       WHERE id = $1`,
-      [id, error.slice(0, 4_000)],
-    );
-  }
-
-  async recoverExpiredLeases(limit: number): Promise<RecoveredExpiredJob[]> {
     return this.database.transaction(async (client) => {
-      const expired = await client.query<{ id: string; run_id: string }>(
-        `SELECT id, run_id
-         FROM jobs
-         WHERE status = 'running'
-           AND lease_expires_at <= NOW()
-         ORDER BY lease_expires_at
-         FOR UPDATE SKIP LOCKED
-         LIMIT $1`,
-        [limit],
+      const candidate = await client.query<{
+        id: string;
+        run_id: string;
+        attempts: number;
+        max_attempts: number;
+        run_status: string;
+        task_id: string;
+      }>(
+        `SELECT
+           job.id,
+           job.run_id,
+           job.attempts,
+           job.max_attempts,
+           run.status AS run_status,
+           run.task_id
+         FROM jobs AS job
+         JOIN runs AS run ON run.id = job.run_id
+         WHERE job.status = 'queued'
+           AND job.available_at <= NOW()
+           AND job.attempts < job.max_attempts
+         ORDER BY job.available_at, job.created_at
+         FOR UPDATE OF job SKIP LOCKED
+         LIMIT 1`,
       );
-      const recovered: RecoveredExpiredJob[] = [];
-      for (const job of expired.rows) {
+      const row = candidate.rows[0];
+      if (row === undefined) return undefined;
+      const leaseToken = randomUUID();
+      const claimed = await client.query<{
+        attempts: number;
+      }>(
+        `UPDATE jobs
+         SET
+           status = 'running',
+           attempts = attempts + 1,
+           lease_owner = $2,
+           lease_token = $3,
+           lease_expires_at = NOW() + ($4 || ' seconds')::interval,
+           last_attempt_at = NOW(),
+           last_heartbeat_at = NOW(),
+           updated_at = NOW()
+         WHERE id = $1
+         RETURNING attempts`,
+        [row.id, owner, leaseToken, leaseSeconds],
+      );
+      const attempts = claimed.rows[0]!.attempts;
+      await client.query(
+        `INSERT INTO job_attempts (
+           id, job_id, attempt, worker_id, lease_token, status,
+           started_at, heartbeat_at
+         ) VALUES ($1, $2, $3, $4, $5, 'running', NOW(), NOW())`,
+        [randomUUID(), row.id, attempts, owner, leaseToken],
+      );
+      if (row.run_status === "interrupted") {
         await client.query(
-          `UPDATE jobs
-           SET
-             status = 'failed',
-             last_error = COALESCE(last_error, 'worker lease expired'),
-             lease_owner = NULL,
-             lease_expires_at = NULL,
-             updated_at = NOW()
-           WHERE id = $1`,
-          [job.id],
-        );
-        const interrupted = await client.query<{ task_id: string }>(
           `UPDATE runs
-           SET
-             status = 'interrupted',
-             error = COALESCE(error, 'worker lease expired'),
-             ended_at = NOW(),
-             updated_at = NOW()
-           WHERE id = $1
-             AND status IN ('queued', 'running')
-           RETURNING task_id`,
-          [job.run_id],
-        );
-        const taskId = interrupted.rows[0]?.task_id;
-        if (taskId === undefined) continue;
-        await client.query(
-          `UPDATE tasks
-           SET status = 'queued', updated_at = NOW()
-           WHERE id = $1`,
-          [taskId],
+           SET status = 'queued', error = NULL, ended_at = NULL, updated_at = NOW()
+           WHERE id = $1 AND status = 'interrupted'`,
+          [row.run_id],
         );
         await client.query(
           `INSERT INTO run_events (
@@ -856,21 +885,548 @@ export class JobRepository {
            )
            SELECT
              $1, $2, COALESCE(MAX(seq), 0) + 1,
-             'run.interrupted', 'public', $3, $4::jsonb, NOW()
+             'run.recovered', 'public', $3, $4::jsonb, NOW()
            FROM run_events
            WHERE run_id = $2`,
           [
             randomUUID(),
-            job.run_id,
-            "Worker 租约失效，Run 已标记为中断",
-            JSON.stringify({ reason: "worker lease expired" }),
+            row.run_id,
+            "Run 已由新的 Worker 租约恢复",
+            JSON.stringify({ workerId: owner, attempt: attempts }),
           ],
         );
-        recovered.push({ jobId: job.id, runId: job.run_id });
+      }
+      await client.query(
+        `UPDATE tasks
+         SET status = 'in_progress', updated_at = NOW()
+         WHERE id = $1 AND status = 'queued'`,
+        [row.task_id],
+      );
+      return {
+        id: row.id,
+        runId: row.run_id,
+        attempts,
+        maxAttempts: row.max_attempts,
+        leaseToken,
+        recoveredRun: row.run_status === "interrupted",
+      };
+    });
+  }
+
+  async renewLease(
+    id: string,
+    owner: string,
+    leaseToken: string,
+    leaseSeconds: number,
+  ): Promise<boolean> {
+    return this.database.transaction(async (client) => {
+      const result = await client.query(
+        `UPDATE jobs
+         SET
+           lease_expires_at = NOW() + ($4 || ' seconds')::interval,
+           last_heartbeat_at = NOW(),
+           updated_at = NOW()
+         WHERE id = $1
+           AND status = 'running'
+           AND lease_owner = $2
+           AND lease_token = $3
+         RETURNING id`,
+        [id, owner, leaseToken, leaseSeconds],
+      );
+      if ((result.rowCount ?? 0) === 0) return false;
+      await client.query(
+        `UPDATE job_attempts
+         SET heartbeat_at = NOW()
+         WHERE job_id = $1 AND lease_token = $2 AND status = 'running'`,
+        [id, leaseToken],
+      );
+      return true;
+    });
+  }
+
+  async hasLease(
+    id: string,
+    owner: string,
+    leaseToken: string,
+  ): Promise<boolean> {
+    const result = await this.database.query(
+      `SELECT 1
+       FROM jobs
+       WHERE id = $1
+         AND status = 'running'
+         AND lease_owner = $2
+         AND lease_token = $3
+         AND lease_expires_at > NOW()`,
+      [id, owner, leaseToken],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async complete(
+    id: string,
+    owner: string,
+    leaseToken: string,
+  ): Promise<boolean> {
+    return this.database.transaction(async (client) => {
+      const result = await client.query(
+        `UPDATE jobs
+         SET
+           status = 'completed',
+           lease_owner = NULL,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           completed_at = NOW(),
+           updated_at = NOW()
+         WHERE id = $1
+           AND status = 'running'
+           AND lease_owner = $2
+           AND lease_token = $3
+         RETURNING id`,
+        [id, owner, leaseToken],
+      );
+      if ((result.rowCount ?? 0) === 0) return false;
+      await client.query(
+        `UPDATE job_attempts
+         SET status = 'completed', ended_at = NOW(), heartbeat_at = NOW()
+         WHERE job_id = $1 AND lease_token = $2 AND status = 'running'`,
+        [id, leaseToken],
+      );
+      return true;
+    });
+  }
+
+  async fail(
+    id: string,
+    owner: string,
+    leaseToken: string,
+    error: string,
+    options: {
+      readonly baseBackoffMs?: number;
+      readonly maxBackoffMs?: number;
+    } = {},
+  ): Promise<FailedJobResult> {
+    return this.database.transaction(async (client) => {
+      const current = await client.query<{
+        run_id: string;
+        attempts: number;
+        max_attempts: number;
+        task_id: string;
+      }>(
+        `SELECT
+           job.run_id,
+           job.attempts,
+           job.max_attempts,
+           run.task_id
+         FROM jobs AS job
+         JOIN runs AS run ON run.id = job.run_id
+         WHERE job.id = $1
+           AND job.status = 'running'
+           AND job.lease_owner = $2
+           AND job.lease_token = $3
+         FOR UPDATE OF job`,
+        [id, owner, leaseToken],
+      );
+      const row = current.rows[0];
+      if (row === undefined) return { outcome: "ignored" };
+      const safeError = error.slice(0, 4_000);
+      const hasAttempts = row.attempts < row.max_attempts;
+      if (hasAttempts) {
+        const delayMs = jobRetryDelayMs(
+          row.attempts,
+          options.baseBackoffMs ?? 1_000,
+          options.maxBackoffMs ?? 60_000,
+        );
+        const updated = await client.query<{ available_at: Date }>(
+          `UPDATE jobs
+           SET
+             status = 'queued',
+             available_at = NOW() + ($2 || ' milliseconds')::interval,
+             last_error = $3,
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             updated_at = NOW()
+           WHERE id = $1
+           RETURNING available_at`,
+          [id, delayMs, safeError],
+        );
+        await client.query(
+          `UPDATE runs
+           SET status = 'queued', error = NULL, ended_at = NULL, updated_at = NOW()
+           WHERE id = $1 AND status IN ('queued', 'running')`,
+          [row.run_id],
+        );
+        await client.query(
+          `UPDATE job_attempts
+           SET status = 'failed', error = $3, ended_at = NOW()
+           WHERE job_id = $1 AND lease_token = $2 AND status = 'running'`,
+          [id, leaseToken, safeError],
+        );
+        await appendRunEventWithClient(
+          client,
+          row.run_id,
+          "job.retry_scheduled",
+          "Job 执行失败，已按退避策略重新排队",
+          {
+            jobId: id,
+            attempt: row.attempts,
+            maxAttempts: row.max_attempts,
+            retryDelayMs: delayMs,
+            error: safeError,
+          },
+        );
+        return {
+          outcome: "retry_scheduled",
+          availableAt: updated.rows[0]!.available_at.toISOString(),
+        };
+      }
+      await client.query(
+        `UPDATE jobs
+         SET
+           status = 'dead_letter',
+           last_error = $2,
+           lease_owner = NULL,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           dead_letter_at = NOW(),
+           updated_at = NOW()
+         WHERE id = $1`,
+        [id, safeError],
+      );
+      await client.query(
+        `UPDATE job_attempts
+         SET status = 'dead_letter', error = $3, ended_at = NOW()
+         WHERE job_id = $1 AND lease_token = $2 AND status = 'running'`,
+        [id, leaseToken, safeError],
+      );
+      await client.query(
+        `UPDATE runs
+         SET status = 'failed', error = $2, ended_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status IN ('queued', 'running')`,
+        [row.run_id, safeError],
+      );
+      await client.query(
+        `UPDATE tasks
+         SET status = 'queued', updated_at = NOW()
+         WHERE id = $1 AND status = 'in_progress'`,
+        [row.task_id],
+      );
+      await appendRunEventWithClient(
+        client,
+        row.run_id,
+        "job.dead_lettered",
+        "Job 已达到最大尝试次数并进入死信队列",
+        {
+          jobId: id,
+          attempts: row.attempts,
+          maxAttempts: row.max_attempts,
+          error: safeError,
+        },
+      );
+      return { outcome: "dead_letter" };
+    });
+  }
+
+  async interrupt(
+    id: string,
+    owner: string,
+    leaseToken: string,
+    reason: string,
+  ): Promise<boolean> {
+    return this.database.transaction(async (client) => {
+      const current = await client.query<{
+        run_id: string;
+        attempts: number;
+        max_attempts: number;
+        task_id: string;
+      }>(
+        `SELECT
+           job.run_id,
+           job.attempts,
+           job.max_attempts,
+           run.task_id
+         FROM jobs AS job
+         JOIN runs AS run ON run.id = job.run_id
+         WHERE job.id = $1
+           AND job.status = 'running'
+           AND job.lease_owner = $2
+           AND job.lease_token = $3
+         FOR UPDATE OF job`,
+        [id, owner, leaseToken],
+      );
+      const row = current.rows[0];
+      if (row === undefined) return false;
+      const exhausted = row.attempts >= row.max_attempts;
+      await client.query(
+        `UPDATE jobs
+         SET
+           status = $2,
+           last_error = $3,
+           lease_owner = NULL,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           dead_letter_at = CASE WHEN $2 = 'dead_letter' THEN NOW() ELSE NULL END,
+           updated_at = NOW()
+         WHERE id = $1`,
+        [id, exhausted ? "dead_letter" : "queued", reason.slice(0, 4_000)],
+      );
+      await client.query(
+        `UPDATE job_attempts
+         SET status = $3, error = $4, ended_at = NOW()
+         WHERE job_id = $1 AND lease_token = $2 AND status = 'running'`,
+        [
+          id,
+          leaseToken,
+          exhausted ? "dead_letter" : "interrupted",
+          reason.slice(0, 4_000),
+        ],
+      );
+      await client.query(
+        `UPDATE runs
+         SET status = 'interrupted', error = $2, ended_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND status IN ('queued', 'running')`,
+        [row.run_id, reason.slice(0, 4_000)],
+      );
+      await client.query(
+        `UPDATE tasks
+         SET status = 'queued', updated_at = NOW()
+         WHERE id = $1 AND status = 'in_progress'`,
+        [row.task_id],
+      );
+      await appendRunEventWithClient(
+        client,
+        row.run_id,
+        "run.interrupted",
+        exhausted
+          ? "Worker 强制停机，Job 已进入死信队列"
+          : "Worker 强制停机，Job 已安全释放以便恢复",
+        { reason, jobId: id, attempts: row.attempts },
+      );
+      return true;
+    });
+  }
+
+  async recoverExpiredLeases(
+    limit: number,
+    options: {
+      readonly baseBackoffMs?: number;
+      readonly maxBackoffMs?: number;
+    } = {},
+  ): Promise<RecoveredExpiredJob[]> {
+    return this.database.transaction(async (client) => {
+      const expired = await client.query<JobRow>(
+        `SELECT job.*
+         FROM jobs AS job
+         WHERE job.status = 'running'
+           AND job.lease_expires_at <= NOW()
+         ORDER BY job.lease_expires_at
+         FOR UPDATE SKIP LOCKED
+         LIMIT $1`,
+        [limit],
+      );
+      const recovered: RecoveredExpiredJob[] = [];
+      for (const job of expired.rows) {
+        const outcome =
+          job.attempts < job.max_attempts ? "retry_scheduled" : "dead_letter";
+        const delayMs =
+          outcome === "retry_scheduled"
+            ? jobRetryDelayMs(
+                job.attempts,
+                options.baseBackoffMs ?? 1_000,
+                options.maxBackoffMs ?? 60_000,
+              )
+            : 0;
+        await client.query(
+          `UPDATE jobs
+           SET
+             status = $2,
+             available_at =
+               CASE WHEN $2 = 'queued'
+                 THEN NOW() + ($3 || ' milliseconds')::interval
+                 ELSE available_at
+               END,
+             last_error = 'worker lease expired',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             recovery_count = recovery_count + 1,
+             dead_letter_at = CASE WHEN $2 = 'dead_letter' THEN NOW() ELSE NULL END,
+             updated_at = NOW()
+           WHERE id = $1`,
+          [job.id, outcome === "retry_scheduled" ? "queued" : "dead_letter", delayMs],
+        );
+        await client.query(
+          `UPDATE job_attempts
+           SET status = 'interrupted', ended_at = NOW(),
+               error = COALESCE(error, 'worker lease expired')
+           WHERE job_id = $1 AND status = 'running'`,
+          [job.id],
+        );
+        const interrupted = await client.query<{ task_id: string }>(
+          `UPDATE runs
+           SET
+             status = 'interrupted',
+             error = 'worker lease expired',
+             ended_at = NOW(),
+             updated_at = NOW()
+           WHERE id = $1 AND status IN ('queued', 'running')
+           RETURNING task_id`,
+          [job.run_id],
+        );
+        const taskId = interrupted.rows[0]?.task_id;
+        if (taskId !== undefined) {
+          await client.query(
+            `UPDATE tasks
+             SET status = 'queued', updated_at = NOW()
+             WHERE id = $1`,
+            [taskId],
+          );
+        }
+        await appendRunEventWithClient(
+          client,
+          job.run_id,
+          "run.interrupted",
+          "Worker 租约过期，Run 已标记为中断",
+          {
+            reason: "worker lease expired",
+            jobId: job.id,
+            attempt: job.attempts,
+            outcome,
+          },
+        );
+        await appendRunEventWithClient(
+          client,
+          job.run_id,
+          outcome === "retry_scheduled"
+            ? "job.retry_scheduled"
+            : "job.dead_lettered",
+          outcome === "retry_scheduled"
+            ? "过期 Job 已按退避策略恢复排队"
+            : "过期 Job 已达到最大尝试次数并进入死信队列",
+          {
+            jobId: job.id,
+            attempts: job.attempts,
+            maxAttempts: job.max_attempts,
+            retryDelayMs: delayMs,
+          },
+        );
+        recovered.push({
+          jobId: job.id,
+          runId: job.run_id,
+          attempts: job.attempts,
+          outcome,
+        });
       }
       return recovered;
     });
   }
+
+  async recoverDeadLetter(
+    id: string,
+    actorId: string,
+    reason: string,
+  ): Promise<Job | undefined> {
+    return this.database.transaction(async (client) => {
+      const current = await client.query<JobRow & { task_id: string }>(
+        `SELECT job.*, run.task_id
+         FROM jobs AS job
+         JOIN runs AS run ON run.id = job.run_id
+         WHERE job.id = $1
+           AND job.status IN ('dead_letter', 'failed')
+         FOR UPDATE OF job`,
+        [id],
+      );
+      const job = current.rows[0];
+      if (job === undefined) return undefined;
+      const updated = await client.query<JobRow>(
+        `UPDATE jobs
+         SET
+           status = 'queued',
+           attempts = 0,
+           available_at = NOW(),
+           last_error = NULL,
+           lease_owner = NULL,
+           lease_token = NULL,
+           lease_expires_at = NULL,
+           dead_letter_at = NULL,
+           manual_recovery_count = manual_recovery_count + 1,
+           updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [id],
+      );
+      await client.query(
+        `UPDATE runs
+         SET status = 'queued', error = NULL, ended_at = NULL, updated_at = NOW()
+         WHERE id = $1 AND status IN ('failed', 'interrupted')`,
+        [job.run_id],
+      );
+      await client.query(
+        `UPDATE tasks
+         SET status = 'in_progress', updated_at = NOW()
+         WHERE id = $1 AND status = 'queued'`,
+        [job.task_id],
+      );
+      await appendRunEventWithClient(
+        client,
+        job.run_id,
+        "job.manually_recovered",
+        "死信 Job 已由人工恢复",
+        { jobId: id, actorId, reason },
+      );
+      await appendRunEventWithClient(
+        client,
+        job.run_id,
+        "run.recovered",
+        "Run 已由人工恢复并重新进入执行队列",
+        { jobId: id, actorId },
+      );
+      return jobFromRow(updated.rows[0]!);
+    });
+  }
+
+  async get(id: string): Promise<Job | undefined> {
+    const result = await this.database.query<JobRow>(
+      "SELECT * FROM jobs WHERE id = $1",
+      [id],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : jobFromRow(row);
+  }
+
+  async list(input: {
+    readonly status?: Job["status"];
+    readonly limit?: number;
+  }): Promise<Job[]> {
+    const result = await this.database.query<JobRow>(
+      `SELECT *
+       FROM jobs
+       WHERE ($1::text IS NULL OR status = $1)
+       ORDER BY updated_at DESC
+       LIMIT $2`,
+      [input.status ?? null, input.limit ?? 50],
+    );
+    return result.rows.map(jobFromRow);
+  }
+}
+
+async function appendRunEventWithClient(
+  client: PoolClient,
+  runId: string,
+  type: PlatformRunEventType,
+  summary: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO run_events (
+       id, run_id, seq, type, visibility, summary, data, created_at
+     )
+     SELECT
+       $1, $2, COALESCE(MAX(seq), 0) + 1, $3, 'public', $4, $5::jsonb, NOW()
+     FROM run_events
+     WHERE run_id = $2`,
+    [randomUUID(), runId, type, summary, JSON.stringify(data)],
+  );
 }
 
 export class PlatformRepositories {
@@ -890,6 +1446,7 @@ export class PlatformRepositories {
   readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
   readonly workbench: WorkbenchRepository;
+  readonly runtimeReliability: RuntimeReliabilityRepository;
 
   constructor(database: Database) {
     this.projects = new ProjectRepository(database);
@@ -908,5 +1465,6 @@ export class PlatformRepositories {
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
     this.workbench = new WorkbenchRepository(database);
+    this.runtimeReliability = new RuntimeReliabilityRepository(database);
   }
 }

@@ -696,3 +696,172 @@ CREATE INDEX IF NOT EXISTS workflow_audit_project_idx
 CREATE INDEX IF NOT EXISTS workflow_audit_actor_idx
   ON workflow_audit_events(actor_id, created_at DESC);
 `;
+
+export const RUNTIME_RELIABILITY_SCHEMA_SQL = `
+ALTER TABLE jobs
+  DROP CONSTRAINT IF EXISTS jobs_status_check;
+
+ALTER TABLE jobs
+  ADD CONSTRAINT jobs_status_check
+  CHECK (status IN (
+    'queued',
+    'running',
+    'completed',
+    'failed',
+    'cancelled',
+    'dead_letter'
+  ));
+
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS max_attempts INTEGER NOT NULL DEFAULT 3,
+  ADD COLUMN IF NOT EXISTS lease_token UUID,
+  ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS dead_letter_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS recovery_count INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS manual_recovery_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE jobs
+  DROP CONSTRAINT IF EXISTS jobs_max_attempts_check;
+
+ALTER TABLE jobs
+  ADD CONSTRAINT jobs_max_attempts_check
+  CHECK (max_attempts BETWEEN 1 AND 100);
+
+UPDATE jobs
+SET max_attempts = GREATEST(attempts, 3)
+WHERE max_attempts < attempts;
+
+CREATE INDEX IF NOT EXISTS jobs_available_claim_idx
+  ON jobs(status, available_at, created_at)
+  WHERE status = 'queued';
+
+CREATE INDEX IF NOT EXISTS jobs_dead_letter_idx
+  ON jobs(dead_letter_at DESC)
+  WHERE status = 'dead_letter';
+
+CREATE TABLE IF NOT EXISTS job_attempts (
+  id UUID PRIMARY KEY,
+  job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  attempt INTEGER NOT NULL,
+  worker_id TEXT NOT NULL,
+  lease_token UUID NOT NULL,
+  status TEXT NOT NULL
+    CHECK (status IN (
+      'running',
+      'completed',
+      'failed',
+      'dead_letter',
+      'interrupted'
+    )),
+  error TEXT,
+  started_at TIMESTAMPTZ NOT NULL,
+  heartbeat_at TIMESTAMPTZ NOT NULL,
+  ended_at TIMESTAMPTZ,
+  UNIQUE (job_id, attempt)
+);
+
+CREATE INDEX IF NOT EXISTS job_attempts_job_idx
+  ON job_attempts(job_id, attempt DESC);
+
+CREATE INDEX IF NOT EXISTS job_attempts_worker_idx
+  ON job_attempts(worker_id, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS runtime_workers (
+  id TEXT PRIMARY KEY,
+  hostname TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  concurrency INTEGER NOT NULL CHECK (concurrency BETWEEN 1 AND 128),
+  status TEXT NOT NULL
+    CHECK (status IN ('starting', 'running', 'draining', 'stopped')),
+  started_at TIMESTAMPTZ NOT NULL,
+  heartbeat_at TIMESTAMPTZ NOT NULL,
+  stopping_at TIMESTAMPTZ,
+  stopped_at TIMESTAMPTZ,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS runtime_workers_heartbeat_idx
+  ON runtime_workers(heartbeat_at DESC);
+
+ALTER TABLE workflow_approvals
+  DROP CONSTRAINT IF EXISTS workflow_approvals_status_check;
+
+ALTER TABLE workflow_approvals
+  ADD CONSTRAINT workflow_approvals_status_check
+  CHECK (status IN (
+    'pending',
+    'approved',
+    'rejected',
+    'transferred',
+    'expired'
+  ));
+
+ALTER TABLE workflow_approvals
+  DROP CONSTRAINT IF EXISTS workflow_approvals_kind_check;
+
+ALTER TABLE workflow_approvals
+  ADD CONSTRAINT workflow_approvals_kind_check
+  CHECK (kind IN ('primary', 'cosign', 'escalation'));
+
+ALTER TABLE workflow_approvals
+  ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS remind_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS reminded_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS escalate_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS escalation_role_id UUID
+    REFERENCES project_roles(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS expired_at TIMESTAMPTZ;
+
+UPDATE workflow_approvals
+SET
+  due_at = created_at + INTERVAL '1 hour',
+  remind_at = created_at + INTERVAL '30 minutes',
+  expires_at = created_at + INTERVAL '2 hours'
+WHERE status = 'pending'
+  AND due_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS workflow_approvals_sla_idx
+  ON workflow_approvals(status, remind_at, escalate_at, expires_at)
+  WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS workflow_idempotency_archive (
+  id UUID PRIMARY KEY,
+  original_id UUID NOT NULL,
+  scope TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  state TEXT NOT NULL,
+  response_status INTEGER,
+  response_body JSONB,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  archived_at TIMESTAMPTZ NOT NULL,
+  archive_reason TEXT NOT NULL,
+  UNIQUE (original_id)
+);
+
+CREATE INDEX IF NOT EXISTS workflow_idempotency_archive_scope_idx
+  ON workflow_idempotency_archive(scope, archived_at DESC);
+
+CREATE TABLE IF NOT EXISTS runtime_maintenance_runs (
+  id UUID PRIMARY KEY,
+  kind TEXT NOT NULL
+    CHECK (kind IN ('idempotency_cleanup', 'approval_sla', 'lease_recovery')),
+  status TEXT NOT NULL CHECK (status IN ('completed', 'failed')),
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  archived_count INTEGER NOT NULL DEFAULT 0,
+  deleted_count INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+  started_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS runtime_maintenance_kind_idx
+  ON runtime_maintenance_runs(kind, completed_at DESC);
+`;

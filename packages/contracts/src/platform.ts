@@ -347,6 +347,11 @@ export const platformRunEventTypeSchema = z.enum([
   "run.completed",
   "run.failed",
   "run.cancelled",
+  "run.recovered",
+  "run.interrupted",
+  "job.retry_scheduled",
+  "job.dead_lettered",
+  "job.manually_recovered",
 ]);
 export type PlatformRunEventType = z.infer<typeof platformRunEventTypeSchema>;
 

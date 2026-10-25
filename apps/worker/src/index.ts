@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { PlatformApplication, RunExecutor } from "@pluginmax/application";
 import { loadConfig, loadLocalEnv } from "@pluginmax/config";
 import { Database, PlatformRepositories } from "@pluginmax/database";
+import { WorkerRuntime } from "./worker-runtime.js";
 
 loadLocalEnv();
 const config = loadConfig();
@@ -20,13 +21,7 @@ const executor = new RunExecutor(repositories, {
   },
 });
 const workerId = `worker-${randomUUID()}`;
-let stopping = false;
-let closing = false;
-let sweeping = false;
-let sweepTimer: NodeJS.Timeout | null = null;
-
-const sleep = (milliseconds: number) =>
-  new Promise((resolve) => setTimeout(resolve, milliseconds));
+let lastIdempotencyCleanupAt = 0;
 
 const log = (event: string, data: Record<string, unknown> = {}) => {
   process.stdout.write(
@@ -40,68 +35,75 @@ const log = (event: string, data: Record<string, unknown> = {}) => {
   );
 };
 
-const stop = async () => {
-  if (closing) return;
-  closing = true;
-  stopping = true;
-  if (sweepTimer !== null) clearInterval(sweepTimer);
-  await database.close();
-};
-
-process.on("SIGINT", () => void stop());
-process.on("SIGTERM", () => void stop());
-
 const sweep = async () => {
-  if (sweeping || stopping) return;
-  sweeping = true;
-  try {
-    const recovered = await repositories.jobs.recoverExpiredLeases(
-      config.workerRecoveryBatchSize,
-    );
-    if (recovered.length > 0) {
-      log("worker.expired_leases_recovered", { count: recovered.length });
+  const approvalSla = await application.sweepApprovalSla(workerId, 100);
+  if (
+    approvalSla.reminded > 0 ||
+    approvalSla.escalated > 0 ||
+    approvalSla.expired > 0
+  ) {
+    log("workflow.approval_sla", approvalSla);
+  }
+  const result = await application.sweepWorkflowInstances(workerId, {
+    batchSize: config.workflowSweepBatchSize,
+    leaseSeconds: config.workflowSweepLeaseSeconds,
+    staleAfterSeconds: config.workflowSweepStaleSeconds,
+  });
+  if (result.claimed > 0) {
+    log("workflow.sweep", result);
+  }
+  if (
+    Date.now() - lastIdempotencyCleanupAt >=
+    config.idempotencyCleanupIntervalMs
+  ) {
+    lastIdempotencyCleanupAt = Date.now();
+    const cleanup =
+      await repositories.runtimeReliability.cleanupIdempotencyReceipts({
+        olderThanSeconds: config.idempotencyRetentionSeconds,
+        batchSize: config.idempotencyCleanupBatchSize,
+      });
+    if (cleanup.deletedCount > 0) {
+      log("idempotency.cleanup", cleanup);
     }
-    const result = await application.sweepWorkflowInstances(workerId, {
-      batchSize: config.workflowSweepBatchSize,
-      leaseSeconds: config.workflowSweepLeaseSeconds,
-      staleAfterSeconds: config.workflowSweepStaleSeconds,
-    });
-    if (result.claimed > 0) {
-      log("workflow.sweep", result);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log("workflow.sweep_failed", { error: message });
-  } finally {
-    sweeping = false;
   }
 };
 
-log("worker.started");
-await sweep();
-sweepTimer = setInterval(() => void sweep(), config.workflowSweepIntervalMs);
-while (!stopping) {
-  const job = await repositories.jobs.claimNext(
+const runtime = new WorkerRuntime(
+  {
     workerId,
-    config.workerLeaseSeconds,
-  );
-  if (job === undefined) {
-    await sleep(config.workerPollIntervalMs);
-    continue;
-  }
+    concurrency: config.workerConcurrency,
+    pollIntervalMs: config.workerPollIntervalMs,
+    leaseSeconds: config.workerLeaseSeconds,
+    leaseRenewIntervalMs: config.workerLeaseRenewIntervalMs,
+    shutdownGraceMs: config.workerShutdownGraceMs,
+    recoveryBatchSize: config.workerRecoveryBatchSize,
+    retryBaseDelayMs: config.workerRetryBaseDelayMs,
+    retryMaxDelayMs: config.workerRetryMaxDelayMs,
+    heartbeatIntervalMs: config.workerHeartbeatIntervalMs,
+    workerHeartbeatStaleAfterSeconds: config.workerHeartbeatStaleAfterSeconds,
+    sweepIntervalMs: config.workflowSweepIntervalMs,
+  },
+  {
+    repositories,
+    executor,
+    sweep,
+    log,
+  },
+);
 
-  log("job.started", {
-    jobId: job.id,
-    runId: job.runId,
-    attempt: job.attempts,
-  });
-  try {
-    await executor.execute(job.runId);
-    await repositories.jobs.complete(job.id);
-    log("job.completed", { jobId: job.id, runId: job.runId });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await repositories.jobs.fail(job.id, message);
-    log("job.failed", { jobId: job.id, runId: job.runId, error: message });
-  }
+let stopping = false;
+const stop = async (signal: string) => {
+  if (stopping) return;
+  stopping = true;
+  log("worker.signal_received", { signal });
+  await runtime.stop(signal);
+};
+
+process.on("SIGINT", () => void stop("SIGINT"));
+process.on("SIGTERM", () => void stop("SIGTERM"));
+
+try {
+  await runtime.run();
+} finally {
+  await database.close();
 }

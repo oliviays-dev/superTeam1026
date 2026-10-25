@@ -253,6 +253,17 @@ export const workflowGraphNodeSchema = z.object({
   maxAttempts: z.number().int().min(1).max(10).default(1),
   retryBackoffSeconds: z.number().int().min(0).max(86_400).optional(),
   timeoutSeconds: z.number().int().min(1).max(86_400).default(300),
+  approvalDueSeconds: z.number().int().min(1).max(2_592_000).optional(),
+  approvalRemindSeconds: z.number().int().min(1).max(2_592_000).optional(),
+  approvalEscalateAfterSeconds: z
+    .number()
+    .int()
+    .min(1)
+    .max(2_592_000)
+    .optional(),
+  approvalEscalationRoleId: z.string().uuid().optional(),
+  approvalExpireSeconds: z.number().int().min(1).max(2_592_000).optional(),
+  approvalExpireAction: z.enum(["reject", "block"]).optional(),
   loopLimit: z.number().int().min(1).max(100).optional(),
   subworkflowKey: z.string().trim().min(1).max(160).optional(),
   subworkflowVersion: z.number().int().positive().optional(),
@@ -462,6 +473,7 @@ export const workflowApprovalStatusSchema = z.enum([
   "approved",
   "rejected",
   "transferred",
+  "expired",
 ]);
 export type WorkflowApprovalStatus = z.infer<
   typeof workflowApprovalStatusSchema
@@ -474,10 +486,18 @@ export const workflowApprovalSchema = z.object({
   round: z.number().int().positive(),
   approverId: z.string(),
   approverRoleId: z.string().uuid().nullable(),
-  kind: z.enum(["primary", "cosign"]).default("primary"),
+  kind: z.enum(["primary", "cosign", "escalation"]).default("primary"),
   status: workflowApprovalStatusSchema,
   delegatedFrom: z.string().nullable().default(null),
   transferredTo: z.string().nullable().default(null),
+  dueAt: z.string().datetime({ offset: true }).nullable().default(null),
+  remindAt: z.string().datetime({ offset: true }).nullable().default(null),
+  remindedAt: z.string().datetime({ offset: true }).nullable().default(null),
+  escalateAt: z.string().datetime({ offset: true }).nullable().default(null),
+  escalatedAt: z.string().datetime({ offset: true }).nullable().default(null),
+  escalationRoleId: z.string().uuid().nullable().default(null),
+  expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
+  expiredAt: z.string().datetime({ offset: true }).nullable().default(null),
   note: z.string(),
   actedBy: z.string().nullable(),
   actedAt: z.string().datetime({ offset: true }).nullable(),
@@ -511,6 +531,9 @@ export const workflowAuditKindSchema = z.enum([
   "approval.decided",
   "approval.transferred",
   "approval.cosigned",
+  "approval.reminded",
+  "approval.escalated",
+  "approval.expired",
   "run.interrupted",
   "subworkflow.started",
   "subworkflow.completed",

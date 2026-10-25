@@ -27,6 +27,13 @@ export class RunTimedOutError extends Error {
   }
 }
 
+export class RunLeaseLostError extends Error {
+  constructor() {
+    super("worker lease lost");
+    this.name = "RunLeaseLostError";
+  }
+}
+
 export interface RunExecutorOptions {
   readonly workspaceRoot: string;
   readonly fileStoreRoot: string;
@@ -56,7 +63,20 @@ export class RunExecutor {
     this.fileStore = new LocalFileStore(options.fileStoreRoot);
   }
 
-  async execute(runId: string): Promise<void> {
+  async execute(
+    runId: string,
+    options: {
+      readonly signal?: AbortSignal;
+      readonly assertLease?: () => Promise<void>;
+    } = {},
+  ): Promise<void> {
+    const assertLease = async () => {
+      await options.assertLease?.();
+      if (options.signal?.aborted) {
+        throw options.signal.reason ?? new RunLeaseLostError();
+      }
+    };
+    await assertLease();
     const run = await this.requireRun(runId);
     const task = await this.requireTask(run.taskId);
     const agent = await this.repositories.agents.get(run.agentId);
@@ -87,6 +107,18 @@ export class RunExecutor {
     );
 
     const controller = new AbortController();
+    const relayExternalAbort = () => {
+      controller.abort(
+        options.signal?.reason ?? new RunLeaseLostError(),
+      );
+    };
+    if (options.signal?.aborted) {
+      relayExternalAbort();
+    } else {
+      options.signal?.addEventListener("abort", relayExternalAbort, {
+        once: true,
+      });
+    }
     const timeoutTimer =
       run.timeoutAt === null
         ? undefined
@@ -112,8 +144,10 @@ export class RunExecutor {
         },
         controller.signal,
       )) {
+        await assertLease();
         await this.assertStillRunning(runId);
         await this.persistEvent(runId, event);
+        await assertLease();
         if (event.type === "completed") {
           const current = await this.requireRun(runId);
           if (current.status === "cancelled") throw new RunCancelledError();
@@ -129,11 +163,20 @@ export class RunExecutor {
             mimeType: "text/markdown",
             content: Buffer.from(event.output, "utf8"),
           });
-          const artifact = await this.repositories.artifacts.save({
-            runId,
-            projectId: run.projectId,
-            ref,
-          });
+          await assertLease();
+          const existingArtifacts =
+            await this.repositories.artifacts.listByRun(runId);
+          const artifact =
+            existingArtifacts.find(
+              (candidate) =>
+                candidate.name === ref.name &&
+                candidate.sha256 === ref.sha256,
+            ) ??
+            (await this.repositories.artifacts.save({
+              runId,
+              projectId: run.projectId,
+              ref,
+            }));
           await this.repositories.runs.appendEvent(
             runId,
             "run.completed",
@@ -171,16 +214,18 @@ export class RunExecutor {
         );
         return;
       }
+      if (options.signal?.aborted) {
+        throw options.signal.reason ?? new RunLeaseLostError();
+      }
       const message =
         error instanceof Error ? error.message : "unknown runtime failure";
       await this.repositories.runs.appendEvent(runId, "error", "Run 执行失败", {
         error: message,
       });
-      await this.repositories.runs.finish(runId, "failed", null, message);
-      await this.repositories.tasks.setStatus(task.id, "queued");
       throw error;
     } finally {
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
+      options.signal?.removeEventListener("abort", relayExternalAbort);
     }
   }
 

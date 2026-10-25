@@ -211,6 +211,108 @@ export function validateWorkflowMarkdown(
           message: `节点“${raw.name}”的 retry-backoff 必须使用 ms、s、m 或 h 单位`,
         });
       }
+      const approvalDueValue = raw.fields.get("approval-due")?.[0];
+      const approvalDueSeconds =
+        approvalDueValue === undefined
+          ? undefined
+          : parseDurationSeconds(approvalDueValue);
+      if (
+        approvalDueValue !== undefined &&
+        approvalDueSeconds === undefined
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_approval_due",
+          message: `节点“${raw.name}”的 approval-due 必须使用 ms、s、m 或 h 单位`,
+        });
+      }
+      const approvalRemindValue = raw.fields.get("approval-remind")?.[0];
+      const approvalRemindSeconds =
+        approvalRemindValue === undefined
+          ? undefined
+          : parseDurationSeconds(approvalRemindValue);
+      if (
+        approvalRemindValue !== undefined &&
+        approvalRemindSeconds === undefined
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_approval_remind",
+          message: `节点“${raw.name}”的 approval-remind 必须使用 ms、s、m 或 h 单位`,
+        });
+      }
+      const approvalEscalateValue = raw.fields.get(
+        "approval-escalate-after",
+      )?.[0];
+      const approvalEscalateAfterSeconds =
+        approvalEscalateValue === undefined
+          ? undefined
+          : parseDurationSeconds(approvalEscalateValue);
+      if (
+        approvalEscalateValue !== undefined &&
+        approvalEscalateAfterSeconds === undefined
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_approval_escalation",
+          message: `节点“${raw.name}”的 approval-escalate-after 必须使用 ms、s、m 或 h 单位`,
+        });
+      }
+      const approvalEscalationRoleValue = raw.fields.get(
+        "approval-escalation-role",
+      )?.[0];
+      const approvalEscalationRoleValid =
+        approvalEscalationRoleValue !== undefined &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          approvalEscalationRoleValue,
+        );
+      if (
+        approvalEscalationRoleValue !== undefined &&
+        !approvalEscalationRoleValid
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_approval_escalation_role",
+          message: `节点“${raw.name}”的 approval-escalation-role 必须是项目角色 UUID`,
+        });
+      }
+      if (
+        approvalEscalateAfterSeconds !== undefined &&
+        approvalEscalationRoleValue === undefined
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "approval_escalation_role_required",
+          message: `节点“${raw.name}”配置升级时限时必须声明 approval-escalation-role`,
+        });
+      }
+      const approvalExpireValue = raw.fields.get("approval-expire-after")?.[0];
+      const approvalExpireSeconds =
+        approvalExpireValue === undefined
+          ? undefined
+          : parseDurationSeconds(approvalExpireValue);
+      if (
+        approvalExpireValue !== undefined &&
+        approvalExpireSeconds === undefined
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_approval_expiration",
+          message: `节点“${raw.name}”的 approval-expire-after 必须使用 ms、s、m 或 h 单位`,
+        });
+      }
+      const approvalExpireActionValue =
+        raw.fields.get("approval-expire-action")?.[0];
+      if (
+        approvalExpireActionValue !== undefined &&
+        !["reject", "block"].includes(approvalExpireActionValue)
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_approval_expire_action",
+          message: `节点“${raw.name}”的 approval-expire-action 只能是 reject 或 block`,
+        });
+      }
       const loopLimitValue = raw.fields.get("loop-limit")?.[0];
       const loopLimit =
         loopLimitValue === undefined ? undefined : Number(loopLimitValue);
@@ -277,6 +379,24 @@ export function validateWorkflowMarkdown(
           Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : 1,
         timeoutSeconds: timeoutSeconds ?? 300,
         ...(retryBackoffSeconds === undefined ? {} : { retryBackoffSeconds }),
+        ...(approvalDueSeconds === undefined ? {} : { approvalDueSeconds }),
+        ...(approvalRemindSeconds === undefined
+          ? {}
+          : { approvalRemindSeconds }),
+        ...(approvalEscalateAfterSeconds === undefined
+          ? {}
+          : { approvalEscalateAfterSeconds }),
+        ...(approvalEscalationRoleValue === undefined ||
+        !approvalEscalationRoleValid
+          ? {}
+          : { approvalEscalationRoleId: approvalEscalationRoleValue }),
+        ...(approvalExpireSeconds === undefined
+          ? {}
+          : { approvalExpireSeconds }),
+        ...(approvalExpireActionValue === "reject" ||
+        approvalExpireActionValue === "block"
+          ? { approvalExpireAction: approvalExpireActionValue }
+          : {}),
         ...(loopLimit === undefined || !Number.isInteger(loopLimit)
           ? {}
           : { loopLimit }),

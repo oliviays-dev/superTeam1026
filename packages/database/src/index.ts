@@ -31,6 +31,10 @@ export {
   type RecoveredExpiredJob,
 } from "./repositories.js";
 export {
+  RuntimeReliabilityRepository,
+  type WorkerHeartbeatInput,
+} from "./runtime-reliability-repository.js";
+export {
   WorkflowRuntimeRepository,
   type CreateWorkflowRuntimeInstanceInput,
   type SaveWorkflowRuntimeInput,
