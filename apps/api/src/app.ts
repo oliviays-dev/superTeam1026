@@ -13,9 +13,13 @@ import {
   createTaskMessageInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
+  completeWorkflowNodeInputSchema,
+  decideWorkflowApprovalInputSchema,
   importWorkflowMarkdownInputSchema,
   publishMemoryTruthInputSchema,
   taskReviewInputSchema,
+  retryWorkflowNodeInputSchema,
+  startWorkflowInputSchema,
   uploadTaskAttachmentInputSchema,
   updateAgentInputSchema,
   updateMemoryClaimInputSchema,
@@ -24,6 +28,7 @@ import {
   updateProjectRoleInputSchema,
   updateTaskInputSchema,
   validateWorkflowMarkdownInputSchema,
+  workflowReasonInputSchema,
 } from "@pluginmax/contracts";
 import { ApplicationError, PlatformApplication } from "@pluginmax/application";
 import { Database, PlatformRepositories } from "@pluginmax/database";
@@ -68,9 +73,6 @@ const memoryTopicParamsSchema = z.object({
 const memoryClaimParamsSchema = memoryTopicParamsSchema.extend({
   claimId: z.string().uuid(),
 });
-const workflowStartSchema = z.object({
-  title: z.string().trim().min(1).max(180),
-});
 const meetingMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
 });
@@ -107,6 +109,24 @@ function apiError(
     message,
     ...(details === undefined ? {} : { details }),
   };
+}
+
+function requestActorId(headers: Record<string, unknown>): string {
+  const value = headers["x-pluginmax-actor"];
+  const actor = Array.isArray(value) ? value[0] : value;
+  return typeof actor === "string" && /^[a-zA-Z0-9_.:-]{1,180}$/.test(actor)
+    ? actor
+    : "local-admin";
+}
+
+function requestIdempotencyKey(
+  headers: Record<string, unknown>,
+): string | undefined {
+  const value = headers["idempotency-key"];
+  const key = Array.isArray(value) ? value[0] : value;
+  return typeof key === "string" && key.trim() !== ""
+    ? key.trim().slice(0, 200)
+    : undefined;
 }
 
 export function buildApi(options: BuildApiOptions): {
@@ -553,10 +573,27 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/workflows/:workflowId/start", async (request, reply) => {
     const { workflowId } = workflowParamsSchema.parse(request.params);
-    const { title } = workflowStartSchema.parse(request.body);
+    const input = startWorkflowInputSchema.parse(request.body);
     return reply
       .status(201)
-      .send(await application.startWorkflow(workflowId, title));
+      .send(
+        await application.startWorkflow(
+          workflowId,
+          input,
+          requestActorId(request.headers),
+          requestIdempotencyKey(request.headers),
+        ),
+      );
+  });
+
+  app.get("/api/v1/workflow-instances", async (request, reply) => {
+    const { projectId } = listTasksQuerySchema.parse(request.query);
+    if (projectId === undefined) {
+      throw new ApplicationError("invalid_input", "projectId is required", 400);
+    }
+    return reply.send({
+      items: await application.listWorkflowInstances(projectId),
+    });
   });
 
   app.get("/api/v1/workflow-instances/:instanceId", async (request, reply) => {
@@ -564,11 +601,27 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.getWorkflowInstance(instanceId));
   });
 
+  app.get(
+    "/api/v1/workflow-instances/:instanceId/detail",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      return reply.send(
+        await application.getWorkflowInstanceDetail(instanceId),
+      );
+    },
+  );
+
   app.post(
     "/api/v1/workflow-instances/:instanceId/advance",
     async (request, reply) => {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
-      return reply.send(await application.advanceWorkflow(instanceId));
+      return reply.send(
+        await application.advanceWorkflow(
+          instanceId,
+          requestActorId(request.headers),
+          requestIdempotencyKey(request.headers),
+        ),
+      );
     },
   );
 
@@ -578,7 +631,106 @@ export function buildApi(options: BuildApiOptions): {
       const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
       return reply
         .status(202)
-        .send(await application.dispatchWorkflowStep(instanceId));
+        .send(
+          await application.dispatchWorkflowStep(
+            instanceId,
+            requestActorId(request.headers),
+            requestIdempotencyKey(request.headers),
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/nodes/complete",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const input = completeWorkflowNodeInputSchema.parse(request.body);
+      return reply.send(
+        await application.completeWorkflowNode(
+          instanceId,
+          input,
+          requestActorId(request.headers),
+          requestIdempotencyKey(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/approvals",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const input = decideWorkflowApprovalInputSchema.parse(request.body);
+      return reply.send(
+        await application.decideWorkflowApproval(
+          instanceId,
+          input,
+          requestActorId(request.headers),
+          requestIdempotencyKey(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/pause",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const input = workflowReasonInputSchema.parse(request.body ?? {});
+      return reply.send(
+        await application.pauseWorkflow(
+          instanceId,
+          input,
+          requestActorId(request.headers),
+          requestIdempotencyKey(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/resume",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const input = workflowReasonInputSchema.parse(request.body ?? {});
+      return reply.send(
+        await application.resumeWorkflow(
+          instanceId,
+          input,
+          requestActorId(request.headers),
+          requestIdempotencyKey(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/retry",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const input = retryWorkflowNodeInputSchema.parse(request.body);
+      return reply.send(
+        await application.retryWorkflowNode(
+          instanceId,
+          input,
+          requestActorId(request.headers),
+          requestIdempotencyKey(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflow-instances/:instanceId/reconcile",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      return reply.send(
+        await application.reconcileWorkflowInstance(
+          instanceId,
+          requestActorId(request.headers),
+        ),
+      );
     },
   );
 

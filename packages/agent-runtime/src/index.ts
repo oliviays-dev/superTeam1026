@@ -9,6 +9,10 @@ export interface RuntimeTaskInput {
   readonly agentName: string;
   readonly runtimeKind: RuntimeKind;
   readonly workspacePath: string;
+  readonly runtimeOptions?: {
+    readonly fault?: "fail" | "timeout" | undefined;
+    readonly delayMs?: number | undefined;
+  };
 }
 
 export type AgentRuntimeEvent =
@@ -85,6 +89,16 @@ export class FakeRuntimeAdapter implements AgentRuntimeAdapter {
     input: RuntimeTaskInput,
     signal: AbortSignal,
   ): AsyncIterable<AgentRuntimeEvent> {
+    if ((input.runtimeOptions?.delayMs ?? 0) > 0) {
+      await delay(input.runtimeOptions!.delayMs!, signal);
+    }
+    if (input.runtimeOptions?.fault === "fail") {
+      throw new Error("Fake Runtime injected failure");
+    }
+    if (input.runtimeOptions?.fault === "timeout") {
+      await delay(60_000, signal);
+      throw new Error("Fake Runtime injected timeout");
+    }
     yield {
       type: "plan",
       summary: "已生成任务执行计划",

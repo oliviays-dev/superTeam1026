@@ -10,12 +10,20 @@ import {
 import { buildTaskContext } from "@pluginmax/context";
 import type { Agent, Run, Task } from "@pluginmax/contracts";
 import type { PlatformRepositories } from "@pluginmax/database";
+import { isTerminalRunStatus } from "@pluginmax/domain";
 import { LocalFileStore } from "@pluginmax/files";
 
 export class RunCancelledError extends Error {
   constructor() {
     super("run cancelled");
     this.name = "RunCancelledError";
+  }
+}
+
+export class RunTimedOutError extends Error {
+  constructor() {
+    super("run timed out");
+    this.name = "RunTimedOutError";
   }
 }
 
@@ -79,6 +87,13 @@ export class RunExecutor {
     );
 
     const controller = new AbortController();
+    const timeoutTimer =
+      run.timeoutAt === null
+        ? undefined
+        : setTimeout(
+            () => controller.abort(new RunTimedOutError()),
+            Math.max(0, new Date(run.timeoutAt).getTime() - Date.now()),
+          );
     try {
       const adapter = runtimeFor(agent, this.options);
       for await (const event of adapter.execute(
@@ -91,6 +106,9 @@ export class RunExecutor {
           agentName: agent.name,
           runtimeKind: agent.runtimeKind,
           workspacePath,
+          ...(run.inputSnapshot.runtimeOptions === undefined
+            ? {}
+            : { runtimeOptions: run.inputSnapshot.runtimeOptions }),
         },
         controller.signal,
       )) {
@@ -139,6 +157,20 @@ export class RunExecutor {
       if (error instanceof RunCancelledError) {
         return;
       }
+      if (
+        error instanceof RunTimedOutError ||
+        controller.signal.reason instanceof RunTimedOutError
+      ) {
+        await this.repositories.runs.timeout(runId, "Run exceeded its timeout");
+        await this.repositories.tasks.setStatus(task.id, "queued");
+        await this.repositories.runs.appendEvent(
+          runId,
+          "error",
+          "Run 超过执行时限",
+          { error: "Run exceeded its timeout" },
+        );
+        return;
+      }
       const message =
         error instanceof Error ? error.message : "unknown runtime failure";
       await this.repositories.runs.appendEvent(runId, "error", "Run 执行失败", {
@@ -147,6 +179,8 @@ export class RunExecutor {
       await this.repositories.runs.finish(runId, "failed", null, message);
       await this.repositories.tasks.setStatus(task.id, "queued");
       throw error;
+    } finally {
+      if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
     }
   }
 
@@ -199,6 +233,17 @@ export class RunExecutor {
   private async assertStillRunning(runId: string): Promise<void> {
     const current = await this.requireRun(runId);
     if (current.status === "cancelled") throw new RunCancelledError();
+    if (current.status === "timeout") throw new RunTimedOutError();
+    if (isTerminalRunStatus(current.status)) {
+      throw new Error(`run already finished with status ${current.status}`);
+    }
+    if (
+      current.timeoutAt !== null &&
+      new Date(current.timeoutAt).getTime() <= Date.now()
+    ) {
+      await this.repositories.runs.timeout(runId, "Run exceeded its timeout");
+      throw new RunTimedOutError();
+    }
   }
 
   private async requireRun(runId: string): Promise<Run> {
