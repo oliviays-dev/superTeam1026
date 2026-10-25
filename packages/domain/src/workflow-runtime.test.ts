@@ -4,8 +4,10 @@ import {
   deriveWorkflowInstanceStatus,
   evaluateWorkflowExpression,
   initializeWorkflowRuntime,
+  shiftWorkflowDeadlines,
   transitionWorkflowNode,
   WorkflowExpressionError,
+  workflowRetryDelayMs,
 } from "./workflow-runtime.js";
 
 function node(
@@ -61,6 +63,32 @@ describe("workflow expression", () => {
 });
 
 describe("workflow runtime", () => {
+  it("uses deterministic exponential retry backoff with an explicit cap", () => {
+    expect(workflowRetryDelayMs(0)).toBe(0);
+    expect(workflowRetryDelayMs(1)).toBe(5_000);
+    expect(workflowRetryDelayMs(3)).toBe(20_000);
+    expect(workflowRetryDelayMs(20)).toBe(3_600_000);
+    expect(workflowRetryDelayMs(2, 30)).toBe(30_000);
+  });
+
+  it("shifts timeout and retry deadlines while a workflow is paused", () => {
+    const definition = graph({
+      nodes: [node("agent", "task", { timeoutSeconds: 30 })],
+      startNodeIds: ["agent"],
+    });
+    const runtime = initializeWorkflowRuntime(
+      definition,
+      {},
+      new Date("2026-01-01T00:00:00.000Z"),
+    );
+    runtime.nodes[0]!.timeoutAt = "2026-01-01T00:00:30.000Z";
+    runtime.nodes[0]!.nextRetryAt = "2026-01-01T00:01:00.000Z";
+    const shifted = shiftWorkflowDeadlines(runtime, 15_000);
+    expect(shifted.nodes[0]?.timeoutAt).toBe("2026-01-01T00:00:45.000Z");
+    expect(shifted.nodes[0]?.nextRetryAt).toBe("2026-01-01T00:01:15.000Z");
+    expect(runtime.nodes[0]?.timeoutAt).toBe("2026-01-01T00:00:30.000Z");
+  });
+
   it("selects one deterministic conditional branch and skips the other", () => {
     const definition = graph({
       nodes: [

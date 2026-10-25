@@ -203,7 +203,7 @@ export class PlatformApplication {
       roleIds = normalizeProjectRoleIds(projectId, input.roleIds, roles);
     });
 
-    let actorId = "local-admin";
+    let actorId = input.actorId ?? "local-admin";
     let name = input.name ?? "Local Admin";
     if (input.kind === "agent") {
       if (input.agentId === undefined) {

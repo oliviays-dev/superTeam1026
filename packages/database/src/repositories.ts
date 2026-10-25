@@ -51,6 +51,7 @@ import {
   WorkflowRepository,
 } from "./collaboration-repositories.js";
 import { TaskCollaborationRepository } from "./task-collaboration-repository.js";
+import { WorkflowIdempotencyRepository } from "./workflow-idempotency-repository.js";
 import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
 
 export class ProjectRepository {
@@ -797,6 +798,7 @@ export class PlatformRepositories {
   readonly reviews: ReviewRepository;
   readonly workflows: WorkflowRepository;
   readonly workflowRuntime: WorkflowRuntimeRepository;
+  readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
   readonly workbench: WorkbenchRepository;
 
@@ -814,6 +816,7 @@ export class PlatformRepositories {
     this.reviews = new ReviewRepository(database);
     this.workflows = new WorkflowRepository(database);
     this.workflowRuntime = new WorkflowRuntimeRepository(database);
+    this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
     this.workbench = new WorkbenchRepository(database);
   }

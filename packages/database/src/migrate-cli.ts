@@ -19,9 +19,17 @@ const databaseUrl =
   process.env.DATABASE_URL ??
   "postgres://pluginmax:pluginmax@127.0.0.1:54329/pluginmax";
 const database = new Database(databaseUrl);
+const targetValue = process.env.MIGRATION_TARGET_VERSION;
+const targetVersion =
+  targetValue === undefined || targetValue === ""
+    ? Number.POSITIVE_INFINITY
+    : Number(targetValue);
+if (!Number.isInteger(targetVersion) && Number.isFinite(targetVersion)) {
+  throw new Error("MIGRATION_TARGET_VERSION must be an integer");
+}
 
 try {
-  await migrate(database);
+  await migrate(database, targetVersion);
   process.stdout.write("database migrations applied\n");
 } finally {
   await database.close();

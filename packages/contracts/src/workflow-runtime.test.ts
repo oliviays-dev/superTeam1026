@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   completeWorkflowNodeInputSchema,
+  cosignWorkflowApprovalInputSchema,
+  createProjectMemberInputSchema,
   decideWorkflowApprovalInputSchema,
   retryWorkflowNodeInputSchema,
   runInputSnapshotSchema,
   startWorkflowInputSchema,
+  transferWorkflowApprovalInputSchema,
+  workflowAuditQuerySchema,
   workflowGraphNodeSchema,
   workflowRuntimeNodeSchema,
 } from "./index.js";
@@ -67,6 +71,7 @@ describe("workflow runtime API contracts", () => {
     expect(node.maxAttempts).toBe(3);
     expect(node.timeoutSeconds).toBe(30);
     expect(node.start).toBe(false);
+    expect(node.retryBackoffSeconds).toBeUndefined();
 
     const snapshot = runInputSnapshotSchema.parse({
       taskTitle: "Agent",
@@ -78,6 +83,58 @@ describe("workflow runtime API contracts", () => {
       runtimeOptions: { fault: "timeout" },
     });
     expect(snapshot.runtimeOptions?.fault).toBe("timeout");
+  });
+
+  it("validates approval governance and audit query contracts", () => {
+    expect(
+      transferWorkflowApprovalInputSchema.parse({
+        nodeId: "review",
+        targetActorId: "reviewer-2",
+      }),
+    ).toEqual({
+      nodeId: "review",
+      targetActorId: "reviewer-2",
+      note: "",
+    });
+    expect(
+      cosignWorkflowApprovalInputSchema.parse({
+        nodeId: "review",
+        approvers: [{ kind: "user", id: "security-reviewer" }],
+      }),
+    ).toMatchObject({ nodeId: "review", note: "" });
+    expect(() =>
+      cosignWorkflowApprovalInputSchema.parse({
+        nodeId: "review",
+        approvers: [],
+      }),
+    ).toThrow();
+    expect(
+      workflowAuditQuerySchema.parse({
+        projectId: "00000000-0000-4000-8000-000000000001",
+        failuresOnly: "true",
+      }),
+    ).toMatchObject({
+      failuresOnly: true,
+      page: 1,
+      pageSize: 20,
+    });
+  });
+
+  it("accepts an explicit actor only for human project members", () => {
+    expect(
+      createProjectMemberInputSchema.parse({
+        kind: "human",
+        actorId: "reviewer-2",
+        name: "Reviewer 2",
+      }),
+    ).toMatchObject({ actorId: "reviewer-2" });
+    expect(() =>
+      createProjectMemberInputSchema.parse({
+        kind: "agent",
+        actorId: "invalid-agent-actor",
+        agentId: "00000000-0000-4000-8000-000000000001",
+      }),
+    ).toThrow();
   });
 
   it("rejects unknown runtime node statuses", () => {

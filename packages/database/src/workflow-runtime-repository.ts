@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type {
   WorkflowApproval,
+  WorkflowAuditPage,
+  WorkflowAuditQuery,
   WorkflowAuditEvent,
   WorkflowDefinition,
   WorkflowGraph,
@@ -28,6 +30,7 @@ interface WorkflowInstanceRow {
   runtime_edges: WorkflowRuntimeState["edges"];
   failure_reason: string | null;
   paused_at: Date | null;
+  last_reconciled_at: Date | null;
   revision: number;
   current_step: number;
   steps: WorkflowStepState[];
@@ -56,7 +59,10 @@ interface WorkflowApprovalRow {
   round: number;
   approver_id: string;
   approver_role_id: string | null;
+  kind: WorkflowApproval["kind"];
   status: WorkflowApproval["status"];
+  delegated_from: string | null;
+  transferred_to: string | null;
   note: string;
   acted_by: string | null;
   acted_at: Date | null;
@@ -320,6 +326,124 @@ export class WorkflowRuntimeRepository {
     return result.rows.map(auditFromRow);
   }
 
+  async listAuditPage(query: WorkflowAuditQuery): Promise<WorkflowAuditPage> {
+    const failuresOnly = query.failuresOnly === true;
+    const values = [
+      query.projectId,
+      query.instanceId ?? null,
+      query.nodeId ?? null,
+      query.kind ?? null,
+      query.actorId ?? null,
+      query.query === undefined || query.query === ""
+        ? null
+        : `%${query.query}%`,
+      failuresOnly,
+    ] as const;
+    const where = `
+      WHERE instance.project_id = $1
+        AND ($2::uuid IS NULL OR event.instance_id = $2)
+        AND ($3::text IS NULL OR event.node_id = $3)
+        AND ($4::text IS NULL OR event.kind = $4)
+        AND ($5::text IS NULL OR event.actor_id = $5)
+        AND (
+          $6::text IS NULL
+          OR event.summary ILIKE $6
+          OR COALESCE(event.data, '{}'::jsonb)::text ILIKE $6
+          OR COALESCE(instance.failure_reason, '') ILIKE $6
+        )
+        AND (
+          $7::boolean = FALSE
+          OR event.kind IN (
+            'instance.failed',
+            'instance.blocked',
+            'node.failed',
+            'node.timed_out',
+            'node.blocked',
+            'run.interrupted'
+          )
+        )`;
+    const [count, items] = await Promise.all([
+      this.database.query<{ total: string }>(
+        `SELECT COUNT(*)::text AS total
+         FROM workflow_audit_events AS event
+         JOIN workflow_instances AS instance ON instance.id = event.instance_id
+         ${where}`,
+        values,
+      ),
+      this.database.query<WorkflowAuditRow>(
+        `SELECT event.*
+         FROM workflow_audit_events AS event
+         JOIN workflow_instances AS instance ON instance.id = event.instance_id
+         ${where}
+         ORDER BY event.created_at DESC, event.seq DESC
+         LIMIT $8 OFFSET $9`,
+        [
+          ...values,
+          query.pageSize,
+          (query.page - 1) * query.pageSize,
+        ],
+      ),
+    ]);
+    const total = Number(count.rows[0]?.total ?? 0);
+    return {
+      items: items.rows.map(auditFromRow),
+      total,
+      page: query.page,
+      pageSize: query.pageSize,
+      hasMore: query.page * query.pageSize < total,
+    };
+  }
+
+  async claimReconcileCandidates(input: {
+    readonly owner: string;
+    readonly leaseSeconds: number;
+    readonly staleAfterSeconds: number;
+    readonly limit: number;
+  }): Promise<string[]> {
+    const result = await this.database.query<{ id: string }>(
+      `WITH candidate AS (
+         SELECT id
+         FROM workflow_instances
+         WHERE status NOT IN ('completed', 'failed', 'cancelled', 'paused')
+           AND (
+             sweep_lease_expires_at IS NULL
+             OR sweep_lease_expires_at <= NOW()
+           )
+           AND (
+             last_reconciled_at IS NULL
+             OR last_reconciled_at <= NOW() - ($3 || ' seconds')::interval
+           )
+         ORDER BY last_reconciled_at NULLS FIRST, updated_at
+         FOR UPDATE SKIP LOCKED
+         LIMIT $4
+       )
+       UPDATE workflow_instances AS instance
+       SET
+         sweep_lease_owner = $1,
+         sweep_lease_expires_at =
+           NOW() + ($2 || ' seconds')::interval
+       FROM candidate
+       WHERE instance.id = candidate.id
+       RETURNING instance.id`,
+      [
+        input.owner,
+        input.leaseSeconds,
+        input.staleAfterSeconds,
+        input.limit,
+      ],
+    );
+    return result.rows.map((row) => row.id);
+  }
+
+  async releaseReconcileLease(instanceId: string, owner: string): Promise<void> {
+    await this.database.query(
+      `UPDATE workflow_instances
+       SET sweep_lease_owner = NULL, sweep_lease_expires_at = NULL
+       WHERE id = $1 AND sweep_lease_owner = $2`,
+      [instanceId, owner],
+    );
+  }
+
   async listApprovals(instanceId: string): Promise<WorkflowApproval[]> {
     const result = await this.database.query<WorkflowApprovalRow>(
       `SELECT * FROM workflow_approvals
@@ -473,8 +597,16 @@ function instanceFromRow(row: WorkflowInstanceRow): WorkflowInstance {
     parentNodeId: row.parent_node_id,
     failureReason: row.failure_reason,
     pausedAt: row.paused_at?.toISOString() ?? null,
+    lastReconciledAt: row.last_reconciled_at?.toISOString() ?? null,
     revision: row.revision,
-    runtime,
+    runtime: {
+      ...runtime,
+      nodes: runtime.nodes.map((node) => ({
+        ...node,
+        failureCount: node.failureCount ?? 0,
+        nextRetryAt: node.nextRetryAt ?? null,
+      })),
+    },
     graph,
     currentStep: row.current_step,
     steps: row.steps,
@@ -577,7 +709,10 @@ function approvalFromRow(row: WorkflowApprovalRow): WorkflowApproval {
     round: row.round,
     approverId: row.approver_id,
     approverRoleId: row.approver_role_id,
+    kind: row.kind ?? "primary",
     status: row.status,
+    delegatedFrom: row.delegated_from,
+    transferredTo: row.transferred_to,
     note: row.note,
     actedBy: row.acted_by,
     actedAt: row.acted_at?.toISOString() ?? null,

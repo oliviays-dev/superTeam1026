@@ -7,6 +7,7 @@ import {
   TASK_DEPENDENCY_MEMORY_SCHEMA_SQL,
   TASK_COLLABORATION_SCHEMA_SQL,
   TASK_COLLABORATION_ASSET_SCHEMA_SQL,
+  WORKFLOW_GOVERNANCE_SCHEMA_SQL,
   WORKFLOW_MARKDOWN_SCHEMA_SQL,
   WORKFLOW_RUNTIME_SCHEMA_SQL,
 } from "./schema.js";
@@ -23,9 +24,13 @@ const migrations = [
   { version: 8, sql: TASK_COLLABORATION_ASSET_SCHEMA_SQL },
   { version: 9, sql: WORKFLOW_MARKDOWN_SCHEMA_SQL },
   { version: 10, sql: WORKFLOW_RUNTIME_SCHEMA_SQL },
+  { version: 11, sql: WORKFLOW_GOVERNANCE_SCHEMA_SQL },
 ] as const;
 
-export async function migrate(database: Database): Promise<void> {
+export async function migrate(
+  database: Database,
+  targetVersion = Number.POSITIVE_INFINITY,
+): Promise<void> {
   await database.query(`
     CREATE TABLE IF NOT EXISTS platform_migrations (
       version INTEGER PRIMARY KEY,
@@ -34,6 +39,7 @@ export async function migrate(database: Database): Promise<void> {
   `);
 
   for (const migration of migrations) {
+    if (migration.version > targetVersion) continue;
     const applied = await database.query<{ version: number }>(
       "SELECT version FROM platform_migrations WHERE version = $1",
       [migration.version],

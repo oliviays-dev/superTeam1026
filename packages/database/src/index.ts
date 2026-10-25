@@ -34,4 +34,8 @@ export {
   type CreateWorkflowRuntimeInstanceInput,
   type SaveWorkflowRuntimeInput,
 } from "./workflow-runtime-repository.js";
+export {
+  WorkflowIdempotencyRepository,
+  type WorkflowIdempotencyBeginResult,
+} from "./workflow-idempotency-repository.js";
 export { DEFAULT_AGENT_ID, DSH_AGENT_ID } from "./schema.js";

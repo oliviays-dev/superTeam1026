@@ -803,6 +803,7 @@ function workflowInstanceFromRow(row: WorkflowInstanceRow): WorkflowInstance {
     parentNodeId: null,
     failureReason: null,
     pausedAt: null,
+    lastReconciledAt: null,
     revision: 1,
     runtime: { nodes: [], edges: [], context: {} },
     graph: null,

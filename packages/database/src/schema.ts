@@ -617,3 +617,82 @@ CREATE UNIQUE INDEX IF NOT EXISTS runs_idempotency_idx
   ON runs(idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 `;
+
+export const WORKFLOW_GOVERNANCE_SCHEMA_SQL = `
+ALTER TABLE workflow_instances
+  ADD COLUMN IF NOT EXISTS last_reconciled_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS sweep_lease_owner TEXT,
+  ADD COLUMN IF NOT EXISTS sweep_lease_expires_at TIMESTAMPTZ;
+
+UPDATE workflow_instances
+SET last_reconciled_at = updated_at
+WHERE last_reconciled_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS workflow_instances_sweep_idx
+  ON workflow_instances(
+    status,
+    sweep_lease_expires_at,
+    last_reconciled_at,
+    updated_at
+  )
+  WHERE status NOT IN ('completed', 'failed', 'cancelled', 'paused');
+
+ALTER TABLE workflow_approvals
+  ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'primary'
+    CHECK (kind IN ('primary', 'cosign')),
+  ADD COLUMN IF NOT EXISTS delegated_from TEXT,
+  ADD COLUMN IF NOT EXISTS transferred_to TEXT,
+  ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1;
+
+CREATE INDEX IF NOT EXISTS workflow_approvals_pending_actor_idx
+  ON workflow_approvals(approver_id, status, instance_id);
+
+ALTER TABLE workflow_command_receipts
+  ADD COLUMN IF NOT EXISTS request_hash TEXT NOT NULL DEFAULT 'legacy-v10',
+  ADD COLUMN IF NOT EXISTS response_status INTEGER,
+  ADD COLUMN IF NOT EXISTS response_body JSONB,
+  ADD COLUMN IF NOT EXISTS state TEXT NOT NULL DEFAULT 'completed',
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+DELETE FROM workflow_command_receipts AS duplicate
+USING workflow_command_receipts AS keeper
+WHERE duplicate.instance_id = keeper.instance_id
+  AND duplicate.idempotency_key = keeper.idempotency_key
+  AND duplicate.created_at > keeper.created_at;
+
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_command_idempotency_idx
+  ON workflow_command_receipts(instance_id, idempotency_key);
+
+CREATE TABLE IF NOT EXISTS workflow_idempotency_keys (
+  id UUID PRIMARY KEY,
+  scope TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending'
+    CHECK (state IN ('pending', 'completed', 'failed')),
+  response_status INTEGER,
+  response_body JSONB,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  UNIQUE (scope, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS workflow_idempotency_pending_idx
+  ON workflow_idempotency_keys(state, updated_at)
+  WHERE state = 'pending';
+
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS jobs_expired_lease_idx
+  ON jobs(lease_expires_at)
+  WHERE status = 'running';
+
+CREATE INDEX IF NOT EXISTS workflow_audit_project_idx
+  ON workflow_audit_events(instance_id, kind, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS workflow_audit_actor_idx
+  ON workflow_audit_events(actor_id, created_at DESC);
+`;

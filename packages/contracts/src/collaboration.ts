@@ -60,6 +60,11 @@ export const createProjectMemberInputSchema = z
   .object({
     kind: projectMemberKindSchema,
     agentId: z.string().uuid().optional(),
+    actorId: z
+      .string()
+      .trim()
+      .regex(/^[a-zA-Z0-9_.:-]{1,180}$/)
+      .optional(),
     name: z.string().trim().min(1).max(160).optional(),
     responsibility: z.string().trim().max(2_000).default(""),
     roleIds: roleIdsSchema,
@@ -77,6 +82,13 @@ export const createProjectMemberInputSchema = z
         code: "custom",
         path: ["agentId"],
         message: "agentId is only valid for agent members",
+      });
+    }
+    if (input.kind === "agent" && input.actorId !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["actorId"],
+        message: "actorId is only valid for human members",
       });
     }
   });
@@ -239,6 +251,7 @@ export const workflowGraphNodeSchema = z.object({
   autoDispatch: z.boolean(),
   start: z.boolean().default(false),
   maxAttempts: z.number().int().min(1).max(10).default(1),
+  retryBackoffSeconds: z.number().int().min(0).max(86_400).optional(),
   timeoutSeconds: z.number().int().min(1).max(86_400).default(300),
   loopLimit: z.number().int().min(1).max(100).optional(),
   subworkflowKey: z.string().trim().min(1).max(160).optional(),
@@ -410,6 +423,8 @@ export const workflowRuntimeNodeSchema = z.object({
   startedAt: z.string().datetime({ offset: true }).nullable(),
   endedAt: z.string().datetime({ offset: true }).nullable(),
   timeoutAt: z.string().datetime({ offset: true }).nullable(),
+  failureCount: z.number().int().nonnegative().optional(),
+  nextRetryAt: z.string().datetime({ offset: true }).nullable().optional(),
 });
 export type WorkflowRuntimeNode = z.infer<typeof workflowRuntimeNodeSchema>;
 
@@ -459,7 +474,10 @@ export const workflowApprovalSchema = z.object({
   round: z.number().int().positive(),
   approverId: z.string(),
   approverRoleId: z.string().uuid().nullable(),
+  kind: z.enum(["primary", "cosign"]).default("primary"),
   status: workflowApprovalStatusSchema,
+  delegatedFrom: z.string().nullable().default(null),
+  transferredTo: z.string().nullable().default(null),
   note: z.string(),
   actedBy: z.string().nullable(),
   actedAt: z.string().datetime({ offset: true }).nullable(),
@@ -475,6 +493,7 @@ export const workflowAuditKindSchema = z.enum([
   "instance.blocked",
   "instance.failed",
   "instance.cancelled",
+  "instance.reconciled",
   "node.ready",
   "node.started",
   "node.completed",
@@ -484,10 +503,15 @@ export const workflowAuditKindSchema = z.enum([
   "node.failed",
   "node.timed_out",
   "node.retried",
+  "node.retry_scheduled",
+  "node.recovered",
   "branch.selected",
   "branch.skipped",
   "approval.requested",
   "approval.decided",
+  "approval.transferred",
+  "approval.cosigned",
+  "run.interrupted",
   "subworkflow.started",
   "subworkflow.completed",
   "subworkflow.failed",
@@ -519,6 +543,7 @@ export const workflowInstanceSchema = z.object({
   parentNodeId: z.string().nullable(),
   failureReason: z.string().nullable(),
   pausedAt: z.string().datetime({ offset: true }).nullable(),
+  lastReconciledAt: z.string().datetime({ offset: true }).nullable(),
   revision: z.number().int().positive(),
   runtime: workflowRuntimeStateSchema,
   graph: workflowGraphSchema.nullable(),
@@ -566,6 +591,64 @@ export const decideWorkflowApprovalInputSchema = z.object({
 export type DecideWorkflowApprovalInput = z.infer<
   typeof decideWorkflowApprovalInputSchema
 >;
+
+export const transferWorkflowApprovalInputSchema = z.object({
+  nodeId: z.string().trim().min(1).max(160),
+  targetActorId: z
+    .string()
+    .trim()
+    .regex(/^[a-zA-Z0-9_.:-]{1,180}$/),
+  note: z.string().trim().max(4_000).default(""),
+});
+export type TransferWorkflowApprovalInput = z.infer<
+  typeof transferWorkflowApprovalInputSchema
+>;
+
+export const cosignWorkflowApprovalInputSchema = z.object({
+  nodeId: z.string().trim().min(1).max(160),
+  approvers: z.array(workflowExecutorSchema).min(1).max(10),
+  note: z.string().trim().max(4_000).default(""),
+});
+export type CosignWorkflowApprovalInput = z.infer<
+  typeof cosignWorkflowApprovalInputSchema
+>;
+
+export const workflowAuditQuerySchema = z.object({
+  projectId: z.string().uuid(),
+  instanceId: z.string().uuid().optional(),
+  nodeId: z.string().trim().min(1).max(160).optional(),
+  kind: workflowAuditKindSchema.optional(),
+  actorId: z
+    .string()
+    .trim()
+    .regex(/^[a-zA-Z0-9_.:-]{1,180}$/)
+    .optional(),
+  query: z.string().trim().max(200).optional(),
+  failuresOnly: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+  page: z.coerce.number().int().positive().default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+});
+export type WorkflowAuditQuery = z.infer<typeof workflowAuditQuerySchema>;
+
+export const workflowAuditPageSchema = z.object({
+  items: z.array(workflowAuditEventSchema),
+  total: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  pageSize: z.number().int().positive(),
+  hasMore: z.boolean(),
+});
+export type WorkflowAuditPage = z.infer<typeof workflowAuditPageSchema>;
+
+export const workflowSweepResultSchema = z.object({
+  claimed: z.number().int().nonnegative(),
+  reconciled: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+});
+export type WorkflowSweepResult = z.infer<typeof workflowSweepResultSchema>;
 
 export const workflowReasonInputSchema = z.object({
   reason: z.string().trim().max(4_000).default(""),

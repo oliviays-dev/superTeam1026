@@ -335,6 +335,8 @@ export function initializeWorkflowRuntime(
     startedAt: graph.startNodeIds.includes(node.id) ? now.toISOString() : null,
     endedAt: null,
     timeoutAt: null,
+    failureCount: 0,
+    nextRetryAt: null,
   }));
   const edges: WorkflowRuntimeEdge[] = graph.edges.map((edge) => ({
     edgeId: edge.id,
@@ -348,6 +350,39 @@ export function initializeWorkflowRuntime(
     edges,
     context: { ...context },
   };
+}
+
+export function workflowRetryDelayMs(
+  failureCount: number,
+  overrideSeconds?: number,
+): number {
+  if (failureCount <= 0) return 0;
+  const seconds =
+    overrideSeconds === undefined
+      ? Math.min(5 * 2 ** (failureCount - 1), 3_600)
+      : overrideSeconds;
+  return Math.max(0, seconds) * 1_000;
+}
+
+export function shiftWorkflowDeadlines(
+  runtime: WorkflowRuntimeState,
+  shiftMs: number,
+): WorkflowRuntimeState {
+  const shifted = cloneRuntime(runtime);
+  if (shiftMs <= 0) return shifted;
+  for (const node of shifted.nodes) {
+    if (node.timeoutAt !== null && node.timeoutAt !== undefined) {
+      node.timeoutAt = new Date(
+        new Date(node.timeoutAt).getTime() + shiftMs,
+      ).toISOString();
+    }
+    if (node.nextRetryAt !== null && node.nextRetryAt !== undefined) {
+      node.nextRetryAt = new Date(
+        new Date(node.nextRetryAt).getTime() + shiftMs,
+      ).toISOString();
+    }
+  }
+  return shifted;
 }
 
 export function workflowContextForNode(
@@ -508,6 +543,7 @@ export function transitionWorkflowNode(input: {
       target.startedAt = null;
       target.endedAt = null;
       target.timeoutAt = null;
+      target.nextRetryAt = null;
     }
     audit.push({
       kind: "branch.selected",
@@ -719,6 +755,7 @@ function reactivateLoopPath(
   node.startedAt = now.toISOString();
   node.endedAt = null;
   node.timeoutAt = null;
+  node.nextRetryAt = null;
   for (const edge of graph.edges.filter((edge) => edge.from === node.nodeId)) {
     const edgeState = requireRuntimeEdge(runtime, edge.id);
     edgeState.status = "pending";
@@ -738,6 +775,7 @@ function resetSkippedBranch(
   node.startedAt = null;
   node.endedAt = null;
   node.timeoutAt = null;
+  node.nextRetryAt = null;
   for (const edge of graph.edges.filter((edge) => edge.from === nodeId)) {
     const edgeState = requireRuntimeEdge(runtime, edge.id);
     edgeState.status = "pending";
