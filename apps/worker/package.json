@@ -1,0 +1,19 @@
+{
+  "name": "@pluginmax/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx src/index.ts",
+    "start": "node lib/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pluginmax/application": "workspace:*",
+    "@pluginmax/config": "workspace:*",
+    "@pluginmax/database": "workspace:*"
+  }
+}

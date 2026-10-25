@@ -1,0 +1,10 @@
+vendor/
+plugins/
+docs/
+coverage/
+dist/
+lib/
+node_modules/
+.tmp/
+pnpm-lock.yaml
+scripts/*.mjs

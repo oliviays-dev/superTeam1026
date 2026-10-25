@@ -1,28 +1,36 @@
 {
-  "name": "dsh-pluginmax",
+  "name": "pluginmax-platform",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Out-of-tree DSH collaboration plugins",
+  "description": "Pluginmax engineering platform",
   "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": ">=24.0.0"
   },
   "scripts": {
-    "build": "corepack pnpm -r build",
-    "check": "corepack pnpm run typecheck && corepack pnpm run lint && corepack pnpm run test && corepack pnpm run build && corepack pnpm run contract && corepack pnpm run pack:check",
-    "contract": "node scripts/contract.mjs",
-    "format:check": "corepack pnpm exec prettier --check .",
-    "lint": "corepack pnpm exec oxlint packages plugins",
-    "pack:check": "corepack pnpm --filter './packages/*' --filter './plugins/*' pack --dry-run",
+    "build": "pnpm -r --sort build",
+    "build:packages": "pnpm --filter './packages/*' build",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build",
+    "db:down": "./scripts/db-compose.sh down",
+    "db:migrate": "pnpm --filter @pluginmax/database migrate",
+    "db:up": "./scripts/db-compose.sh up -d postgres",
+    "dev": "pnpm run build:packages && pnpm --parallel --filter @pluginmax/api --filter @pluginmax/worker --filter @pluginmax/web run dev",
+    "dev:api": "pnpm --filter @pluginmax/api dev",
+    "dev:web": "pnpm --filter @pluginmax/web dev",
+    "dev:worker": "pnpm --filter @pluginmax/worker dev",
+    "format:check": "prettier --check .",
+    "lint": "oxlint apps packages",
     "test": "vitest run",
-    "typecheck": "tsc -b tsconfig.json && tsc -p tsconfig.test.json --noEmit"
+    "test:e2e": "./scripts/e2e-smoke.sh",
+    "typecheck": "pnpm run build:packages && pnpm -r typecheck"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
     "oxlint": "1.76.0",
     "prettier": "^3.6.2",
     "tsdown": "0.22.2",
+    "tsx": "^4.20.6",
     "typescript": "6.0.3",
     "vitest": "4.1.8"
   }
