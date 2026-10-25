@@ -89,6 +89,20 @@ describe("workflow runtime", () => {
     expect(runtime.nodes[0]?.timeoutAt).toBe("2026-01-01T00:00:30.000Z");
   });
 
+  it("keeps a failed node waiting while its retry deadline is pending", () => {
+    const definition = graph({
+      nodes: [node("agent", "task")],
+      startNodeIds: ["agent"],
+    });
+    const runtime = initializeWorkflowRuntime(definition);
+    runtime.nodes[0]!.status = "failed";
+    runtime.nodes[0]!.failureCount = 1;
+    runtime.nodes[0]!.nextRetryAt = "2026-01-01T00:00:05.000Z";
+    expect(deriveWorkflowInstanceStatus(runtime)).toBe("waiting");
+    runtime.nodes[0]!.nextRetryAt = null;
+    expect(deriveWorkflowInstanceStatus(runtime)).toBe("failed");
+  });
+
   it("selects one deterministic conditional branch and skips the other", () => {
     const definition = graph({
       nodes: [

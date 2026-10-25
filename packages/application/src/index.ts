@@ -3,6 +3,7 @@ import type {
   Agent,
   AgentDetail,
   Artifact,
+  CosignWorkflowApprovalInput,
   CreateAgentInput,
   CreateMeetingInput,
   CreateMemoryClaimInput,
@@ -33,6 +34,7 @@ import type {
   TaskDetail,
   TaskMessage,
   TaskReviewInput,
+  TransferWorkflowApprovalInput,
   UpdateAgentInput,
   UpdateMemoryClaimInput,
   UpdateProjectMemberInput,
@@ -42,6 +44,8 @@ import type {
   ValidateWorkflowMarkdownInput,
   WorkbenchSummary,
   WorkflowDefinition,
+  WorkflowAuditPage,
+  WorkflowAuditQuery,
   WorkflowGraph,
   WorkflowGraphNode,
   WorkflowInstance,
@@ -50,6 +54,7 @@ import type {
   WorkflowReasonInput,
   WorkflowRuntimeNode,
   WorkflowRuntimeState,
+  WorkflowSweepResult,
   WorkflowStepDefinition,
   WorkflowValidationResult,
 } from "@pluginmax/contracts";
@@ -62,10 +67,12 @@ import {
   isTerminalRunStatus,
   normalizeProjectRoleIds,
   ProjectMembershipRuleError,
+  shiftWorkflowDeadlines,
   TaskDependencyRuleError,
   validateWorkflowMarkdown,
   transitionWorkflowNode,
   unresolvedTaskDependencies,
+  workflowRetryDelayMs,
 } from "@pluginmax/domain";
 import type { PlatformRepositories, TaskAttachment } from "@pluginmax/database";
 import type { FileRef, FileStore } from "@pluginmax/files";
@@ -1346,6 +1353,23 @@ export class PlatformApplication {
     return { instance, approvals, audit, children };
   }
 
+  async listWorkflowAudit(
+    query: WorkflowAuditQuery,
+  ): Promise<WorkflowAuditPage> {
+    await this.requireProject(query.projectId);
+    if (query.instanceId !== undefined) {
+      const instance = await this.getWorkflowInstance(query.instanceId);
+      if (instance.projectId !== query.projectId) {
+        throw new ApplicationError(
+          "workflow_instance_scope_mismatch",
+          "Workflow instance does not belong to the requested project",
+          404,
+        );
+      }
+    }
+    return this.repositories.workflowRuntime.listAuditPage(query);
+  }
+
   async advanceWorkflow(
     id: string,
     actorId = "local-admin",
@@ -1490,14 +1514,32 @@ export class PlatformApplication {
       );
     }
     const node = requireRuntimeNode(instance.runtime, input.nodeId);
-    if (node.type !== "approval" || node.status !== "waiting_approval") {
+    if (node.type !== "approval") {
+      throw new ApplicationError(
+        "workflow_approval_not_pending",
+        "The node is not an approval node",
+        409,
+      );
+    }
+    await this.assertWorkflowActor(instance.projectId, actorId);
+    const expectedStatus =
+      input.decision === "approve" ? "approved" : "rejected";
+    if (node.status !== "waiting_approval") {
+      const existing = (
+        await this.repositories.workflowRuntime.listApprovals(instanceId)
+      ).find(
+        (approval) =>
+          approval.nodeId === node.nodeId &&
+          approval.round === node.visits &&
+          approval.approverId === actorId,
+      );
+      if (existing?.status === expectedStatus) return instance;
       throw new ApplicationError(
         "workflow_approval_not_pending",
         "The node is not waiting for approval",
         409,
       );
     }
-    await this.assertWorkflowActor(instance.projectId, actorId);
     await this.claimWorkflowCommand(
       instance.id,
       `approval:${node.nodeId}:${node.visits}:${actorId}`,
@@ -1512,6 +1554,24 @@ export class PlatformApplication {
       note: input.note,
     });
     if (!decided) {
+      const existing = (
+        await this.repositories.workflowRuntime.listApprovals(instanceId)
+      ).find(
+        (approval) =>
+          approval.nodeId === node.nodeId &&
+          approval.round === node.visits &&
+          approval.approverId === actorId,
+      );
+      if (existing?.status === expectedStatus) {
+        return this.getWorkflowInstance(instanceId);
+      }
+      if (existing !== undefined) {
+        throw new ApplicationError(
+          "workflow_approval_already_decided",
+          "This approval was already decided",
+          409,
+        );
+      }
       throw new ApplicationError(
         "workflow_approval_forbidden",
         "The actor is not a pending approver for this node",
@@ -1553,6 +1613,16 @@ export class PlatformApplication {
         },
       );
       if (saved === undefined) {
+        const current = await this.getWorkflowInstance(instanceId);
+        const currentApproval = (
+          await this.repositories.workflowRuntime.listApprovals(instanceId)
+        ).find(
+          (approval) =>
+            approval.nodeId === node.nodeId &&
+            approval.round === node.visits &&
+            approval.approverId === actorId,
+        );
+        if (currentApproval?.status === expectedStatus) return current;
         throw new ApplicationError(
           "workflow_revision_conflict",
           "Workflow instance changed concurrently",
@@ -1569,21 +1639,210 @@ export class PlatformApplication {
       approvalResult: rejected ? "rejected" : "approved",
       output: input.note,
     });
-    const saved = await this.saveRuntimeTransition(
-      instance,
-      transition,
-      actorId,
-      [
-        {
-          kind: "approval.decided",
-          nodeId: node.nodeId,
-          summary: rejected
-            ? `审批节点“${node.name}”被拒绝`
-            : `审批节点“${node.name}”通过`,
-        },
-      ],
+    try {
+      const saved = await this.saveRuntimeTransition(
+        instance,
+        transition,
+        actorId,
+        [
+          {
+            kind: "approval.decided",
+            nodeId: node.nodeId,
+            summary: rejected
+              ? `审批节点“${node.name}”被拒绝`
+              : `审批节点“${node.name}”通过`,
+          },
+        ],
+      );
+      return this.activateWorkflowRuntime(saved, actorId);
+    } catch (error) {
+      if (
+        error instanceof ApplicationError &&
+        error.code === "workflow_revision_conflict"
+      ) {
+        const current = await this.getWorkflowInstance(instanceId);
+        const currentApproval = (
+          await this.repositories.workflowRuntime.listApprovals(instanceId)
+        ).find(
+          (approval) =>
+            approval.nodeId === node.nodeId &&
+            approval.round === node.visits &&
+            approval.approverId === actorId,
+        );
+        if (
+          currentApproval?.status === expectedStatus &&
+          current.runtime.nodes.find(
+            (candidate) => candidate.nodeId === node.nodeId,
+          )?.status !== "waiting_approval"
+        ) {
+          return current;
+        }
+      }
+      throw error;
+    }
+  }
+
+  async transferWorkflowApproval(
+    instanceId: string,
+    input: TransferWorkflowApprovalInput,
+    actorId: string,
+    idempotencyKey?: string,
+  ): Promise<WorkflowInstance> {
+    const instance = await this.requirePendingApproval(
+      instanceId,
+      input.nodeId,
     );
-    return this.activateWorkflowRuntime(saved, actorId);
+    await this.assertWorkflowActor(instance.projectId, actorId);
+    if (input.targetActorId === actorId) {
+      throw new ApplicationError(
+        "workflow_approval_transfer_self",
+        "An approval cannot be transferred to the same actor",
+        409,
+      );
+    }
+    const members =
+      await this.repositories.projectMemberships.listMembers(instance.projectId);
+    const target = members.find(
+      (member) =>
+        member.kind === "human" &&
+        member.status === "active" &&
+        member.actorId === input.targetActorId,
+    );
+    if (target === undefined) {
+      throw new ApplicationError(
+        "workflow_approval_target_forbidden",
+        "The transfer target must be an active human project member",
+        403,
+      );
+    }
+    await this.claimWorkflowCommand(
+      instance.id,
+      `approval-transfer:${input.nodeId}:${actorId}`,
+      idempotencyKey,
+    );
+    const node = requireRuntimeNode(instance.runtime, input.nodeId);
+    const result = await this.repositories.workflowRuntime.transferApproval({
+      instanceId,
+      nodeId: node.nodeId,
+      round: node.visits,
+      fromActorId: actorId,
+      toActorId: target.actorId,
+      note: input.note,
+      ...(target.roles[0] === undefined
+        ? {}
+        : { toRoleId: target.roles[0].id }),
+    });
+    if (result === "not_approver") {
+      throw new ApplicationError(
+        "workflow_approval_forbidden",
+        "Only a pending approver can transfer this approval",
+        403,
+      );
+    }
+    if (result === "target_terminal") {
+      throw new ApplicationError(
+        "workflow_approval_target_terminal",
+        "The target already completed this approval round",
+        409,
+      );
+    }
+    await this.repositories.workflowRuntime.appendAudit(instance.id, actorId, {
+      kind: "approval.transferred",
+      nodeId: node.nodeId,
+      summary: `审批“${node.name}”已转交给 ${target.name}`,
+      data: {
+        fromActorId: actorId,
+        toActorId: target.actorId,
+        note: input.note,
+      },
+    });
+    return this.getWorkflowInstance(instance.id);
+  }
+
+  async cosignWorkflowApproval(
+    instanceId: string,
+    input: CosignWorkflowApprovalInput,
+    actorId: string,
+    idempotencyKey?: string,
+  ): Promise<WorkflowInstance> {
+    const instance = await this.requirePendingApproval(
+      instanceId,
+      input.nodeId,
+    );
+    if (instance.graph === null) {
+      throw new ApplicationError(
+        "workflow_graph_missing",
+        "Workflow graph is unavailable",
+        409,
+      );
+    }
+    const members =
+      await this.repositories.projectMemberships.listMembers(instance.projectId);
+    const actor = members.find(
+      (member) => member.status === "active" && member.actorId === actorId,
+    );
+    if (actor === undefined) {
+      throw new ApplicationError(
+        "forbidden",
+        "Only an active project member can add approvers",
+        403,
+      );
+    }
+    const node = requireRuntimeNode(instance.runtime, input.nodeId);
+    const approvals =
+      await this.repositories.workflowRuntime.listApprovals(instanceId);
+    const actorApproval = approvals.find(
+      (approval) =>
+        approval.nodeId === node.nodeId &&
+        approval.round === node.visits &&
+        approval.approverId === actorId &&
+        approval.status === "pending",
+    );
+    if (!actor.owner && actorApproval === undefined) {
+      throw new ApplicationError(
+        "workflow_approval_forbidden",
+        "Only a project owner or pending approver can add approvers",
+        403,
+      );
+    }
+    await this.claimWorkflowCommand(
+      instance.id,
+      `approval-cosign:${input.nodeId}:${actorId}:${JSON.stringify(input.approvers)}`,
+      idempotencyKey,
+    );
+    const definition = requireGraphNode(instance.graph, node.nodeId);
+    const resolved = await this.resolveWorkflowApprovers(instance.projectId, {
+      ...definition,
+      approvers: input.approvers,
+    });
+    if (resolved.length === 0) {
+      throw new ApplicationError(
+        "workflow_cosign_target_unavailable",
+        "No active human approver matches the co-sign request",
+        409,
+      );
+    }
+    await this.repositories.workflowRuntime.createApprovals(
+      instance.id,
+      node.nodeId,
+      node.visits,
+      resolved.map((approver) => ({
+        actorId: approver.actorId,
+        ...(approver.roleId === undefined ? {} : { roleId: approver.roleId }),
+        kind: "cosign" as const,
+        delegatedFrom: actorId,
+      })),
+    );
+    await this.repositories.workflowRuntime.appendAudit(instance.id, actorId, {
+      kind: "approval.cosigned",
+      nodeId: node.nodeId,
+      summary: `为审批“${node.name}”增加 ${resolved.length} 位审批人`,
+      data: {
+        approvers: resolved.map((approver) => approver.actorId),
+        note: input.note,
+      },
+    });
+    return this.getWorkflowInstance(instance.id);
   }
 
   async pauseWorkflow(
@@ -1649,7 +1908,15 @@ export class PlatformApplication {
       );
     }
     await this.claimWorkflowCommand(instance.id, "resume", idempotencyKey);
-    const runtime = cloneRuntime(instance.runtime);
+    const pausedMs =
+      instance.pausedAt === null
+        ? 0
+        : Math.max(0, Date.now() - new Date(instance.pausedAt).getTime());
+    const runtime = shiftWorkflowDeadlines(instance.runtime, pausedMs);
+    await this.repositories.runs.extendWorkflowDeadlines(
+      instance.id,
+      pausedMs,
+    );
     const saved = await this.repositories.workflowRuntime.save(
       instance.id,
       instance.revision,
@@ -1721,6 +1988,7 @@ export class PlatformApplication {
     target.status = "ready";
     target.error = null;
     target.endedAt = null;
+    target.nextRetryAt = null;
     const existingTask =
       target.taskId === null ? undefined : await this.getTask(target.taskId);
     const started = await this.startWorkflowNodeTask(
@@ -1837,15 +2105,15 @@ export class PlatformApplication {
           `Workflow node ${node.nodeId} timed out`,
         );
         await this.repositories.tasks.setStatus(run.taskId, "queued");
-        node.status = "failed";
-        node.error = `节点超时（${definition.timeoutSeconds} 秒）`;
-        node.endedAt = new Date().toISOString();
-        audits.push({
-          kind: "node.timed_out",
-          nodeId: node.nodeId,
-          summary: `节点“${node.name}”执行超时`,
-          data: { runId: run.id, attempt: node.attempt },
-        });
+        audits.push(
+          ...this.recordWorkflowNodeFailure({
+            node,
+            definition,
+            error: `节点超时（${definition.timeoutSeconds} 秒）`,
+            kind: "node.timed_out",
+            runId: run.id,
+          }),
+        );
         changed = true;
         continue;
       }
@@ -1855,15 +2123,15 @@ export class PlatformApplication {
         ) &&
         node.status === "running"
       ) {
-        node.status = "failed";
-        node.error = run.error ?? `Run 状态：${run.status}`;
-        node.endedAt = new Date().toISOString();
-        audits.push({
-          kind: run.status === "timeout" ? "node.timed_out" : "node.failed",
-          nodeId: node.nodeId,
-          summary: `节点“${node.name}”执行失败：${node.error}`,
-          data: { runId: run.id, attempt: node.attempt },
-        });
+        audits.push(
+          ...this.recordWorkflowNodeFailure({
+            node,
+            definition,
+            error: run.error ?? `Run 状态：${run.status}`,
+            kind: run.status === "timeout" ? "node.timed_out" : "node.failed",
+            runId: run.id,
+          }),
+        );
         changed = true;
         continue;
       }
@@ -1872,13 +2140,15 @@ export class PlatformApplication {
         if (task.status === "done") {
           const artifacts = await this.repositories.artifacts.listByRun(run.id);
           if (artifacts.length === 0) {
-            node.status = "blocked";
-            node.error = "Run 已完成但没有持久化交付物";
-            audits.push({
-              kind: "node.failed",
-              nodeId: node.nodeId,
-              summary: `节点“${node.name}”缺少交付物`,
-            });
+            audits.push(
+              ...this.recordWorkflowNodeFailure({
+                node,
+                definition,
+                error: "Run 已完成但没有持久化交付物",
+                kind: "node.failed",
+                runId: run.id,
+              }),
+            );
             changed = true;
             continue;
           }
@@ -1895,7 +2165,62 @@ export class PlatformApplication {
         }
       }
     }
-    if (!changed) return instance;
+    for (const node of runtime.nodes) {
+      if (
+        node.status !== "failed" ||
+        node.nextRetryAt === null ||
+        node.nextRetryAt === undefined ||
+        new Date(node.nextRetryAt).getTime() > Date.now()
+      ) {
+        continue;
+      }
+      const definition = instance.graph.nodes.find(
+        (candidate) => candidate.id === node.nodeId,
+      );
+      if (definition === undefined) continue;
+      node.status = "ready";
+      node.error = null;
+      node.endedAt = null;
+      node.nextRetryAt = null;
+      audits.push({
+        kind: "node.recovered",
+        nodeId: node.nodeId,
+        summary: `节点“${node.name}”到达重试时间并恢复`,
+        data: {
+          runId: node.runId,
+          failureCount: node.failureCount ?? 0,
+          attempt: node.attempt,
+        },
+      });
+      if (
+        node.type === "task" &&
+        (definition.executor.kind === "agent" ||
+          definition.executor.kind === "role")
+      ) {
+        const existingTask =
+          node.taskId === null
+            ? undefined
+            : await this.getTask(node.taskId);
+        const started = await this.startWorkflowNodeTask(
+          instance,
+          runtime,
+          definition,
+          actorId,
+          existingTask,
+        );
+        audits.push({
+          kind: "node.retried",
+          nodeId: node.nodeId,
+          summary: `节点“${node.name}”自动重试，第 ${node.attempt} 次执行`,
+          data: { runId: started.runId, taskId: started.task.id },
+        });
+      }
+      changed = true;
+    }
+    if (!changed) {
+      await this.repositories.workflowRuntime.touchReconciled(instanceId);
+      return instance;
+    }
     const status = deriveWorkflowInstanceStatus(runtime);
     const saved = await this.repositories.workflowRuntime.save(
       instance.id,
@@ -1919,6 +2244,115 @@ export class PlatformApplication {
       );
     }
     return this.activateWorkflowRuntime(saved, actorId);
+  }
+
+  private recordWorkflowNodeFailure(input: {
+    readonly node: WorkflowRuntimeNode;
+    readonly definition: WorkflowGraphNode;
+    readonly error: string;
+    readonly kind: "node.timed_out" | "node.failed";
+    readonly runId: string;
+  }): Array<{
+    readonly kind:
+      | "node.timed_out"
+      | "node.failed"
+      | "node.retry_scheduled";
+    readonly nodeId: string;
+    readonly summary: string;
+    readonly data: Record<string, unknown>;
+  }> {
+    const { node, definition } = input;
+    node.status = "failed";
+    node.error = input.error;
+    node.endedAt = new Date().toISOString();
+    node.failureCount = (node.failureCount ?? 0) + 1;
+    const retryable =
+      node.failureCount < definition.maxAttempts &&
+      node.attempt < definition.maxAttempts;
+    node.nextRetryAt = retryable
+      ? new Date(
+          Date.now() +
+            workflowRetryDelayMs(
+              node.failureCount,
+              definition.retryBackoffSeconds,
+            ),
+        ).toISOString()
+      : null;
+    return [
+      {
+        kind: input.kind,
+        nodeId: node.nodeId,
+        summary:
+          input.kind === "node.timed_out"
+            ? `节点“${node.name}”执行超时`
+            : `节点“${node.name}”执行失败：${input.error}`,
+        data: {
+          runId: input.runId,
+          attempt: node.attempt,
+          failureCount: node.failureCount,
+          retryAt: node.nextRetryAt,
+        },
+      },
+      ...(retryable
+        ? [
+            {
+              kind: "node.retry_scheduled" as const,
+              nodeId: node.nodeId,
+              summary: `节点“${node.name}”计划于 ${node.nextRetryAt} 自动重试`,
+              data: {
+                retryAt: node.nextRetryAt,
+                failureCount: node.failureCount,
+              },
+            },
+          ]
+        : []),
+    ];
+  }
+
+  async sweepWorkflowInstances(
+    owner: string,
+    options: {
+      readonly batchSize?: number;
+      readonly leaseSeconds?: number;
+      readonly staleAfterSeconds?: number;
+    } = {},
+  ): Promise<WorkflowSweepResult> {
+    const instanceIds =
+      await this.repositories.workflowRuntime.claimReconcileCandidates({
+        owner,
+        limit: options.batchSize ?? 20,
+        leaseSeconds: options.leaseSeconds ?? 30,
+        staleAfterSeconds: options.staleAfterSeconds ?? 2,
+      });
+    let reconciled = 0;
+    let skipped = 0;
+    let failed = 0;
+    for (const instanceId of instanceIds) {
+      try {
+        await this.reconcileWorkflowInstance(instanceId, `sweep:${owner}`);
+        reconciled += 1;
+      } catch (error) {
+        if (
+          error instanceof ApplicationError &&
+          error.code === "workflow_revision_conflict"
+        ) {
+          skipped += 1;
+        } else {
+          failed += 1;
+        }
+      } finally {
+        await this.repositories.workflowRuntime.releaseReconcileLease(
+          instanceId,
+          owner,
+        );
+      }
+    }
+    return {
+      claimed: instanceIds.length,
+      reconciled,
+      skipped,
+      failed,
+    };
   }
 
   private async activateWorkflowRuntime(
@@ -2378,6 +2812,29 @@ export class PlatformApplication {
         403,
       );
     }
+  }
+
+  private async requirePendingApproval(
+    instanceId: string,
+    nodeId: string,
+  ): Promise<WorkflowInstance> {
+    const instance = await this.getWorkflowInstance(instanceId);
+    if (instance.status === "paused") {
+      throw new ApplicationError(
+        "workflow_paused",
+        "Resume the workflow before changing approvals",
+        409,
+      );
+    }
+    const node = requireRuntimeNode(instance.runtime, nodeId);
+    if (node.type !== "approval" || node.status !== "waiting_approval") {
+      throw new ApplicationError(
+        "workflow_approval_not_pending",
+        "The node is not waiting for approval",
+        409,
+      );
+    }
+    return instance;
   }
 
   private async assertWorkflowOwner(

@@ -6,6 +6,11 @@ export interface PlatformConfig {
   readonly fileStoreRoot: string;
   readonly workerPollIntervalMs: number;
   readonly workerLeaseSeconds: number;
+  readonly workerRecoveryBatchSize: number;
+  readonly workflowSweepIntervalMs: number;
+  readonly workflowSweepBatchSize: number;
+  readonly workflowSweepLeaseSeconds: number;
+  readonly workflowSweepStaleSeconds: number;
   readonly localActorId: string;
   readonly agentWorkspaceRoot: string;
   readonly dshBin: string | undefined;
@@ -71,6 +76,31 @@ export function loadConfig(
       env.WORKER_LEASE_SECONDS,
       60,
       "WORKER_LEASE_SECONDS",
+    ),
+    workerRecoveryBatchSize: integer(
+      env.WORKER_RECOVERY_BATCH_SIZE,
+      20,
+      "WORKER_RECOVERY_BATCH_SIZE",
+    ),
+    workflowSweepIntervalMs: integer(
+      env.WORKFLOW_SWEEP_INTERVAL_MS,
+      3_000,
+      "WORKFLOW_SWEEP_INTERVAL_MS",
+    ),
+    workflowSweepBatchSize: integer(
+      env.WORKFLOW_SWEEP_BATCH_SIZE,
+      20,
+      "WORKFLOW_SWEEP_BATCH_SIZE",
+    ),
+    workflowSweepLeaseSeconds: integer(
+      env.WORKFLOW_SWEEP_LEASE_SECONDS,
+      30,
+      "WORKFLOW_SWEEP_LEASE_SECONDS",
+    ),
+    workflowSweepStaleSeconds: integer(
+      env.WORKFLOW_SWEEP_STALE_SECONDS,
+      2,
+      "WORKFLOW_SWEEP_STALE_SECONDS",
     ),
     localActorId: env.LOCAL_ACTOR_ID ?? "local-admin",
     agentWorkspaceRoot: resolve(

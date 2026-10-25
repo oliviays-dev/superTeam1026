@@ -275,6 +275,10 @@ export class WorkflowRuntimeRepository {
     input: SaveWorkflowRuntimeInput,
   ): Promise<WorkflowInstance | undefined> {
     return this.database.transaction(async (client) => {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        [instanceId],
+      );
       const steps = stepsFromRuntime(input.runtime);
       const result = await client.query<WorkflowInstanceRow>(
         `WITH updated AS (
@@ -287,6 +291,7 @@ export class WorkflowRuntimeRepository {
              status = $7,
              failure_reason = $8,
              paused_at = $9,
+             last_reconciled_at = NOW(),
              revision = revision + 1,
              updated_at = NOW()
            WHERE instance.id = $1
@@ -461,6 +466,8 @@ export class WorkflowRuntimeRepository {
     approvers: ReadonlyArray<{
       readonly actorId: string;
       readonly roleId?: string;
+      readonly kind?: WorkflowApproval["kind"];
+      readonly delegatedFrom?: string;
     }>,
   ): Promise<void> {
     await this.database.transaction(async (client) => {
@@ -468,9 +475,11 @@ export class WorkflowRuntimeRepository {
         await client.query(
           `INSERT INTO workflow_approvals (
              id, instance_id, node_id, round, approver_id,
-             approver_role_id, status, note, acted_by, acted_at, created_at
+             approver_role_id, kind, status, delegated_from, note,
+             acted_by, acted_at, created_at
            ) VALUES (
-             $1, $2, $3, $4, $5, $6, 'pending', '', NULL, NULL, NOW()
+             $1, $2, $3, $4, $5, $6, $7, 'pending', $8, '',
+             NULL, NULL, NOW()
            )
            ON CONFLICT (instance_id, node_id, round, approver_id) DO NOTHING`,
           [
@@ -480,9 +489,83 @@ export class WorkflowRuntimeRepository {
             round,
             approver.actorId,
             approver.roleId ?? null,
+            approver.kind ?? "primary",
+            approver.delegatedFrom ?? null,
           ],
         );
       }
+    });
+  }
+
+  async transferApproval(input: {
+    readonly instanceId: string;
+    readonly nodeId: string;
+    readonly round: number;
+    readonly fromActorId: string;
+    readonly toActorId: string;
+    readonly toRoleId?: string;
+    readonly note: string;
+  }): Promise<"transferred" | "not_approver" | "target_terminal"> {
+    return this.database.transaction(async (client) => {
+      const target = await client.query<{ status: WorkflowApproval["status"] }>(
+        `SELECT status FROM workflow_approvals
+         WHERE instance_id = $1
+           AND node_id = $2
+           AND round = $3
+           AND approver_id = $4`,
+        [input.instanceId, input.nodeId, input.round, input.toActorId],
+      );
+      if (
+        target.rows[0] !== undefined &&
+        target.rows[0].status !== "pending"
+      ) {
+        return "target_terminal";
+      }
+      const transferred = await client.query(
+        `UPDATE workflow_approvals
+         SET
+           status = 'transferred',
+           note = $6,
+           acted_by = $4,
+           acted_at = NOW(),
+           transferred_to = $5,
+           revision = revision + 1
+         WHERE instance_id = $1
+           AND node_id = $2
+           AND round = $3
+           AND approver_id = $4
+           AND status = 'pending'`,
+        [
+          input.instanceId,
+          input.nodeId,
+          input.round,
+          input.fromActorId,
+          input.toActorId,
+          input.note,
+        ],
+      );
+      if ((transferred.rowCount ?? 0) === 0) return "not_approver";
+      await client.query(
+        `INSERT INTO workflow_approvals (
+           id, instance_id, node_id, round, approver_id,
+           approver_role_id, kind, status, delegated_from, note,
+           acted_by, acted_at, created_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, 'primary', 'pending', $7, '',
+           NULL, NULL, NOW()
+         )
+         ON CONFLICT (instance_id, node_id, round, approver_id) DO NOTHING`,
+        [
+          randomUUID(),
+          input.instanceId,
+          input.nodeId,
+          input.round,
+          input.toActorId,
+          input.toRoleId ?? null,
+          input.fromActorId,
+        ],
+      );
+      return "transferred";
     });
   }
 
@@ -531,6 +614,34 @@ export class WorkflowRuntimeRepository {
       [randomUUID(), instanceId, commandKey, idempotencyKey],
     );
     return (result.rowCount ?? 0) > 0;
+  }
+
+  async appendAudit(
+    instanceId: string,
+    actorId: string,
+    entry: {
+      readonly kind: WorkflowAuditEvent["kind"];
+      readonly nodeId?: string;
+      readonly summary: string;
+      readonly data?: Record<string, unknown> | null;
+    },
+  ): Promise<void> {
+    await this.database.transaction(async (client) => {
+      await client.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1))",
+        [instanceId],
+      );
+      await appendAudits(client, instanceId, actorId, [entry]);
+    });
+  }
+
+  async touchReconciled(instanceId: string): Promise<void> {
+    await this.database.query(
+      `UPDATE workflow_instances
+       SET last_reconciled_at = NOW()
+       WHERE id = $1`,
+      [instanceId],
+    );
   }
 }
 

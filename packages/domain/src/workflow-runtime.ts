@@ -564,7 +564,10 @@ export function transitionWorkflowNode(input: {
 export function deriveWorkflowInstanceStatus(
   runtime: WorkflowRuntimeState,
 ): "active" | "waiting" | "blocked" | "completed" | "failed" {
-  if (runtime.nodes.some((node) => node.status === "failed")) return "failed";
+  const failed = runtime.nodes.filter((node) => node.status === "failed");
+  if (failed.length > 0) {
+    return failed.every((node) => node.nextRetryAt !== null) ? "waiting" : "failed";
+  }
   if (runtime.nodes.some((node) => node.status === "blocked")) return "blocked";
   if (
     runtime.nodes.length > 0 &&

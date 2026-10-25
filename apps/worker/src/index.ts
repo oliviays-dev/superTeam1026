@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { RunExecutor } from "@pluginmax/application";
+import { PlatformApplication, RunExecutor } from "@pluginmax/application";
 import { loadConfig, loadLocalEnv } from "@pluginmax/config";
 import { Database, PlatformRepositories } from "@pluginmax/database";
 
@@ -7,6 +7,7 @@ loadLocalEnv();
 const config = loadConfig();
 const database = new Database(config.databaseUrl);
 const repositories = new PlatformRepositories(database);
+const application = new PlatformApplication(repositories);
 const executor = new RunExecutor(repositories, {
   workspaceRoot: config.agentWorkspaceRoot,
   fileStoreRoot: config.fileStoreRoot,
@@ -21,6 +22,7 @@ const executor = new RunExecutor(repositories, {
 const workerId = `worker-${randomUUID()}`;
 let stopping = false;
 let closing = false;
+let lastSweepAt = 0;
 
 const sleep = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -49,6 +51,28 @@ process.on("SIGTERM", () => void stop());
 
 log("worker.started");
 while (!stopping) {
+  const recovered = await repositories.jobs.recoverExpiredLeases(
+    config.workerRecoveryBatchSize,
+  );
+  if (recovered.length > 0) {
+    log("worker.expired_leases_recovered", { count: recovered.length });
+  }
+  if (Date.now() - lastSweepAt >= config.workflowSweepIntervalMs) {
+    lastSweepAt = Date.now();
+    try {
+      const sweep = await application.sweepWorkflowInstances(workerId, {
+        batchSize: config.workflowSweepBatchSize,
+        leaseSeconds: config.workflowSweepLeaseSeconds,
+        staleAfterSeconds: config.workflowSweepStaleSeconds,
+      });
+      if (sweep.claimed > 0) {
+        log("workflow.sweep", sweep);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log("workflow.sweep_failed", { error: message });
+    }
+  }
   const job = await repositories.jobs.claimNext(
     workerId,
     config.workerLeaseSeconds,

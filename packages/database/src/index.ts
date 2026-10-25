@@ -28,6 +28,7 @@ export {
   TaskRepository,
   type ClaimedJob,
   type EnqueueRunInput,
+  type RecoveredExpiredJob,
 } from "./repositories.js";
 export {
   WorkflowRuntimeRepository,

@@ -582,6 +582,24 @@ export class RunRepository {
     return result.rows.map(runFromRow);
   }
 
+  async extendWorkflowDeadlines(
+    workflowInstanceId: string,
+    shiftMs: number,
+  ): Promise<void> {
+    if (shiftMs <= 0) return;
+    await this.database.query(
+      `UPDATE runs
+       SET
+         timeout_at =
+           timeout_at + ($2 || ' milliseconds')::interval,
+         updated_at = NOW()
+       WHERE workflow_instance_id = $1
+         AND status IN ('queued', 'running')
+         AND timeout_at IS NOT NULL`,
+      [workflowInstanceId, shiftMs],
+    );
+  }
+
   async markRunning(id: string): Promise<void> {
     await this.database.query(
       `UPDATE runs
@@ -725,6 +743,11 @@ export interface ClaimedJob {
   readonly attempts: number;
 }
 
+export interface RecoveredExpiredJob {
+  readonly jobId: string;
+  readonly runId: string;
+}
+
 export class JobRepository {
   constructor(private readonly database: Database) {}
 
@@ -741,7 +764,6 @@ export class JobRepository {
          SELECT id
          FROM jobs
          WHERE status = 'queued'
-            OR (status = 'running' AND lease_expires_at < NOW())
          ORDER BY available_at
          FOR UPDATE SKIP LOCKED
          LIMIT 1
@@ -781,6 +803,73 @@ export class JobRepository {
        WHERE id = $1`,
       [id, error.slice(0, 4_000)],
     );
+  }
+
+  async recoverExpiredLeases(limit: number): Promise<RecoveredExpiredJob[]> {
+    return this.database.transaction(async (client) => {
+      const expired = await client.query<{ id: string; run_id: string }>(
+        `SELECT id, run_id
+         FROM jobs
+         WHERE status = 'running'
+           AND lease_expires_at <= NOW()
+         ORDER BY lease_expires_at
+         FOR UPDATE SKIP LOCKED
+         LIMIT $1`,
+        [limit],
+      );
+      const recovered: RecoveredExpiredJob[] = [];
+      for (const job of expired.rows) {
+        await client.query(
+          `UPDATE jobs
+           SET
+             status = 'failed',
+             last_error = COALESCE(last_error, 'worker lease expired'),
+             lease_owner = NULL,
+             lease_expires_at = NULL,
+             updated_at = NOW()
+           WHERE id = $1`,
+          [job.id],
+        );
+        const interrupted = await client.query<{ task_id: string }>(
+          `UPDATE runs
+           SET
+             status = 'interrupted',
+             error = COALESCE(error, 'worker lease expired'),
+             ended_at = NOW(),
+             updated_at = NOW()
+           WHERE id = $1
+             AND status IN ('queued', 'running')
+           RETURNING task_id`,
+          [job.run_id],
+        );
+        const taskId = interrupted.rows[0]?.task_id;
+        if (taskId === undefined) continue;
+        await client.query(
+          `UPDATE tasks
+           SET status = 'queued', updated_at = NOW()
+           WHERE id = $1`,
+          [taskId],
+        );
+        await client.query(
+          `INSERT INTO run_events (
+             id, run_id, seq, type, visibility, summary, data, created_at
+           )
+           SELECT
+             $1, $2, COALESCE(MAX(seq), 0) + 1,
+             'run.interrupted', 'public', $3, $4::jsonb, NOW()
+           FROM run_events
+           WHERE run_id = $2`,
+          [
+            randomUUID(),
+            job.run_id,
+            "Worker 租约失效，Run 已标记为中断",
+            JSON.stringify({ reason: "worker lease expired" }),
+          ],
+        );
+        recovered.push({ jobId: job.id, runId: job.run_id });
+      }
+      return recovered;
+    });
   }
 }
 
