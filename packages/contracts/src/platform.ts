@@ -133,8 +133,65 @@ export const taskDetailSchema = z.object({
       status: taskStatusSchema,
     }),
   ),
+  activity: z.array(
+    z.object({
+      id: z.string().uuid(),
+      taskId: z.string().uuid(),
+      kind: z.enum([
+        "created",
+        "updated",
+        "status",
+        "message",
+        "review",
+        "dependency",
+        "attachment",
+        "dispatch",
+      ]),
+      actorId: z.string(),
+      actorName: z.string(),
+      summary: z.string(),
+      data: z.record(z.string(), z.unknown()).nullable(),
+      createdAt: z.string().datetime({ offset: true }),
+    }),
+  ),
+  attachments: z.array(
+    z.object({
+      id: z.string().uuid(),
+      taskId: z.string().uuid(),
+      projectId: z.string().uuid(),
+      name: z.string(),
+      mimeType: z.string(),
+      size: z.number().int().nonnegative(),
+      sha256: z.string().length(64),
+      storageKey: z.string(),
+      uploadedBy: z.string(),
+      archivedAt: z.string().datetime({ offset: true }).nullable(),
+      createdAt: z.string().datetime({ offset: true }),
+    }),
+  ),
 });
 export type TaskDetail = z.infer<typeof taskDetailSchema>;
+
+export const uploadTaskAttachmentInputSchema = z.object({
+  name: z.string().trim().min(1).max(300),
+  mimeType: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .default("application/octet-stream"),
+  contentBase64: z.string().min(1).max(32_000_000),
+});
+export type UploadTaskAttachmentInput = z.infer<
+  typeof uploadTaskAttachmentInputSchema
+>;
+
+export const archiveTaskAttachmentInputSchema = z.object({
+  archived: z.boolean(),
+});
+export type ArchiveTaskAttachmentInput = z.infer<
+  typeof archiveTaskAttachmentInputSchema
+>;
 
 export const runtimeKindSchema = z.enum([
   "fake",

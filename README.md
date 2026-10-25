@@ -18,6 +18,8 @@ The initial implementation provides:
   and manual review controls.
 - Project roles resolved to active AI members for task and workflow execution.
 - Task prerequisite graphs with cycle validation and dispatch gates.
+- Threaded task comments, a durable activity timeline, and task attachments
+  with download, archive, and restore.
 - Workbench metrics, workflow definitions/instances, and meeting rooms.
 
 ## Requirements
@@ -71,6 +73,7 @@ With the isolated API and Web running:
 
 ```sh
 pnpm test:smoke:dependencies
+pnpm test:smoke:collaboration
 pnpm test:e2e:browser
 ```
 

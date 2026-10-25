@@ -444,3 +444,45 @@ CREATE TABLE IF NOT EXISTS memory_truth_claims (
 CREATE UNIQUE INDEX IF NOT EXISTS memory_truth_topic_version_idx
   ON memory_truths(topic_id, version);
 `;
+
+export const TASK_COLLABORATION_ASSET_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS task_events (
+  id UUID PRIMARY KEY,
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'created',
+    'updated',
+    'status',
+    'message',
+    'review',
+    'dependency',
+    'attachment',
+    'dispatch'
+  )),
+  actor_id TEXT NOT NULL,
+  actor_name TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  data JSONB,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_events_task_idx
+  ON task_events(task_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS task_attachments (
+  id UUID PRIMARY KEY,
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size BIGINT NOT NULL,
+  sha256 TEXT NOT NULL,
+  storage_key TEXT NOT NULL,
+  uploaded_by TEXT NOT NULL,
+  archived_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_attachments_task_idx
+  ON task_attachments(task_id, created_at DESC);
+`;

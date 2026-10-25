@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   type ApiError,
   agentStatusInputSchema,
+  archiveTaskAttachmentInputSchema,
   createAgentInputSchema,
   createMemoryClaimInputSchema,
   createMemoryTopicInputSchema,
@@ -14,6 +15,7 @@ import {
   createWorkflowInputSchema,
   publishMemoryTruthInputSchema,
   taskReviewInputSchema,
+  uploadTaskAttachmentInputSchema,
   updateAgentInputSchema,
   updateMemoryClaimInputSchema,
   updateProjectMemberInputSchema,
@@ -40,6 +42,9 @@ export interface BuildApiOptions {
 const idParamsSchema = z.object({ id: z.string().uuid() });
 const runParamsSchema = z.object({ runId: z.string().uuid() });
 const artifactParamsSchema = z.object({ artifactId: z.string().uuid() });
+const taskAttachmentParamsSchema = z.object({
+  attachmentId: z.string().uuid(),
+});
 const workflowParamsSchema = z.object({ workflowId: z.string().uuid() });
 const workflowInstanceParamsSchema = z.object({
   instanceId: z.string().uuid(),
@@ -100,10 +105,12 @@ export function buildApi(options: BuildApiOptions): {
   const fileStore = new LocalFileStore(options.fileStoreRoot);
   const application = new PlatformApplication(
     new PlatformRepositories(database),
+    fileStore,
   );
   const app = Fastify({
     logger: options.logger ?? true,
     genReqId: () => randomUUID(),
+    bodyLimit: 32 * 1024 * 1024,
   });
 
   app.setErrorHandler((error, request, reply) => {
@@ -327,6 +334,58 @@ export function buildApi(options: BuildApiOptions): {
     const input = createTaskMessageInputSchema.parse(request.body);
     return reply.status(201).send(await application.postTaskMessage(id, input));
   });
+
+  app.post("/api/v1/tasks/:id/attachments", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = uploadTaskAttachmentInputSchema.parse(request.body);
+    const encoded =
+      input.contentBase64.startsWith("data:") &&
+      input.contentBase64.includes(",")
+        ? input.contentBase64.slice(input.contentBase64.indexOf(",") + 1)
+        : input.contentBase64;
+    const content = Buffer.from(encoded, "base64");
+    if (content.byteLength === 0) {
+      throw new ApplicationError(
+        "invalid_input",
+        "Attachment content is empty",
+        400,
+      );
+    }
+    return reply.status(201).send(
+      await application.uploadTaskAttachment(id, {
+        name: input.name,
+        mimeType: input.mimeType,
+        content,
+      }),
+    );
+  });
+
+  app.get(
+    "/api/v1/attachments/:attachmentId/download",
+    async (request, reply) => {
+      const { attachmentId } = taskAttachmentParamsSchema.parse(request.params);
+      const { attachment, content } =
+        await application.readTaskAttachment(attachmentId);
+      return reply
+        .header("content-type", attachment.mimeType)
+        .header(
+          "content-disposition",
+          `attachment; filename="${attachment.name.replaceAll('"', "")}"`,
+        )
+        .send(Buffer.from(content));
+    },
+  );
+
+  app.post(
+    "/api/v1/attachments/:attachmentId/archive",
+    async (request, reply) => {
+      const { attachmentId } = taskAttachmentParamsSchema.parse(request.params);
+      const { archived } = archiveTaskAttachmentInputSchema.parse(request.body);
+      return reply.send(
+        await application.archiveTaskAttachment(attachmentId, archived),
+      );
+    },
+  );
 
   app.get("/api/v1/runs/:runId", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);

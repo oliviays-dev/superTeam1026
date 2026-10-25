@@ -6,6 +6,7 @@ import {
   PROJECT_MEMBERSHIP_SCHEMA_SQL,
   TASK_DEPENDENCY_MEMORY_SCHEMA_SQL,
   TASK_COLLABORATION_SCHEMA_SQL,
+  TASK_COLLABORATION_ASSET_SCHEMA_SQL,
 } from "./schema.js";
 import type { Database } from "./database.js";
 
@@ -17,6 +18,7 @@ const migrations = [
   { version: 5, sql: TASK_COLLABORATION_SCHEMA_SQL },
   { version: 6, sql: PROJECT_MEMBERSHIP_SCHEMA_SQL },
   { version: 7, sql: TASK_DEPENDENCY_MEMORY_SCHEMA_SQL },
+  { version: 8, sql: TASK_COLLABORATION_ASSET_SCHEMA_SQL },
 ] as const;
 
 export async function migrate(database: Database): Promise<void> {

@@ -50,6 +50,7 @@ import {
   WorkbenchRepository,
   WorkflowRepository,
 } from "./collaboration-repositories.js";
+import { TaskCollaborationRepository } from "./task-collaboration-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -764,6 +765,7 @@ export class PlatformRepositories {
   readonly projects: ProjectRepository;
   readonly agents: AgentRepository;
   readonly tasks: TaskRepository;
+  readonly taskCollaboration: TaskCollaborationRepository;
   readonly runs: RunRepository;
   readonly jobs: JobRepository;
   readonly contexts: ContextRepository;
@@ -779,6 +781,7 @@ export class PlatformRepositories {
     this.projects = new ProjectRepository(database);
     this.agents = new AgentRepository(database);
     this.tasks = new TaskRepository(database);
+    this.taskCollaboration = new TaskCollaborationRepository(database);
     this.runs = new RunRepository(database);
     this.jobs = new JobRepository(database);
     this.contexts = new ContextRepository(database);

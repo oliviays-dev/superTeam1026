@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  archiveTaskAttachmentInputSchema,
   createMemoryClaimInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
   publishMemoryTruthInputSchema,
+  uploadTaskAttachmentInputSchema,
 } from "./index.js";
 
 const projectId = "00000000-0000-4000-8000-000000000001";
@@ -61,5 +63,19 @@ describe("workflow role contracts", () => {
         stepRoleIds: [roleId],
       }),
     ).toThrow();
+  });
+});
+
+describe("task collaboration contracts", () => {
+  it("defaults attachment mime type and validates archive state", () => {
+    expect(
+      uploadTaskAttachmentInputSchema.parse({
+        name: "evidence.txt",
+        contentBase64: "ZXZpZGVuY2U=",
+      }),
+    ).toMatchObject({ mimeType: "application/octet-stream" });
+    expect(
+      archiveTaskAttachmentInputSchema.parse({ archived: true }),
+    ).toEqual({ archived: true });
   });
 });

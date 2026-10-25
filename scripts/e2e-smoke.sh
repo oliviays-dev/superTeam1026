@@ -170,6 +170,7 @@ if [[ "$agent_version" -ne 2 || "$agent_event_count" -lt 2 || "$project_descript
 fi
 
 API_BASE="$API_BASE" "$SCRIPT_DIR/dependency-memory-smoke.sh"
+API_BASE="$API_BASE" "$SCRIPT_DIR/task-collaboration-smoke.sh"
 
 printf 'e2e_smoke=ok\n'
 printf 'agent_id=%s\n' "$agent_id"

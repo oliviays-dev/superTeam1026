@@ -10,6 +10,11 @@ export {
 } from "./collaboration-repositories.js";
 export { migrate } from "./migrate.js";
 export {
+  TaskCollaborationRepository,
+  type TaskActivity,
+  type TaskAttachment,
+} from "./task-collaboration-repository.js";
+export {
   ProjectMembershipRepository,
   type DeleteProjectRoleResult,
   type ResolvedCreateProjectMemberInput,

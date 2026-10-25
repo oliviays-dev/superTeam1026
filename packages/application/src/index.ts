@@ -48,7 +48,8 @@ import {
   TaskDependencyRuleError,
   unresolvedTaskDependencies,
 } from "@pluginmax/domain";
-import type { PlatformRepositories } from "@pluginmax/database";
+import type { PlatformRepositories, TaskAttachment } from "@pluginmax/database";
+import type { FileRef, FileStore } from "@pluginmax/files";
 
 export class ApplicationError extends Error {
   constructor(
@@ -71,7 +72,10 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 export class PlatformApplication {
-  constructor(private readonly repositories: PlatformRepositories) {}
+  constructor(
+    private readonly repositories: PlatformRepositories,
+    private readonly files?: FileStore,
+  ) {}
 
   listProjects(): Promise<Project[]> {
     return this.repositories.projects.list();
@@ -407,9 +411,14 @@ export class PlatformApplication {
   async getTaskDetail(id: string): Promise<TaskDetail> {
     const task = await this.getTask(id);
     const projectTasks = await this.repositories.tasks.list(task.projectId);
+    const [messages, activity, attachments] = await Promise.all([
+      this.repositories.tasks.listMessages(id),
+      this.repositories.taskCollaboration.listEvents(id),
+      this.repositories.taskCollaboration.listAttachments(id),
+    ]);
     return {
       task,
-      messages: await this.repositories.tasks.listMessages(id),
+      messages,
       dependencies: task.dependsOn.map((dependencyId) => {
         const dependency = projectTasks.find(
           (candidate) => candidate.id === dependencyId,
@@ -420,6 +429,8 @@ export class PlatformApplication {
           status: dependency?.status ?? "cancelled",
         };
       }),
+      activity,
+      attachments,
     };
   }
 
@@ -439,11 +450,19 @@ export class PlatformApplication {
       }),
     );
     const assignee = await this.resolveTaskAssignee(input);
-    return this.repositories.tasks.create(
+    const task = await this.repositories.tasks.create(
       input,
       assignee.agentId,
       assignee.roleId,
     );
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: task.id,
+      kind: "created",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary: `创建任务“${task.title}”`,
+    });
+    return task;
   }
 
   async listTaskRuns(taskId: string) {
@@ -470,6 +489,20 @@ export class PlatformApplication {
     if (task === undefined) {
       throw new ApplicationError("task_not_found", "Task not found", 404);
     }
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: id,
+      kind: input.dependsOn === undefined ? "updated" : "dependency",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary:
+        input.dependsOn === undefined
+          ? "更新任务内容"
+          : `更新前置依赖为 ${input.dependsOn.length} 项`,
+      data:
+        input.dependsOn === undefined
+          ? null
+          : { dependsOn: [...input.dependsOn] },
+    });
     return this.getTaskDetail(id);
   }
 
@@ -488,13 +521,135 @@ export class PlatformApplication {
         );
       }
     }
-    return this.repositories.tasks.addMessage(
+    const message = await this.repositories.tasks.addMessage(
       id,
       input,
       "human",
       "local-admin",
       "Local Admin",
     );
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: id,
+      kind: "message",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary: input.replyToId === undefined ? "添加任务评论" : "回复任务评论",
+      data: {
+        messageId: message.id,
+        ...(input.replyToId === undefined
+          ? {}
+          : { replyToId: input.replyToId }),
+      },
+    });
+    return message;
+  }
+
+  async uploadTaskAttachment(
+    taskId: string,
+    input: {
+      readonly name: string;
+      readonly mimeType: string;
+      readonly content: Uint8Array;
+    },
+  ) {
+    const task = await this.getTask(taskId);
+    await this.requireProjectOwner(task.projectId);
+    if (this.files === undefined) {
+      throw new ApplicationError(
+        "file_store_unavailable",
+        "FileStore is not configured",
+        503,
+      );
+    }
+    const ref = await this.files.put({
+      workspaceId: task.projectId,
+      name: input.name,
+      mimeType: input.mimeType,
+      content: input.content,
+    });
+    const attachment = await this.repositories.taskCollaboration.saveAttachment(
+      {
+        taskId,
+        projectId: task.projectId,
+        ref,
+        uploadedBy: "Local Admin",
+      },
+    );
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: "attachment",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary: `上传任务附件“${attachment.name}”`,
+      data: { attachmentId: attachment.id },
+    });
+    return attachment;
+  }
+
+  async readTaskAttachment(attachmentId: string): Promise<{
+    readonly attachment: TaskAttachment;
+    readonly content: Uint8Array;
+  }> {
+    const attachment =
+      await this.repositories.taskCollaboration.getAttachment(attachmentId);
+    if (attachment === undefined) {
+      throw new ApplicationError(
+        "task_attachment_not_found",
+        "Task attachment not found",
+        404,
+      );
+    }
+    await this.requireProjectOwner(attachment.projectId);
+    if (this.files === undefined) {
+      throw new ApplicationError(
+        "file_store_unavailable",
+        "FileStore is not configured",
+        503,
+      );
+    }
+    const ref: FileRef = {
+      id: attachment.id,
+      storageKey: attachment.storageKey,
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
+      sha256: attachment.sha256,
+    };
+    return { attachment, content: await this.files.read(ref) };
+  }
+
+  async archiveTaskAttachment(attachmentId: string, archived: boolean) {
+    const attachment =
+      await this.repositories.taskCollaboration.getAttachment(attachmentId);
+    if (attachment === undefined) {
+      throw new ApplicationError(
+        "task_attachment_not_found",
+        "Task attachment not found",
+        404,
+      );
+    }
+    await this.requireProjectOwner(attachment.projectId);
+    const updated =
+      await this.repositories.taskCollaboration.setAttachmentArchived(
+        attachmentId,
+        archived,
+      );
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "task_attachment_not_found",
+        "Task attachment not found",
+        404,
+      );
+    }
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: attachment.taskId,
+      kind: "attachment",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary: `${archived ? "归档" : "复原"}任务附件“${attachment.name}”`,
+      data: { attachmentId, archived },
+    });
+    return updated;
   }
 
   async dispatchTask(taskId: string): Promise<{ runId: string }> {
@@ -540,6 +695,14 @@ export class PlatformApplication {
       "已保存本次运行的输入快照",
       { inputSnapshot },
     );
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: "dispatch",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary: "派发任务执行",
+      data: { runId },
+    });
     return { runId };
   }
 
@@ -648,6 +811,14 @@ export class PlatformApplication {
     const runs = await this.repositories.runs.listByTask(taskId);
     const latestRun = runs.find((run) => run.status === "completed");
     await this.repositories.reviews.save(taskId, "local-admin", input);
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: "review",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary: input.decision === "approve" ? "验收通过" : "退回任务并补充说明",
+      data: { note: input.note, decision: input.decision },
+    });
     if (input.decision === "return") {
       await this.repositories.tasks.setStatus(taskId, "queued");
       return this.getTask(taskId);
@@ -800,6 +971,26 @@ export class PlatformApplication {
       throw new ApplicationError("project_not_found", "Project not found", 404);
     }
     return project;
+  }
+
+  private async requireProjectOwner(projectId: string): Promise<void> {
+    await this.requireProject(projectId);
+    const members =
+      await this.repositories.projectMemberships.listMembers(projectId);
+    const owner = members.some(
+      (member) =>
+        member.kind === "human" &&
+        member.actorId === "local-admin" &&
+        member.owner &&
+        member.status === "active",
+    );
+    if (!owner) {
+      throw new ApplicationError(
+        "forbidden",
+        "Project owner permission is required",
+        403,
+      );
+    }
   }
 
   async listWorkflows(projectId: string): Promise<WorkflowDefinition[]> {

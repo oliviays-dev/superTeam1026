@@ -24,6 +24,7 @@
     "test": "vitest run",
     "test:e2e": "./scripts/e2e-smoke.sh",
     "test:e2e:browser": "playwright test",
+    "test:smoke:collaboration": "./scripts/task-collaboration-smoke.sh",
     "test:smoke:dependencies": "./scripts/dependency-memory-smoke.sh",
     "test:membership": "./scripts/membership-smoke.sh",
     "typecheck": "pnpm run build:packages && pnpm -r typecheck"

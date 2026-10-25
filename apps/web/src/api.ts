@@ -10,6 +10,7 @@ import type {
   CreateProjectMemberInput,
   CreateProjectRoleInput,
   CreateTaskMessageInput,
+  ArchiveTaskAttachmentInput,
   CreateProjectInput,
   CreateTaskInput,
   CreateWorkflowInput,
@@ -29,6 +30,7 @@ import type {
   Task,
   TaskDetail,
   TaskMessage,
+  UploadTaskAttachmentInput,
   UpdateAgentInput,
   UpdateMemoryClaimInput,
   UpdateProjectMemberInput,
@@ -246,6 +248,36 @@ export function postTaskMessage(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export function uploadTaskAttachment(
+  taskId: string,
+  input: UploadTaskAttachmentInput,
+) {
+  return request<NonNullable<TaskDetail["attachments"][number]>>(
+    `/tasks/${taskId}/attachments`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function archiveTaskAttachment(
+  attachmentId: string,
+  input: ArchiveTaskAttachmentInput,
+) {
+  return request<NonNullable<TaskDetail["attachments"][number]>>(
+    `/attachments/${attachmentId}/archive`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function taskAttachmentDownloadUrl(attachmentId: string): string {
+  return `${API_BASE}/attachments/${attachmentId}/download`;
 }
 
 export function dispatchTask(

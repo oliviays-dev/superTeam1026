@@ -11,6 +11,7 @@ import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
+  Archive,
   ArrowRight,
   Bot,
   Check,
@@ -18,11 +19,14 @@ import {
   CircleX,
   Edit3,
   FileText,
+  History,
   ListTodo,
   LoaderCircle,
   MessageSquare,
   Network,
+  Paperclip,
   Plus,
+  RotateCcw,
   Search,
   Send,
   Undo2,
@@ -36,6 +40,7 @@ import {
   createMemoryTopic,
   createTask,
   dispatchTask,
+  archiveTaskAttachment,
   getTaskDetail,
   listMemory,
   listProjectRoles,
@@ -44,9 +49,11 @@ import {
   postTaskMessage,
   publishMemoryTruth,
   reviewTask,
+  taskAttachmentDownloadUrl,
   updateProject,
   updateTask,
   updateMemoryClaim,
+  uploadTaskAttachment,
 } from "./api.js";
 import { ProjectMembershipPanel } from "./ProjectMembershipPanel.js";
 import { RunView } from "./RunView.js";
@@ -1016,6 +1023,15 @@ const taskColumns: Array<{
   { key: "done", label: "已完成", statuses: ["done", "cancelled"] },
 ];
 
+function readFileBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(new Error(`读取附件失败：${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 export function TasksView({
   projects,
   agents,
@@ -1237,6 +1253,7 @@ function TaskDetailDrawer({
     task.dependsOn,
   );
   const [comment, setComment] = useState("");
+  const [replyingTo, setReplyingTo] = useState<TaskMessage | null>(null);
   const projectTasks = tasks.filter(
     (candidate) =>
       candidate.projectId === task.projectId && candidate.id !== task.id,
@@ -1274,6 +1291,9 @@ function TaskDetailDrawer({
       setRunId(createdRunId);
       onTaskChanged();
       void queryClient.invalidateQueries({ queryKey: ["task-runs", task.id] });
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
     },
   });
   const reviewMutation = useMutation({
@@ -1284,6 +1304,9 @@ function TaskDetailDrawer({
       onTaskChanged();
       void queryClient.invalidateQueries({ queryKey: ["memory"] });
       void queryClient.invalidateQueries({ queryKey: ["workbench-summary"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
     },
   });
   const updateMutation = useMutation({
@@ -1313,15 +1336,62 @@ function TaskDetailDrawer({
     },
   });
   const commentMutation = useMutation({
-    mutationFn: () => postTaskMessage(task.id, { content: comment }),
+    mutationFn: () =>
+      postTaskMessage(task.id, {
+        content: comment,
+        ...(replyingTo === null ? {} : { replyToId: replyingTo.id }),
+      }),
     onSuccess: () => {
       setComment("");
+      setReplyingTo(null);
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
+  const attachmentMutation = useMutation({
+    mutationFn: async (file: File) =>
+      uploadTaskAttachment(task.id, {
+        name: file.name,
+        mimeType: file.type || "application/octet-stream",
+        contentBase64: await readFileBase64(file),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
+  const archiveAttachmentMutation = useMutation({
+    mutationFn: (input: { id: string; archived: boolean }) =>
+      archiveTaskAttachment(input.id, { archived: input.archived }),
+    onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: ["task-detail", task.id],
       });
     },
   });
   const messages: TaskMessage[] = detailQuery.data?.messages ?? [];
+  const activity = detailQuery.data?.activity ?? [];
+  const attachments = detailQuery.data?.attachments ?? [];
+
+  const downloadAttachment = async (attachmentId: string, name: string) => {
+    try {
+      const response = await fetch(taskAttachmentDownloadUrl(attachmentId));
+      if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 4_000);
+    } catch (error) {
+      console.error(error);
+    }
+  };
 
   return (
     <div className="task-detail-layer" role="presentation">
@@ -1567,6 +1637,81 @@ function TaskDetailDrawer({
         )}
 
         <div className="task-run-body">
+          <section className="task-attachment-panel">
+            <div className="task-discussion-head">
+              <div>
+                <Paperclip size={14} />
+                <strong>任务附件</strong>
+                <span>{attachments.length} 个文件</span>
+              </div>
+              <label className="pm-btn secondary task-upload-button">
+                <Plus size={13} />
+                上传附件
+                <input
+                  type="file"
+                  hidden
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (file !== undefined) attachmentMutation.mutate(file);
+                  }}
+                />
+              </label>
+            </div>
+            <div className="task-attachment-list">
+              {attachments.map((attachment) => (
+                <div
+                  className={`task-attachment-row${
+                    attachment.archivedAt === null ? "" : " archived"
+                  }`}
+                  key={attachment.id}
+                >
+                  <button
+                    type="button"
+                    className="task-attachment-name"
+                    title={`下载 ${attachment.name}`}
+                    onClick={() =>
+                      void downloadAttachment(attachment.id, attachment.name)
+                    }
+                  >
+                    <FileText size={13} />
+                    <span>{attachment.name}</span>
+                  </button>
+                  <small>
+                    {Math.max(1, Math.round(attachment.size / 1024))} KB ·{" "}
+                    {attachment.uploadedBy}
+                  </small>
+                  <button
+                    type="button"
+                    title={attachment.archivedAt === null ? "归档" : "复原"}
+                    aria-label={
+                      attachment.archivedAt === null ? "归档附件" : "复原附件"
+                    }
+                    onClick={() =>
+                      archiveAttachmentMutation.mutate({
+                        id: attachment.id,
+                        archived: attachment.archivedAt === null,
+                      })
+                    }
+                  >
+                    {attachment.archivedAt === null ? (
+                      <Archive size={13} />
+                    ) : (
+                      <RotateCcw size={13} />
+                    )}
+                  </button>
+                </div>
+              ))}
+              {attachments.length === 0 && (
+                <div className="task-message-empty">
+                  上传需求、证据或交付附件，归档后仍保留下载记录。
+                </div>
+              )}
+            </div>
+            {attachmentMutation.error !== null && (
+              <div className="pm-error">{attachmentMutation.error.message}</div>
+            )}
+          </section>
           <section className="task-discussion">
             <div className="task-discussion-head">
               <div>
@@ -1576,18 +1721,40 @@ function TaskDetailDrawer({
               </div>
             </div>
             <div className="task-message-list">
-              {messages.map((item) => (
-                <article
-                  className={`task-message message-${item.authorType}`}
-                  key={item.id}
-                >
-                  <header>
-                    <strong>{item.authorName}</strong>
-                    <time>{formatDateTime(item.createdAt)}</time>
-                  </header>
-                  <p>{item.content}</p>
-                </article>
-              ))}
+              {messages.map((item) => {
+                const parent =
+                  item.replyToId === null
+                    ? undefined
+                    : messages.find(
+                        (candidate) => candidate.id === item.replyToId,
+                      );
+                return (
+                  <article
+                    className={`task-message message-${item.authorType}${
+                      item.replyToId === null ? "" : " reply"
+                    }`}
+                    key={item.id}
+                  >
+                    <header>
+                      <strong>{item.authorName}</strong>
+                      <div>
+                        {item.replyToId !== null && (
+                          <span>回复 {parent?.authorName ?? "评论"}</span>
+                        )}
+                        <time>{formatDateTime(item.createdAt)}</time>
+                        <button
+                          type="button"
+                          title="回复这条评论"
+                          onClick={() => setReplyingTo(item)}
+                        >
+                          回复
+                        </button>
+                      </div>
+                    </header>
+                    <p>{item.content}</p>
+                  </article>
+                );
+              })}
               {messages.length === 0 && (
                 <div className="task-message-empty">
                   记录决策、补充上下文或给 Agent 留下后续说明。
@@ -1601,6 +1768,18 @@ function TaskDetailDrawer({
                 if (comment.trim() !== "") commentMutation.mutate();
               }}
             >
+              {replyingTo !== null && (
+                <div className="task-reply-target">
+                  <span>回复 {replyingTo.authorName}</span>
+                  <button
+                    type="button"
+                    title="取消回复"
+                    onClick={() => setReplyingTo(null)}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              )}
               <textarea
                 rows={2}
                 value={comment}
@@ -1620,6 +1799,34 @@ function TaskDetailDrawer({
                 )}
               </button>
             </form>
+          </section>
+          <section className="task-activity-panel">
+            <div className="task-discussion-head">
+              <div>
+                <History size={14} />
+                <strong>活动时间线</strong>
+                <span>{activity.length} 条事件</span>
+              </div>
+            </div>
+            <div className="task-activity-list">
+              {activity.map((event) => (
+                <article
+                  className={`task-activity event-${event.kind}`}
+                  key={event.id}
+                >
+                  <span />
+                  <div>
+                    <strong>{event.summary}</strong>
+                    <small>
+                      {event.actorName} · {formatDateTime(event.createdAt)}
+                    </small>
+                  </div>
+                </article>
+              ))}
+              {activity.length === 0 && (
+                <div className="task-message-empty">尚无活动记录</div>
+              )}
+            </div>
           </section>
           {runId !== "" ? (
             <RunView runId={runId} />
