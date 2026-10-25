@@ -237,6 +237,14 @@ export const workflowGraphNodeSchema = z.object({
   approvers: z.array(workflowExecutorSchema).max(30),
   approvalPolicy: z.enum(["all", "any"]),
   autoDispatch: z.boolean(),
+  start: z.boolean().default(false),
+  maxAttempts: z.number().int().min(1).max(10).default(1),
+  timeoutSeconds: z.number().int().min(1).max(86_400).default(300),
+  loopLimit: z.number().int().min(1).max(100).optional(),
+  subworkflowKey: z.string().trim().min(1).max(160).optional(),
+  subworkflowVersion: z.number().int().positive().optional(),
+  runtimeFault: z.enum(["fail", "timeout"]).optional(),
+  runtimeDelayMs: z.number().int().min(0).max(60_000).optional(),
 });
 export type WorkflowGraphNode = z.infer<typeof workflowGraphNodeSchema>;
 
@@ -248,6 +256,7 @@ export const workflowGraphEdgeSchema = z.object({
   result: z.enum(["approved", "rejected"]).optional(),
   default: z.boolean().optional(),
   breakCondition: z.string().optional(),
+  label: z.string().trim().max(160).optional(),
 });
 export type WorkflowGraphEdge = z.infer<typeof workflowGraphEdgeSchema>;
 
@@ -356,18 +365,220 @@ export const workflowStepStateSchema = z.object({
 });
 export type WorkflowStepState = z.infer<typeof workflowStepStateSchema>;
 
+export const workflowInstanceStatusSchema = z.enum([
+  "active",
+  "waiting",
+  "blocked",
+  "paused",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type WorkflowInstanceStatus = z.infer<
+  typeof workflowInstanceStatusSchema
+>;
+
+export const workflowRuntimeNodeStatusSchema = z.enum([
+  "waiting",
+  "ready",
+  "running",
+  "waiting_approval",
+  "blocked",
+  "completed",
+  "rejected",
+  "skipped",
+  "failed",
+]);
+export type WorkflowRuntimeNodeStatus = z.infer<
+  typeof workflowRuntimeNodeStatusSchema
+>;
+
+export const workflowRuntimeNodeSchema = z.object({
+  nodeId: z.string(),
+  name: z.string(),
+  type: workflowNodeTypeSchema,
+  status: workflowRuntimeNodeStatusSchema,
+  visits: z.number().int().nonnegative(),
+  attempt: z.number().int().nonnegative(),
+  approvalPolicy: z.enum(["all", "any"]),
+  selectedEdgeId: z.string().nullable(),
+  output: z.string().nullable(),
+  error: z.string().nullable(),
+  taskId: z.string().uuid().nullable(),
+  runId: z.string().uuid().nullable(),
+  childInstanceId: z.string().uuid().nullable(),
+  startedAt: z.string().datetime({ offset: true }).nullable(),
+  endedAt: z.string().datetime({ offset: true }).nullable(),
+  timeoutAt: z.string().datetime({ offset: true }).nullable(),
+});
+export type WorkflowRuntimeNode = z.infer<typeof workflowRuntimeNodeSchema>;
+
+export const workflowRuntimeEdgeStatusSchema = z.enum([
+  "pending",
+  "selected",
+  "skipped",
+  "looped",
+]);
+export type WorkflowRuntimeEdgeStatus = z.infer<
+  typeof workflowRuntimeEdgeStatusSchema
+>;
+
+export const workflowRuntimeEdgeSchema = z.object({
+  edgeId: z.string(),
+  from: z.string(),
+  to: z.string(),
+  status: workflowRuntimeEdgeStatusSchema,
+  conditionResult: z.boolean().nullable(),
+});
+export type WorkflowRuntimeEdge = z.infer<typeof workflowRuntimeEdgeSchema>;
+
+export const workflowRuntimeStateSchema = z.object({
+  nodes: z.array(workflowRuntimeNodeSchema),
+  edges: z.array(workflowRuntimeEdgeSchema),
+  context: z.record(
+    z.string(),
+    z.union([z.string(), z.number(), z.boolean(), z.null()]),
+  ),
+});
+export type WorkflowRuntimeState = z.infer<typeof workflowRuntimeStateSchema>;
+
+export const workflowApprovalStatusSchema = z.enum([
+  "pending",
+  "approved",
+  "rejected",
+  "transferred",
+]);
+export type WorkflowApprovalStatus = z.infer<
+  typeof workflowApprovalStatusSchema
+>;
+
+export const workflowApprovalSchema = z.object({
+  id: z.string().uuid(),
+  instanceId: z.string().uuid(),
+  nodeId: z.string(),
+  round: z.number().int().positive(),
+  approverId: z.string(),
+  approverRoleId: z.string().uuid().nullable(),
+  status: workflowApprovalStatusSchema,
+  note: z.string(),
+  actedBy: z.string().nullable(),
+  actedAt: z.string().datetime({ offset: true }).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type WorkflowApproval = z.infer<typeof workflowApprovalSchema>;
+
+export const workflowAuditKindSchema = z.enum([
+  "instance.started",
+  "instance.paused",
+  "instance.resumed",
+  "instance.completed",
+  "instance.blocked",
+  "instance.failed",
+  "instance.cancelled",
+  "node.ready",
+  "node.started",
+  "node.completed",
+  "node.rejected",
+  "node.skipped",
+  "node.blocked",
+  "node.failed",
+  "node.timed_out",
+  "node.retried",
+  "branch.selected",
+  "branch.skipped",
+  "approval.requested",
+  "approval.decided",
+  "subworkflow.started",
+  "subworkflow.completed",
+  "subworkflow.failed",
+]);
+export type WorkflowAuditKind = z.infer<typeof workflowAuditKindSchema>;
+
+export const workflowAuditEventSchema = z.object({
+  id: z.string().uuid(),
+  instanceId: z.string().uuid(),
+  nodeId: z.string().nullable(),
+  seq: z.number().int().positive(),
+  kind: workflowAuditKindSchema,
+  actorId: z.string(),
+  summary: z.string(),
+  data: z.record(z.string(), z.unknown()).nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type WorkflowAuditEvent = z.infer<typeof workflowAuditEventSchema>;
+
 export const workflowInstanceSchema = z.object({
   id: z.string().uuid(),
   workflowId: z.string().uuid(),
   projectId: z.string().uuid(),
   title: z.string(),
-  status: z.enum(["active", "completed"]),
+  status: workflowInstanceStatusSchema,
+  definitionKey: z.string(),
+  definitionVersion: z.number().int().positive(),
+  parentInstanceId: z.string().uuid().nullable(),
+  parentNodeId: z.string().nullable(),
+  failureReason: z.string().nullable(),
+  pausedAt: z.string().datetime({ offset: true }).nullable(),
+  revision: z.number().int().positive(),
+  runtime: workflowRuntimeStateSchema,
+  graph: workflowGraphSchema.nullable(),
   currentStep: z.number().int().nonnegative(),
   steps: z.array(workflowStepStateSchema),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type WorkflowInstance = z.infer<typeof workflowInstanceSchema>;
+
+export const workflowInstanceDetailSchema = z.object({
+  instance: workflowInstanceSchema,
+  approvals: z.array(workflowApprovalSchema),
+  audit: z.array(workflowAuditEventSchema),
+  children: z.array(workflowInstanceSchema),
+});
+export type WorkflowInstanceDetail = z.infer<
+  typeof workflowInstanceDetailSchema
+>;
+
+export const startWorkflowInputSchema = z.object({
+  title: z.string().trim().min(1).max(180),
+  context: z
+    .record(
+      z.string().trim().min(1).max(160),
+      z.union([z.string(), z.number(), z.boolean(), z.null()]),
+    )
+    .default({}),
+});
+export type StartWorkflowInput = z.infer<typeof startWorkflowInputSchema>;
+
+export const completeWorkflowNodeInputSchema = z.object({
+  nodeId: z.string().trim().min(1).max(160),
+  output: z.string().trim().max(20_000).default(""),
+});
+export type CompleteWorkflowNodeInput = z.infer<
+  typeof completeWorkflowNodeInputSchema
+>;
+
+export const decideWorkflowApprovalInputSchema = z.object({
+  nodeId: z.string().trim().min(1).max(160),
+  decision: z.enum(["approve", "reject"]),
+  note: z.string().trim().max(4_000).default(""),
+});
+export type DecideWorkflowApprovalInput = z.infer<
+  typeof decideWorkflowApprovalInputSchema
+>;
+
+export const workflowReasonInputSchema = z.object({
+  reason: z.string().trim().max(4_000).default(""),
+});
+export type WorkflowReasonInput = z.infer<typeof workflowReasonInputSchema>;
+
+export const retryWorkflowNodeInputSchema = z.object({
+  nodeId: z.string().trim().min(1).max(160),
+  reason: z.string().trim().max(4_000).default(""),
+});
+export type RetryWorkflowNodeInput = z.infer<
+  typeof retryWorkflowNodeInputSchema
+>;
 
 export const meetingStatusSchema = z.enum(["open", "closed"]);
 export type MeetingStatus = z.infer<typeof meetingStatusSchema>;

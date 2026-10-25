@@ -7,6 +7,7 @@ import type {
   WorkflowValidationIssue,
   WorkflowValidationResult,
 } from "@pluginmax/contracts";
+import { validateWorkflowExpressionSyntax } from "./workflow-runtime.js";
 
 interface RawNode {
   readonly line: number;
@@ -173,6 +174,79 @@ export function validateWorkflowMarkdown(
     if (id !== "" && executor !== undefined) {
       const execution = raw.fields.get("execution")?.[0] ?? "";
       const trigger = raw.fields.get("trigger")?.[0] ?? "";
+      const maxAttemptsValue = raw.fields.get("max-attempts")?.[0] ?? "1";
+      const maxAttempts = Number(maxAttemptsValue);
+      if (
+        !Number.isInteger(maxAttempts) ||
+        maxAttempts < 1 ||
+        maxAttempts > 10
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_max_attempts",
+          message: `节点“${raw.name}”的 max-attempts 必须是 1 到 10 的整数`,
+        });
+      }
+      const timeoutValue = raw.fields.get("timeout")?.[0] ?? "5m";
+      const timeoutSeconds = parseDurationSeconds(timeoutValue);
+      if (timeoutSeconds === undefined) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_timeout",
+          message: `节点“${raw.name}”的 timeout 必须使用 ms、s、m 或 h 单位`,
+        });
+      }
+      const loopLimitValue = raw.fields.get("loop-limit")?.[0];
+      const loopLimit =
+        loopLimitValue === undefined ? undefined : Number(loopLimitValue);
+      if (
+        loopLimit !== undefined &&
+        (!Number.isInteger(loopLimit) || loopLimit < 1 || loopLimit > 100)
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_loop_limit",
+          message: `节点“${raw.name}”的 loop-limit 必须是 1 到 100 的整数`,
+        });
+      }
+      const subworkflowKey = raw.fields.get("subworkflow")?.[0];
+      const subworkflowVersionValue = raw.fields.get(
+        "subworkflow-version",
+      )?.[0];
+      const subworkflowVersion =
+        subworkflowVersionValue === undefined
+          ? undefined
+          : Number(subworkflowVersionValue);
+      if (typeValue === "subworkflow" && subworkflowKey === undefined) {
+        errors.push({
+          line: raw.line,
+          code: "subworkflow_required",
+          message: `子流程节点“${raw.name}”必须声明 subworkflow`,
+        });
+      }
+      if (
+        subworkflowVersion !== undefined &&
+        (!Number.isInteger(subworkflowVersion) || subworkflowVersion <= 0)
+      ) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_subworkflow_version",
+          message: `节点“${raw.name}”的 subworkflow-version 必须是正整数`,
+        });
+      }
+      const runtimeFault = parseRuntimeFault(
+        raw.fields.get("runtime-fault")?.[0],
+      );
+      const runtimeDelayMsValue =
+        raw.fields.get("runtime-delay-ms")?.[0] ?? "0";
+      const runtimeDelayMs = Number(runtimeDelayMsValue);
+      if (!Number.isInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
+        errors.push({
+          line: raw.line,
+          code: "invalid_runtime_delay",
+          message: `节点“${raw.name}”的 runtime-delay-ms 必须是非负整数`,
+        });
+      }
       nodes.push({
         id,
         name: raw.name,
@@ -183,6 +257,23 @@ export function validateWorkflowMarkdown(
         approvalPolicy: policyValue === "any" ? "any" : "all",
         autoDispatch:
           execution === "task-worker" && trigger === "auto-on-ready",
+        start: raw.fields.get("start")?.[0] === "true",
+        maxAttempts:
+          Number.isInteger(maxAttempts) && maxAttempts > 0 ? maxAttempts : 1,
+        timeoutSeconds: timeoutSeconds ?? 300,
+        ...(loopLimit === undefined || !Number.isInteger(loopLimit)
+          ? {}
+          : { loopLimit }),
+        ...(subworkflowKey === undefined ? {} : { subworkflowKey }),
+        ...(subworkflowVersion === undefined ||
+        !Number.isInteger(subworkflowVersion) ||
+        subworkflowVersion <= 0
+          ? {}
+          : { subworkflowVersion }),
+        ...(runtimeFault === undefined ? {} : { runtimeFault }),
+        ...(Number.isInteger(runtimeDelayMs) && runtimeDelayMs >= 0
+          ? { runtimeDelayMs }
+          : {}),
       });
     }
   }
@@ -214,6 +305,29 @@ export function validateWorkflowMarkdown(
     const condition = /\[condition:\s*([^\]]+)\]/i.exec(options)?.[1]?.trim();
     const breakCondition = /\[break:\s*([^\]]+)\]/i.exec(options)?.[1]?.trim();
     const isDefault = /\[default:\s*true\s*\]/i.test(options);
+    const label = /\[label:\s*([^\]]+)\]/i.exec(options)?.[1]?.trim();
+    if (condition !== undefined) {
+      try {
+        validateWorkflowExpressionSyntax(condition);
+      } catch {
+        errors.push({
+          line: index + 1,
+          code: "invalid_condition",
+          message: `连接条件表达式不合法：${condition}`,
+        });
+      }
+    }
+    if (breakCondition !== undefined) {
+      try {
+        validateWorkflowExpressionSyntax(breakCondition);
+      } catch {
+        errors.push({
+          line: index + 1,
+          code: "invalid_break_condition",
+          message: `循环退出表达式不合法：${breakCondition}`,
+        });
+      }
+    }
     edges.push({
       id: `edge-${from}-${to}-${edges.length + 1}`,
       from,
@@ -224,6 +338,7 @@ export function validateWorkflowMarkdown(
       ...(condition === undefined ? {} : { condition }),
       ...(breakCondition === undefined ? {} : { breakCondition }),
       ...(isDefault ? { default: true } : {}),
+      ...(label === undefined ? {} : { label }),
     });
   });
 
@@ -232,7 +347,7 @@ export function validateWorkflowMarkdown(
     incoming.set(edge.to, (incoming.get(edge.to) ?? 0) + 1);
   }
   const startNodeIds = nodes
-    .filter((node) => (incoming.get(node.id) ?? 0) === 0)
+    .filter((node) => node.start || (incoming.get(node.id) ?? 0) === 0)
     .map((node) => node.id);
   if (nodes.length > 0 && startNodeIds.length === 0) {
     errors.push({
@@ -256,6 +371,19 @@ export function validateWorkflowMarkdown(
           code: "uncontrolled_cycle",
           message: `循环 ${nodeId} -> ${edge.to} 缺少 break 条件`,
         });
+      }
+      if (state.get(edge.to) === 1 && edge.breakCondition !== undefined) {
+        const target = nodes.find((node) => node.id === edge.to);
+        const source = nodes.find((node) => node.id === edge.from);
+        if (
+          target?.loopLimit === undefined &&
+          source?.loopLimit === undefined
+        ) {
+          errors.push({
+            code: "loop_limit_required",
+            message: `循环 ${nodeId} -> ${edge.to} 必须声明 loop-limit`,
+          });
+        }
       }
       if ((state.get(edge.to) ?? 0) === 0) visit(edge.to);
     }
@@ -322,4 +450,21 @@ function parseExecutor(value: string): WorkflowExecutor | undefined {
   const kind =
     kindValue === "用户" ? "user" : (kindValue as WorkflowExecutor["kind"]);
   return { kind, id: match[2]!.trim() };
+}
+
+function parseDurationSeconds(value: string): number | undefined {
+  const match = /^(\d+)\s*(ms|s|m|h)$/i.exec(value.trim());
+  if (match === null) return undefined;
+  const amount = Number(match[1]);
+  const unit = match[2]!.toLowerCase();
+  const multiplier =
+    unit === "ms" ? 0.001 : unit === "s" ? 1 : unit === "m" ? 60 : 3_600;
+  const seconds = Math.ceil(amount * multiplier);
+  return seconds > 0 && seconds <= 86_400 ? seconds : undefined;
+}
+
+function parseRuntimeFault(
+  value: string | undefined,
+): "fail" | "timeout" | undefined {
+  return value === "fail" || value === "timeout" ? value : undefined;
 }

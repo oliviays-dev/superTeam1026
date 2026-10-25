@@ -294,6 +294,12 @@ export const runInputSnapshotSchema = z.object({
   instruction: z.string(),
   agentName: z.string(),
   runtimeKind: runtimeKindSchema,
+  runtimeOptions: z
+    .object({
+      fault: z.enum(["fail", "timeout"]).optional(),
+      delayMs: z.number().int().min(0).max(60_000).optional(),
+    })
+    .optional(),
 });
 export type RunInputSnapshot = z.infer<typeof runInputSnapshotSchema>;
 
@@ -307,6 +313,10 @@ export const runSchema = z.object({
   inputSnapshot: runInputSnapshotSchema,
   output: z.string().nullable(),
   error: z.string().nullable(),
+  attempt: z.number().int().positive(),
+  timeoutAt: z.string().datetime({ offset: true }).nullable(),
+  workflowInstanceId: z.string().uuid().nullable(),
+  workflowNodeId: z.string().nullable(),
   observability: runObservabilitySchema,
   createdAt: z.string().datetime({ offset: true }),
   startedAt: z.string().datetime({ offset: true }).nullable(),

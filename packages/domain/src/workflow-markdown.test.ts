@@ -113,4 +113,80 @@ describe("workflow markdown validation", () => {
       expect.objectContaining({ code: "decision_branch_required" }),
     );
   });
+
+  it("parses approval, condition, loop, retry, timeout and subworkflow metadata", () => {
+    const result = validateWorkflowMarkdown(`${header}
+### 评审
+
+- id: review
+- type: approval
+- executor: user:local-admin
+- approver: role:role-reviewer
+- policy: any
+- timeout: 2m
+- max-attempts: 3
+
+### 判断
+
+- id: decide
+- type: decision
+- executor: system:rules
+
+### 重试
+
+- id: retry
+- type: service
+- executor: system:retry
+- loop-limit: 2
+
+### 子流程
+
+- id: child
+- type: subworkflow
+- executor: system:workflow
+- subworkflow: child-flow
+- subworkflow-version: 2
+
+## 连接
+
+- review -> decide [result: approved]
+- decide -> retry [condition: quality < 80]
+- retry -> decide [break: visits.retry >= 2]
+- decide -> child [default: true]`);
+    expect(result.valid).toBe(true);
+    expect(result.graph?.nodes[0]).toMatchObject({
+      approvalPolicy: "any",
+      timeoutSeconds: 120,
+      maxAttempts: 3,
+    });
+    expect(result.graph?.nodes[2]?.loopLimit).toBe(2);
+    expect(result.graph?.nodes[3]).toMatchObject({
+      subworkflowKey: "child-flow",
+      subworkflowVersion: 2,
+    });
+  });
+
+  it("requires an explicit loop limit", () => {
+    const result = validateWorkflowMarkdown(`${header}
+### A
+
+- id: a
+- type: task
+- executor: user:local-admin
+
+### B
+
+- id: b
+- type: task
+- executor: user:local-admin
+
+## 连接
+
+- a -> b
+- b -> a [break: attempts >= 2]`);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({ code: "loop_limit_required" }),
+    );
+  });
 });
