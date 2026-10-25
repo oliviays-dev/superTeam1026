@@ -45,6 +45,7 @@ export interface RunRow {
   task_id: string;
   agent_id: string;
   status: Run["status"];
+  context_pack_id: string | null;
   input_snapshot: Run["inputSnapshot"];
   output: string | null;
   error: string | null;
@@ -118,6 +119,7 @@ export function runFromRow(row: RunRow): Run {
     taskId: row.task_id,
     agentId: row.agent_id,
     status: row.status,
+    contextPackId: row.context_pack_id,
     inputSnapshot: row.input_snapshot,
     output: row.output,
     error: row.error,

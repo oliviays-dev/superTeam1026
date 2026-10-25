@@ -5,8 +5,10 @@ export interface RuntimeTaskInput {
   readonly title: string;
   readonly description: string;
   readonly acceptance: readonly string[];
+  readonly instruction: string;
   readonly agentName: string;
   readonly runtimeKind: RuntimeKind;
+  readonly workspacePath: string;
 }
 
 export type AgentRuntimeEvent =
@@ -132,3 +134,9 @@ export class FakeRuntimeAdapter implements AgentRuntimeAdapter {
     yield { type: "completed", output };
   }
 }
+
+export {
+  DshSdkAdapter,
+  mapDshNotification,
+  type DshSdkAdapterOptions,
+} from "./dsh-sdk.js";

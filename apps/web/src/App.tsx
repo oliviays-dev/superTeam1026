@@ -25,6 +25,7 @@ import {
   createTask,
   dispatchTask,
   getRunDetail,
+  getRunContext,
   getRunEvents,
   listAgents,
   listProjects,
@@ -217,6 +218,11 @@ function RunView({ runId }: { runId: string }) {
     queryKey: ["run", runId],
     queryFn: () => getRunDetail(runId),
   });
+  const contextQuery = useQuery({
+    queryKey: ["run-context", runId],
+    queryFn: () => getRunContext(runId),
+    retry: false,
+  });
   const run = runQuery.data?.run;
 
   useEffect(() => {
@@ -332,6 +338,21 @@ function RunView({ runId }: { runId: string }) {
           </div>
         </div>
         <p className="run-description">{run.inputSnapshot.taskDescription}</p>
+        {contextQuery.data !== undefined && (
+          <div className="context-sources">
+            <span>上下文来源</span>
+            <div>
+              {contextQuery.data.pack.sources.map((source) => (
+                <span
+                  className="context-chip"
+                  key={`${source.type}-${source.id}`}
+                >
+                  {source.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       <section className="run-section">

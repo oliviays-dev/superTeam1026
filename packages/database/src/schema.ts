@@ -1,4 +1,5 @@
 export const DEFAULT_AGENT_ID = "00000000-0000-4000-8000-000000000001";
+export const DSH_AGENT_ID = "00000000-0000-4000-8000-000000000002";
 
 export const INITIAL_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS projects (
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS runs (
       'timeout',
       'interrupted'
     )),
+  context_pack_id UUID,
   input_snapshot JSONB NOT NULL,
   output TEXT,
   error TEXT,
@@ -123,6 +125,42 @@ INSERT INTO agents (
   'Fake Research Agent',
   'Deterministic local agent used to validate the platform execution loop.',
   'fake',
+  'active',
+  NOW(),
+  NOW()
+)
+ON CONFLICT (id) DO NOTHING;
+`;
+
+export const CONTEXT_SCHEMA_SQL = `
+ALTER TABLE runs
+  ADD COLUMN IF NOT EXISTS context_pack_id UUID;
+
+CREATE TABLE IF NOT EXISTS context_packs (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id),
+  task_id UUID NOT NULL REFERENCES tasks(id),
+  agent_id UUID NOT NULL REFERENCES agents(id),
+  pack JSONB NOT NULL,
+  receipt JSONB NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+INSERT INTO agents (
+  id,
+  name,
+  description,
+  runtime_kind,
+  status,
+  created_at,
+  updated_at
+) VALUES (
+  '${DSH_AGENT_ID}',
+  'DSH SDK Agent',
+  'Executes tasks through a pinned DeepSeek Harness SDK runtime.',
+  'dsh-sdk',
   'active',
   NOW(),
   NOW()

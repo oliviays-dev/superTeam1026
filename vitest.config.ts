@@ -24,6 +24,10 @@ export default defineConfig({
         import.meta.dirname,
         "packages/config/src/index.ts",
       ),
+      "@pluginmax/context": resolve(
+        import.meta.dirname,
+        "packages/context/src/index.ts",
+      ),
       "@pluginmax/database": resolve(
         import.meta.dirname,
         "packages/database/src/index.ts",

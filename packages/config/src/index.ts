@@ -7,10 +7,20 @@ export interface PlatformConfig {
   readonly workerPollIntervalMs: number;
   readonly workerLeaseSeconds: number;
   readonly localActorId: string;
+  readonly agentWorkspaceRoot: string;
+  readonly dshBin: string | undefined;
+  readonly dshProfile: string;
+  readonly dshHome: string;
+  readonly dshProvider: string;
+  readonly dshModel: string;
   readonly logLevel: "debug" | "info" | "warn" | "error";
 }
 
-export function loadLocalEnv(path = ".env"): void {
+export function platformRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return resolve(env.PLUGINMAX_ROOT ?? env.INIT_CWD ?? process.cwd());
+}
+
+export function loadLocalEnv(path = resolve(platformRoot(), ".env")): void {
   try {
     process.loadEnvFile(path);
   } catch (error) {
@@ -37,6 +47,7 @@ function integer(
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): PlatformConfig {
+  const root = platformRoot(env);
   const databaseUrl =
     env.DATABASE_URL ??
     "postgres://pluginmax:pluginmax@127.0.0.1:54329/pluginmax";
@@ -50,7 +61,7 @@ export function loadConfig(
     apiHost: env.API_HOST ?? "127.0.0.1",
     apiPort: integer(env.API_PORT, 4310, "API_PORT"),
     webPort: integer(env.WEB_PORT, 4311, "WEB_PORT"),
-    fileStoreRoot: env.FILE_STORE_ROOT ?? ".tmp/files",
+    fileStoreRoot: resolve(root, env.FILE_STORE_ROOT ?? ".tmp/files"),
     workerPollIntervalMs: integer(
       env.WORKER_POLL_INTERVAL_MS,
       500,
@@ -62,6 +73,16 @@ export function loadConfig(
       "WORKER_LEASE_SECONDS",
     ),
     localActorId: env.LOCAL_ACTOR_ID ?? "local-admin",
+    agentWorkspaceRoot: resolve(
+      root,
+      env.AGENT_WORKSPACE_ROOT ?? ".tmp/agent-workspaces",
+    ),
+    dshBin: env.DSH_BIN === "" ? undefined : env.DSH_BIN,
+    dshProfile: env.DSH_PROFILE ?? "sdk",
+    dshHome: resolve(root, env.DSH_HOME ?? ".tmp/dsh-home-platform"),
+    dshProvider: env.DSH_PROVIDER ?? "deepseek-official",
+    dshModel: env.DSH_MODEL ?? "deepseek-v4-flash",
     logLevel: logLevel as PlatformConfig["logLevel"],
   };
 }
+import { resolve } from "node:path";

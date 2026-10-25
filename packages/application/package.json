@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@pluginmax/agent-runtime": "workspace:*",
+    "@pluginmax/context": "workspace:*",
     "@pluginmax/contracts": "workspace:*",
     "@pluginmax/database": "workspace:*",
     "@pluginmax/domain": "workspace:*"

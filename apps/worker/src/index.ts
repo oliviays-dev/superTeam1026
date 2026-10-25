@@ -7,7 +7,16 @@ loadLocalEnv();
 const config = loadConfig();
 const database = new Database(config.databaseUrl);
 const repositories = new PlatformRepositories(database);
-const executor = new RunExecutor(repositories);
+const executor = new RunExecutor(repositories, {
+  workspaceRoot: config.agentWorkspaceRoot,
+  dsh: {
+    dshBin: config.dshBin,
+    profile: config.dshProfile,
+    dshHome: config.dshHome,
+    provider: config.dshProvider,
+    model: config.dshModel,
+  },
+});
 const workerId = `worker-${randomUUID()}`;
 let stopping = false;
 

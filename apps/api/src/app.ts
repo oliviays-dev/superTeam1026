@@ -135,18 +135,7 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/runs/:runId/context", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
-    const detail = await application.getRunDetail(runId);
-    return reply.send({
-      runId,
-      sources: [
-        {
-          type: "task",
-          id: detail.run.taskId,
-          label: detail.run.inputSnapshot.taskTitle,
-        },
-      ],
-      status: "ready",
-    });
+    return reply.send(await application.getRunContext(runId));
   });
 
   app.get("/api/v1/runs/:runId/artifacts", async (request, reply) => {

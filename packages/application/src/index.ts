@@ -115,6 +115,18 @@ export class PlatformApplication {
     return { run, events };
   }
 
+  async getRunContext(runId: string) {
+    const context = await this.repositories.contexts.getByRun(runId);
+    if (context === undefined) {
+      throw new ApplicationError(
+        "context_not_ready",
+        "ContextPack is not available for this run",
+        404,
+      );
+    }
+    return context;
+  }
+
   async cancelRun(runId: string): Promise<void> {
     const run = await this.repositories.runs.get(runId);
     if (run === undefined) {

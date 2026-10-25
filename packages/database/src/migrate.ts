@@ -1,7 +1,10 @@
-import { INITIAL_SCHEMA_SQL } from "./schema.js";
+import { CONTEXT_SCHEMA_SQL, INITIAL_SCHEMA_SQL } from "./schema.js";
 import type { Database } from "./database.js";
 
-const MIGRATION_VERSION = 1;
+const migrations = [
+  { version: 1, sql: INITIAL_SCHEMA_SQL },
+  { version: 2, sql: CONTEXT_SCHEMA_SQL },
+] as const;
 
 export async function migrate(database: Database): Promise<void> {
   await database.query(`
@@ -11,17 +14,19 @@ export async function migrate(database: Database): Promise<void> {
     )
   `);
 
-  const applied = await database.query<{ version: number }>(
-    "SELECT version FROM platform_migrations WHERE version = $1",
-    [MIGRATION_VERSION],
-  );
-  if (applied.rowCount !== 0) return;
-
-  await database.transaction(async (client) => {
-    await client.query(INITIAL_SCHEMA_SQL);
-    await client.query(
-      "INSERT INTO platform_migrations (version, applied_at) VALUES ($1, NOW())",
-      [MIGRATION_VERSION],
+  for (const migration of migrations) {
+    const applied = await database.query<{ version: number }>(
+      "SELECT version FROM platform_migrations WHERE version = $1",
+      [migration.version],
     );
-  });
+    if (applied.rowCount !== 0) continue;
+
+    await database.transaction(async (client) => {
+      await client.query(migration.sql);
+      await client.query(
+        "INSERT INTO platform_migrations (version, applied_at) VALUES ($1, NOW())",
+        [migration.version],
+      );
+    });
+  }
 }

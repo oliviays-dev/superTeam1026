@@ -43,7 +43,10 @@ fi
 
 event_count="$(printf '%s' "$run_json" | jq '.events | length')"
 output_length="$(printf '%s' "$run_json" | jq -r '.run.output // "" | length')"
-if [[ "$event_count" -lt 5 || "$output_length" -lt 20 ]]; then
+context_json="$(curl -fsS "$API_BASE/runs/$run_id/context")"
+context_hash="$(printf '%s' "$context_json" | jq -r '.pack.contentHash')"
+source_count="$(printf '%s' "$context_json" | jq '.pack.sources | length')"
+if [[ "$event_count" -lt 5 || "$output_length" -lt 20 || ${#context_hash} -ne 64 || "$source_count" -lt 2 ]]; then
   printf 'run verification failed: events=%s output=%s\n' \
     "$event_count" "$output_length" >&2
   exit 1
@@ -55,3 +58,5 @@ printf 'task_id=%s\n' "$task_id"
 printf 'run_id=%s\n' "$run_id"
 printf 'events=%s\n' "$event_count"
 printf 'output_length=%s\n' "$output_length"
+printf 'context_hash=%s\n' "$context_hash"
+printf 'context_sources=%s\n' "$source_count"

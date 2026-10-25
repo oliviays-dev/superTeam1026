@@ -1,5 +1,7 @@
 import type {
   Agent,
+  ContextPack,
+  ContextReceipt,
   CreateProjectInput,
   CreateTaskInput,
   PlatformRunEvent,
@@ -82,6 +84,12 @@ export async function listTaskRuns(taskId: string): Promise<Run[]> {
 
 export function getRunDetail(runId: string): Promise<RunDetail> {
   return request(`/runs/${runId}`);
+}
+
+export function getRunContext(
+  runId: string,
+): Promise<{ pack: ContextPack; receipt: ContextReceipt }> {
+  return request(`/runs/${runId}/context`);
 }
 
 export function getRunEvents(

@@ -6,5 +6,5 @@ export default defineConfig({
   format: "esm",
   outDir: "lib",
   outExtensions: () => ({ js: ".js", dts: ".d.ts" }),
-  external: ["@pluginmax/contracts"],
+  external: ["@deepseek-ai/dsh-sdk-client", "@pluginmax/contracts"],
 });

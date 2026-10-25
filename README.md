@@ -9,6 +9,8 @@ The initial implementation provides:
 - PostgreSQL-backed projects, tasks, runs, events, and jobs.
 - A separate agent worker with a deterministic fake runtime.
 - A normalized run event model ready for DSH and external runtimes.
+- Immutable task ContextPacks with source receipts.
+- A pinned DeepSeek Harness SDK runtime adapter.
 
 ## Requirements
 
@@ -30,6 +32,10 @@ Open:
 
 - Web: http://127.0.0.1:4311
 - API health: http://127.0.0.1:4310/api/v1/health
+
+The `DSH SDK Agent` is available through `@deepseek-ai/dsh@0.2.1-rc.3`.
+Set `DEEPSEEK_API_KEY` in the root `.env` before dispatching a task to that
+agent. `DSH_HOME` remains isolated under the new project's `.tmp` directory.
 
 ## Checks
 

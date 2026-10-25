@@ -1,8 +1,10 @@
+import { resolve } from "node:path";
 import { Database } from "./database.js";
 import { migrate } from "./migrate.js";
 
+const root = resolve(process.env.PLUGINMAX_ROOT ?? process.env.INIT_CWD ?? ".");
 try {
-  process.loadEnvFile(".env");
+  process.loadEnvFile(resolve(root, ".env"));
 } catch (error) {
   if (
     !(error instanceof Error) ||

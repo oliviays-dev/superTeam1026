@@ -8,6 +8,7 @@ export default defineConfig({
   outExtensions: () => ({ js: ".js", dts: ".d.ts" }),
   external: [
     "@pluginmax/contracts",
+    "@pluginmax/context",
     "@pluginmax/database",
     "@pluginmax/domain",
     "@pluginmax/agent-runtime",

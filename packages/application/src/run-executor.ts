@@ -1,8 +1,13 @@
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import {
+  DshSdkAdapter,
   FakeRuntimeAdapter,
   type AgentRuntimeAdapter,
   type AgentRuntimeEvent,
+  type DshSdkAdapterOptions,
 } from "@pluginmax/agent-runtime";
+import { buildTaskContext } from "@pluginmax/context";
 import type { Agent, Run, Task } from "@pluginmax/contracts";
 import type { PlatformRepositories } from "@pluginmax/database";
 
@@ -13,21 +18,41 @@ export class RunCancelledError extends Error {
   }
 }
 
-function runtimeFor(agent: Agent): AgentRuntimeAdapter {
+export interface RunExecutorOptions {
+  readonly workspaceRoot: string;
+  readonly dsh: DshSdkAdapterOptions;
+}
+
+function runtimeFor(
+  agent: Agent,
+  options: RunExecutorOptions,
+): AgentRuntimeAdapter {
   if (agent.runtimeKind === "fake") {
     return new FakeRuntimeAdapter();
+  }
+  if (agent.runtimeKind === "dsh-sdk") {
+    return new DshSdkAdapter(options.dsh);
   }
   throw new Error(`runtime adapter is not implemented: ${agent.runtimeKind}`);
 }
 
 export class RunExecutor {
-  constructor(private readonly repositories: PlatformRepositories) {}
+  constructor(
+    private readonly repositories: PlatformRepositories,
+    private readonly options: RunExecutorOptions,
+  ) {}
 
   async execute(runId: string): Promise<void> {
     const run = await this.requireRun(runId);
     const task = await this.requireTask(run.taskId);
     const agent = await this.repositories.agents.get(run.agentId);
     if (agent === undefined) throw new Error("agent is unavailable");
+    const project = await this.repositories.projects.get(run.projectId);
+    if (project === undefined) throw new Error("project is unavailable");
+    const context = buildTaskContext({ runId, project, task, agent });
+    await this.repositories.contexts.save(context.pack, context.receipt);
+    const workspacePath = resolve(this.options.workspaceRoot, run.projectId);
+    await mkdir(workspacePath, { recursive: true });
 
     await this.repositories.runs.markRunning(runId);
     await this.repositories.runs.appendEvent(
@@ -36,18 +61,30 @@ export class RunExecutor {
       `${agent.name} 开始执行任务`,
       { runtimeKind: agent.runtimeKind },
     );
+    await this.repositories.runs.appendEvent(
+      runId,
+      "context.ready",
+      "ContextPack 已生成并保存",
+      {
+        contextPackId: context.pack.id,
+        sourceCount: context.pack.sources.length,
+        contentHash: context.pack.contentHash,
+      },
+    );
 
     const controller = new AbortController();
     try {
-      const adapter = runtimeFor(agent);
+      const adapter = runtimeFor(agent, this.options);
       for await (const event of adapter.execute(
         {
           runId,
           title: task.title,
           description: task.description,
           acceptance: task.acceptance,
+          instruction: context.pack.renderedPrompt,
           agentName: agent.name,
           runtimeKind: agent.runtimeKind,
+          workspacePath,
         },
         controller.signal,
       )) {

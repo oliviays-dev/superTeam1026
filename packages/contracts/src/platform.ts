@@ -121,6 +121,7 @@ export const runSchema = z.object({
   taskId: z.string().uuid(),
   agentId: z.string().uuid(),
   status: runStatusSchema,
+  contextPackId: z.string().uuid().nullable(),
   inputSnapshot: runInputSnapshotSchema,
   output: z.string().nullable(),
   error: z.string().nullable(),
@@ -176,6 +177,40 @@ export const runDeltaSchema = z.object({
   createdAt: z.string().datetime({ offset: true }),
 });
 export type RunDelta = z.infer<typeof runDeltaSchema>;
+
+export const contextSourceSchema = z.object({
+  type: z.enum(["project", "task", "acceptance", "attachment", "memory"]),
+  id: z.string(),
+  label: z.string(),
+});
+export type ContextSource = z.infer<typeof contextSourceSchema>;
+
+export const contextPackSchema = z.object({
+  id: z.string().uuid(),
+  runId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  taskId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  identity: z.object({
+    name: z.string(),
+    runtimeKind: runtimeKindSchema,
+  }),
+  sources: z.array(contextSourceSchema),
+  renderedPrompt: z.string(),
+  contentHash: z.string().length(64),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type ContextPack = z.infer<typeof contextPackSchema>;
+
+export const contextReceiptSchema = z.object({
+  contextPackId: z.string().uuid(),
+  runId: z.string().uuid(),
+  usedSources: z.array(contextSourceSchema),
+  excludedSources: z.array(contextSourceSchema),
+  reason: z.string(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type ContextReceipt = z.infer<typeof contextReceiptSchema>;
 
 export const runDetailSchema = z.object({
   run: runSchema,
