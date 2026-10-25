@@ -81,6 +81,10 @@ export interface RunRow {
   input_snapshot: Run["inputSnapshot"];
   output: string | null;
   error: string | null;
+  attempt: number;
+  timeout_at: Date | null;
+  workflow_instance_id: string | null;
+  workflow_node_id: string | null;
   observability: Run["observability"];
   created_at: Date;
   started_at: Date | null;
@@ -189,6 +193,10 @@ export function runFromRow(row: RunRow): Run {
     inputSnapshot: row.input_snapshot,
     output: row.output,
     error: row.error,
+    attempt: row.attempt,
+    timeoutAt: row.timeout_at?.toISOString() ?? null,
+    workflowInstanceId: row.workflow_instance_id,
+    workflowNodeId: row.workflow_node_id,
     observability: row.observability,
     createdAt: row.created_at.toISOString(),
     startedAt: row.started_at?.toISOString() ?? null,

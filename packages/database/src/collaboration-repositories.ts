@@ -512,6 +512,15 @@ export class WorkflowRepository {
     return row === undefined ? undefined : workflowFromRow(row);
   }
 
+  async setGraphIfMissing(id: string, graph: WorkflowGraph): Promise<void> {
+    await this.database.query(
+      `UPDATE workflow_definitions
+       SET graph = $2::jsonb, updated_at = NOW()
+       WHERE id = $1 AND graph IS NULL`,
+      [id, JSON.stringify(graph)],
+    );
+  }
+
   async start(
     workflow: WorkflowDefinition,
     title: string,
@@ -735,7 +744,8 @@ export class WorkbenchRepository {
          (SELECT COUNT(*) FROM tasks WHERE status = 'review') AS review_tasks,
          (SELECT COUNT(*) FROM runs WHERE status IN ('queued', 'running', 'waiting_approval')) AS active_runs,
          (SELECT COUNT(*) FROM memory_topics) AS memory_topics,
-         (SELECT COUNT(*) FROM workflow_instances WHERE status = 'active') AS workflows,
+         (SELECT COUNT(*) FROM workflow_instances
+          WHERE status IN ('active', 'waiting', 'blocked', 'paused')) AS workflows,
          (SELECT COUNT(*) FROM meetings WHERE status = 'open') AS meetings`,
     );
     const row = result.rows[0]!;
@@ -787,6 +797,15 @@ function workflowInstanceFromRow(row: WorkflowInstanceRow): WorkflowInstance {
     projectId: row.project_id,
     title: row.title,
     status: row.status,
+    definitionKey: "legacy-workflow",
+    definitionVersion: 1,
+    parentInstanceId: null,
+    parentNodeId: null,
+    failureReason: null,
+    pausedAt: null,
+    revision: 1,
+    runtime: { nodes: [], edges: [], context: {} },
+    graph: null,
     currentStep: row.current_step,
     steps: row.steps,
     createdAt: row.created_at.toISOString(),

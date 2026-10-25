@@ -492,3 +492,128 @@ ALTER TABLE workflow_definitions
   ADD COLUMN IF NOT EXISTS source_md TEXT NOT NULL DEFAULT '',
   ADD COLUMN IF NOT EXISTS graph JSONB;
 `;
+
+export const WORKFLOW_RUNTIME_SCHEMA_SQL = `
+ALTER TABLE workflow_instances
+  DROP CONSTRAINT IF EXISTS workflow_instances_status_check;
+
+ALTER TABLE workflow_instances
+  ADD CONSTRAINT workflow_instances_status_check
+  CHECK (status IN (
+    'active',
+    'waiting',
+    'blocked',
+    'paused',
+    'completed',
+    'failed',
+    'cancelled'
+  ));
+
+ALTER TABLE workflow_instances
+  ADD COLUMN IF NOT EXISTS definition_key TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS definition_version INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS parent_instance_id UUID
+    REFERENCES workflow_instances(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS parent_node_id TEXT,
+  ADD COLUMN IF NOT EXISTS runtime_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+  ADD COLUMN IF NOT EXISTS runtime_nodes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS runtime_edges JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS failure_reason TEXT,
+  ADD COLUMN IF NOT EXISTS paused_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS start_idempotency_key TEXT;
+
+UPDATE workflow_instances AS instance
+SET
+  definition_key = COALESCE(
+    NULLIF(instance.definition_key, ''),
+    definition.graph->>'key',
+    definition.name
+  ),
+  definition_version = COALESCE(
+    NULLIF(definition.graph->>'version', '')::integer,
+    instance.definition_version,
+    1
+  )
+FROM workflow_definitions AS definition
+WHERE definition.id = instance.workflow_id
+  AND (
+    instance.definition_key = ''
+    OR instance.definition_version = 1
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_instance_start_idempotency_idx
+  ON workflow_instances(workflow_id, start_idempotency_key)
+  WHERE start_idempotency_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS workflow_instances_project_idx
+  ON workflow_instances(project_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS workflow_instances_parent_idx
+  ON workflow_instances(parent_instance_id)
+  WHERE parent_instance_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS workflow_approvals (
+  id UUID PRIMARY KEY,
+  instance_id UUID NOT NULL
+    REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL,
+  round INTEGER NOT NULL DEFAULT 1,
+  approver_id TEXT NOT NULL,
+  approver_role_id UUID REFERENCES project_roles(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected', 'transferred')),
+  note TEXT NOT NULL DEFAULT '',
+  acted_by TEXT,
+  acted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (instance_id, node_id, round, approver_id)
+);
+
+CREATE INDEX IF NOT EXISTS workflow_approvals_instance_idx
+  ON workflow_approvals(instance_id, node_id, created_at);
+
+CREATE TABLE IF NOT EXISTS workflow_audit_events (
+  id UUID PRIMARY KEY,
+  instance_id UUID NOT NULL
+    REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  node_id TEXT,
+  seq BIGINT NOT NULL,
+  kind TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  data JSONB,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (instance_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS workflow_audit_instance_idx
+  ON workflow_audit_events(instance_id, seq);
+
+CREATE TABLE IF NOT EXISTS workflow_command_receipts (
+  id UUID PRIMARY KEY,
+  instance_id UUID NOT NULL
+    REFERENCES workflow_instances(id) ON DELETE CASCADE,
+  command_key TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (instance_id, command_key, idempotency_key)
+);
+
+ALTER TABLE runs
+  ADD COLUMN IF NOT EXISTS attempt INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS timeout_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS idempotency_key TEXT,
+  ADD COLUMN IF NOT EXISTS workflow_instance_id UUID
+    REFERENCES workflow_instances(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS workflow_node_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS runs_workflow_attempt_idx
+  ON runs(workflow_instance_id, workflow_node_id, attempt)
+  WHERE workflow_instance_id IS NOT NULL
+    AND workflow_node_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS runs_idempotency_idx
+  ON runs(idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+`;

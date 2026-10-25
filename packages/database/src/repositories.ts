@@ -51,6 +51,7 @@ import {
   WorkflowRepository,
 } from "./collaboration-repositories.js";
 import { TaskCollaborationRepository } from "./task-collaboration-repository.js";
+import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -497,6 +498,11 @@ export interface EnqueueRunInput {
   readonly runId: string;
   readonly task: Task;
   readonly inputSnapshot: RunInputSnapshot;
+  readonly attempt?: number;
+  readonly timeoutAt?: string;
+  readonly idempotencyKey?: string;
+  readonly workflowInstanceId?: string;
+  readonly workflowNodeId?: string;
 }
 
 export class RunRepository {
@@ -507,10 +513,11 @@ export class RunRepository {
       const result = await client.query<RunRow>(
         `INSERT INTO runs (
            id, project_id, task_id, agent_id, status, input_snapshot,
-           observability, created_at, updated_at
+           observability, attempt, timeout_at, idempotency_key,
+           workflow_instance_id, workflow_node_id, created_at, updated_at
          ) VALUES (
            $1, $2, $3, $4, 'queued', $5::jsonb,
-           $6::jsonb, NOW(), NOW()
+           $6::jsonb, $7, $8, $9, $10, $11, NOW(), NOW()
          )
          RETURNING *`,
         [
@@ -525,6 +532,11 @@ export class RunRepository {
             textStreaming: "delta",
             subagentVisibility: "none",
           }),
+          input.attempt ?? 1,
+          input.timeoutAt ?? null,
+          input.idempotencyKey ?? null,
+          input.workflowInstanceId ?? null,
+          input.workflowNodeId ?? null,
         ],
       );
       await client.query(
@@ -580,16 +592,26 @@ export class RunRepository {
 
   async finish(
     id: string,
-    status: "completed" | "failed" | "cancelled",
+    status: "completed" | "failed" | "cancelled" | "timeout" | "interrupted",
     output: string | null,
     error: string | null,
   ): Promise<void> {
     await this.database.query(
       `UPDATE runs
        SET status = $2, output = $3, error = $4, ended_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')`,
+       WHERE id = $1 AND status IN ('queued', 'running')`,
       [id, status, output, error],
     );
+  }
+
+  async timeout(id: string, error: string): Promise<boolean> {
+    const result = await this.database.query(
+      `UPDATE runs
+       SET status = 'timeout', error = $2, ended_at = NOW(), updated_at = NOW()
+       WHERE id = $1 AND status IN ('queued', 'running')`,
+      [id, error.slice(0, 4_000)],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async appendEvent(
@@ -774,6 +796,7 @@ export class PlatformRepositories {
   readonly memory: MemoryRepository;
   readonly reviews: ReviewRepository;
   readonly workflows: WorkflowRepository;
+  readonly workflowRuntime: WorkflowRuntimeRepository;
   readonly meetings: MeetingRepository;
   readonly workbench: WorkbenchRepository;
 
@@ -790,6 +813,7 @@ export class PlatformRepositories {
     this.memory = new MemoryRepository(database);
     this.reviews = new ReviewRepository(database);
     this.workflows = new WorkflowRepository(database);
+    this.workflowRuntime = new WorkflowRuntimeRepository(database);
     this.meetings = new MeetingRepository(database);
     this.workbench = new WorkbenchRepository(database);
   }
