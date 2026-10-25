@@ -1593,7 +1593,7 @@ export class PlatformApplication {
     idempotencyKey?: string,
   ): Promise<WorkflowInstance> {
     const instance = await this.getWorkflowInstance(instanceId);
-    await this.assertWorkflowActor(instance.projectId, actorId);
+    await this.assertWorkflowOwner(instance.projectId, actorId);
     if (instance.status !== "active" && instance.status !== "waiting") {
       throw new ApplicationError(
         "workflow_not_pausable",
@@ -1640,7 +1640,7 @@ export class PlatformApplication {
     idempotencyKey?: string,
   ): Promise<WorkflowInstance> {
     const instance = await this.getWorkflowInstance(instanceId);
-    await this.assertWorkflowActor(instance.projectId, actorId);
+    await this.assertWorkflowOwner(instance.projectId, actorId);
     if (instance.status !== "paused") {
       throw new ApplicationError(
         "workflow_not_paused",
@@ -1687,7 +1687,7 @@ export class PlatformApplication {
     idempotencyKey?: string,
   ): Promise<WorkflowInstance> {
     const instance = await this.getWorkflowInstance(instanceId);
-    await this.assertWorkflowActor(instance.projectId, actorId);
+    await this.assertWorkflowOwner(instance.projectId, actorId);
     if (instance.graph === null) {
       throw new ApplicationError(
         "workflow_graph_missing",
@@ -2375,6 +2375,25 @@ export class PlatformApplication {
       throw new ApplicationError(
         "forbidden",
         "Only an active project member can operate this workflow",
+        403,
+      );
+    }
+  }
+
+  private async assertWorkflowOwner(
+    projectId: string,
+    actorId: string,
+  ): Promise<void> {
+    const members =
+      await this.repositories.projectMemberships.listMembers(projectId);
+    const member = members.find(
+      (candidate) =>
+        candidate.status === "active" && candidate.actorId === actorId,
+    );
+    if (member === undefined || !member.owner) {
+      throw new ApplicationError(
+        "forbidden",
+        "Project owner permission is required to control this workflow",
         403,
       );
     }
