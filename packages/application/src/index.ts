@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type {
   Agent,
+  AgentDetail,
   Artifact,
+  CreateAgentInput,
   CreateMeetingInput,
   CreateProjectInput,
   CreateTaskInput,
+  CreateTaskMessageInput,
   CreateWorkflowInput,
   Meeting,
   MeetingDetail,
@@ -14,7 +17,12 @@ import type {
   RunDetail,
   RunInputSnapshot,
   Task,
+  TaskDetail,
+  TaskMessage,
   TaskReviewInput,
+  UpdateAgentInput,
+  UpdateProjectInput,
+  UpdateTaskInput,
   WorkbenchSummary,
   WorkflowDefinition,
   WorkflowInstance,
@@ -44,8 +52,82 @@ export class PlatformApplication {
     return this.repositories.projects.create(input);
   }
 
+  async updateProject(id: string, input: UpdateProjectInput): Promise<Project> {
+    try {
+      const project = await this.repositories.projects.update(id, input);
+      if (project === undefined) {
+        throw new ApplicationError(
+          "project_not_found",
+          "Project not found",
+          404,
+        );
+      }
+      return project;
+    } catch (error) {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        error.code === "23505"
+      ) {
+        throw new ApplicationError(
+          "project_code_conflict",
+          "Project code already exists",
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
   listAgents(): Promise<Agent[]> {
     return this.repositories.agents.list();
+  }
+
+  listAllAgents(): Promise<Agent[]> {
+    return this.repositories.agents.list(true);
+  }
+
+  async getAgent(id: string): Promise<AgentDetail> {
+    const agent = await this.repositories.agents.get(id, true);
+    if (agent === undefined) {
+      throw new ApplicationError("agent_not_found", "Agent not found", 404);
+    }
+    return {
+      agent,
+      events: await this.repositories.agents.listEvents(id),
+    };
+  }
+
+  createAgent(input: CreateAgentInput): Promise<Agent> {
+    return this.repositories.agents.create(input, "local-admin", "local-admin");
+  }
+
+  async updateAgent(id: string, input: UpdateAgentInput): Promise<AgentDetail> {
+    const agent = await this.repositories.agents.update(
+      id,
+      input,
+      "local-admin",
+    );
+    if (agent === undefined) {
+      throw new ApplicationError("agent_not_found", "Agent not found", 404);
+    }
+    return this.getAgent(id);
+  }
+
+  async setAgentStatus(
+    id: string,
+    status: Agent["status"],
+  ): Promise<AgentDetail> {
+    const agent = await this.repositories.agents.setStatus(
+      id,
+      status,
+      "local-admin",
+    );
+    if (agent === undefined) {
+      throw new ApplicationError("agent_not_found", "Agent not found", 404);
+    }
+    return this.getAgent(id);
   }
 
   listTasks(projectId?: string): Promise<Task[]> {
@@ -58,6 +140,13 @@ export class PlatformApplication {
       throw new ApplicationError("task_not_found", "Task not found", 404);
     }
     return task;
+  }
+
+  async getTaskDetail(id: string): Promise<TaskDetail> {
+    return {
+      task: await this.getTask(id),
+      messages: await this.repositories.tasks.listMessages(id),
+    };
   }
 
   async createTask(input: CreateTaskInput): Promise<Task> {
@@ -78,6 +167,38 @@ export class PlatformApplication {
   async listTaskRuns(taskId: string) {
     await this.getTask(taskId);
     return this.repositories.runs.listByTask(taskId);
+  }
+
+  async updateTask(id: string, input: UpdateTaskInput): Promise<TaskDetail> {
+    const task = await this.repositories.tasks.update(id, input);
+    if (task === undefined) {
+      throw new ApplicationError("task_not_found", "Task not found", 404);
+    }
+    return this.getTaskDetail(id);
+  }
+
+  async postTaskMessage(
+    id: string,
+    input: CreateTaskMessageInput,
+  ): Promise<TaskMessage> {
+    await this.getTask(id);
+    if (input.replyToId !== undefined) {
+      const messages = await this.repositories.tasks.listMessages(id);
+      if (!messages.some((message) => message.id === input.replyToId)) {
+        throw new ApplicationError(
+          "reply_target_not_found",
+          "Reply target was not found on this task",
+          400,
+        );
+      }
+    }
+    return this.repositories.tasks.addMessage(
+      id,
+      input,
+      "human",
+      "local-admin",
+      "Local Admin",
+    );
   }
 
   async dispatchTask(taskId: string): Promise<{ runId: string }> {

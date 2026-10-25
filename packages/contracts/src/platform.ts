@@ -27,6 +27,20 @@ export const createProjectInputSchema = z.object({
 });
 export type CreateProjectInput = z.infer<typeof createProjectInputSchema>;
 
+export const updateProjectInputSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional(),
+  code: z
+    .string()
+    .trim()
+    .min(1)
+    .max(40)
+    .regex(/^[A-Z][A-Z0-9-]*$/)
+    .optional(),
+  description: z.string().trim().max(2_000).optional(),
+  status: projectStatusSchema.optional(),
+});
+export type UpdateProjectInput = z.infer<typeof updateProjectInputSchema>;
+
 export const taskStatusSchema = z.enum([
   "queued",
   "in_progress",
@@ -58,6 +72,39 @@ export const createTaskInputSchema = z.object({
 });
 export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
 
+export const updateTaskInputSchema = z.object({
+  title: z.string().trim().min(1).max(240).optional(),
+  description: z.string().trim().min(1).max(20_000).optional(),
+  acceptance: z.array(z.string().trim().min(1).max(1_000)).max(50).optional(),
+});
+export type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
+
+export const taskMessageSchema = z.object({
+  id: z.string().uuid(),
+  taskId: z.string().uuid(),
+  authorType: z.enum(["human", "agent", "system"]),
+  authorId: z.string(),
+  authorName: z.string(),
+  content: z.string().min(1).max(20_000),
+  replyToId: z.string().uuid().nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type TaskMessage = z.infer<typeof taskMessageSchema>;
+
+export const createTaskMessageInputSchema = z.object({
+  content: z.string().trim().min(1).max(20_000),
+  replyToId: z.string().uuid().optional(),
+});
+export type CreateTaskMessageInput = z.infer<
+  typeof createTaskMessageInputSchema
+>;
+
+export const taskDetailSchema = z.object({
+  task: taskSchema,
+  messages: z.array(taskMessageSchema),
+});
+export type TaskDetail = z.infer<typeof taskDetailSchema>;
+
 export const runtimeKindSchema = z.enum([
   "fake",
   "dsh-sdk",
@@ -70,12 +117,59 @@ export const agentSchema = z.object({
   id: z.string().uuid(),
   name: z.string().trim().min(1).max(160),
   description: z.string().max(2_000),
+  soul: z.string().max(60_000).default(""),
+  scenarios: z.array(z.string().trim().min(1).max(1_000)).max(50).default([]),
+  goals: z.array(z.string().trim().min(1).max(1_000)).max(50).default([]),
+  tools: z.array(z.string().trim().min(1).max(160)).max(200).default([]),
   runtimeKind: runtimeKindSchema,
   status: z.enum(["active", "disabled"]),
+  source: z.enum(["platform", "personal"]).default("personal"),
+  ownerId: z.string(),
+  version: z.number().int().positive(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type Agent = z.infer<typeof agentSchema>;
+
+export const createAgentInputSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  description: z.string().trim().max(2_000).default(""),
+  soul: z.string().max(60_000).default(""),
+  scenarios: z.array(z.string().trim().min(1).max(1_000)).max(50).default([]),
+  goals: z.array(z.string().trim().min(1).max(1_000)).max(50).default([]),
+  tools: z.array(z.string().trim().min(1).max(160)).max(200).default([]),
+  runtimeKind: runtimeKindSchema.default("fake"),
+  source: z.enum(["platform", "personal"]).default("personal"),
+});
+export type CreateAgentInput = z.infer<typeof createAgentInputSchema>;
+
+export const updateAgentInputSchema = createAgentInputSchema.partial().extend({
+  status: z.enum(["active", "disabled"]).optional(),
+  expectedVersion: z.number().int().positive().optional(),
+});
+export type UpdateAgentInput = z.infer<typeof updateAgentInputSchema>;
+
+export const agentStatusInputSchema = z.object({
+  status: z.enum(["active", "disabled"]),
+});
+export type AgentStatusInput = z.infer<typeof agentStatusInputSchema>;
+
+export const agentEventSchema = z.object({
+  id: z.string().uuid(),
+  agentId: z.string().uuid(),
+  seq: z.number().int().positive(),
+  kind: z.enum(["created", "updated", "status"]),
+  message: z.string().min(1).max(4_000),
+  actorId: z.string(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type AgentEvent = z.infer<typeof agentEventSchema>;
+
+export const agentDetailSchema = z.object({
+  agent: agentSchema,
+  events: z.array(agentEventSchema),
+});
+export type AgentDetail = z.infer<typeof agentDetailSchema>;
 
 export const runStatusSchema = z.enum([
   "queued",

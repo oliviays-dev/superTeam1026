@@ -262,3 +262,60 @@ CREATE TABLE IF NOT EXISTS meeting_messages (
 CREATE INDEX IF NOT EXISTS meeting_messages_meeting_idx
   ON meeting_messages(meeting_id, created_at);
 `;
+
+export const AGENT_MANAGEMENT_SCHEMA_SQL = `
+ALTER TABLE agents
+  ADD COLUMN IF NOT EXISTS soul TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS scenarios JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS goals JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS tools JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'personal',
+  ADD COLUMN IF NOT EXISTS owner_id TEXT NOT NULL DEFAULT 'local-admin',
+  ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS agent_events (
+  id UUID PRIMARY KEY,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  seq BIGINT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('created', 'updated', 'status')),
+  message TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (agent_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS agent_events_agent_seq_idx
+  ON agent_events(agent_id, seq);
+
+INSERT INTO agent_events (
+  id, agent_id, seq, kind, message, actor_id, created_at
+)
+SELECT
+  gen_random_uuid(),
+  id,
+  1,
+  'created',
+  'Agent 由平台初始化',
+  'system',
+  created_at
+FROM agents
+WHERE NOT EXISTS (
+  SELECT 1 FROM agent_events WHERE agent_events.agent_id = agents.id
+);
+`;
+
+export const TASK_COLLABORATION_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS task_messages (
+  id UUID PRIMARY KEY,
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  author_type TEXT NOT NULL CHECK (author_type IN ('human', 'agent', 'system')),
+  author_id TEXT NOT NULL,
+  author_name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  reply_to_id UUID REFERENCES task_messages(id),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_messages_task_idx
+  ON task_messages(task_id, created_at);
+`;

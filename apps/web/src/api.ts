@@ -1,8 +1,11 @@
 import type {
   Agent,
+  AgentDetail,
   Artifact,
   ContextPack,
   ContextReceipt,
+  CreateAgentInput,
+  CreateTaskMessageInput,
   CreateProjectInput,
   CreateTaskInput,
   CreateWorkflowInput,
@@ -16,6 +19,11 @@ import type {
   RunDelta,
   RunDetail,
   Task,
+  TaskDetail,
+  TaskMessage,
+  UpdateAgentInput,
+  UpdateProjectInput,
+  UpdateTaskInput,
   WorkbenchSummary,
   WorkflowDefinition,
   WorkflowInstance,
@@ -62,8 +70,54 @@ export function createProject(input: CreateProjectInput): Promise<Project> {
   });
 }
 
+export function updateProject(
+  projectId: string,
+  input: UpdateProjectInput,
+): Promise<Project> {
+  return request(`/projects/${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function listAgents(): Promise<Agent[]> {
   return (await request<ListResponse<Agent>>("/agents")).items;
+}
+
+export async function listAllAgents(): Promise<Agent[]> {
+  return (await request<ListResponse<Agent>>("/agents?includeDisabled=1"))
+    .items;
+}
+
+export function getAgent(id: string): Promise<AgentDetail> {
+  return request(`/agents/${id}`);
+}
+
+export function createAgent(input: CreateAgentInput): Promise<Agent> {
+  return request("/agents", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateAgent(
+  id: string,
+  input: UpdateAgentInput,
+): Promise<AgentDetail> {
+  return request(`/agents/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function setAgentStatus(
+  id: string,
+  status: Agent["status"],
+): Promise<AgentDetail> {
+  return request(`/agents/${id}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status }),
+  });
 }
 
 export async function listTasks(projectId?: string): Promise<Task[]> {
@@ -76,6 +130,30 @@ export async function listTasks(projectId?: string): Promise<Task[]> {
 
 export function createTask(input: CreateTaskInput): Promise<Task> {
   return request("/tasks", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateTask(
+  taskId: string,
+  input: UpdateTaskInput,
+): Promise<TaskDetail> {
+  return request(`/tasks/${taskId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getTaskDetail(taskId: string): Promise<TaskDetail> {
+  return request(`/tasks/${taskId}/detail`);
+}
+
+export function postTaskMessage(
+  taskId: string,
+  input: CreateTaskMessageInput,
+): Promise<TaskMessage> {
+  return request(`/tasks/${taskId}/messages`, {
     method: "POST",
     body: JSON.stringify(input),
   });

@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type {
   Agent,
+  AgentEvent,
+  CreateAgentInput,
   CreateProjectInput,
   CreateTaskInput,
+  CreateTaskMessageInput,
   PlatformRunEvent,
   PlatformRunEventType,
   Project,
@@ -10,23 +13,31 @@ import type {
   RunDelta,
   RunInputSnapshot,
   Task,
+  TaskMessage,
   TaskStatus,
+  UpdateAgentInput,
+  UpdateProjectInput,
+  UpdateTaskInput,
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import { Database } from "./database.js";
 import {
+  agentEventFromRow,
   agentFromRow,
   projectFromRow,
   runDeltaFromRow,
   runEventFromRow,
   runFromRow,
+  taskMessageFromRow,
   taskFromRow,
   type AgentRow,
+  type AgentEventRow,
   type ProjectRow,
   type RunDeltaRow,
   type RunEventRow,
   type RunRow,
   type TaskRow,
+  type TaskMessageRow,
 } from "./rows.js";
 import { DEFAULT_AGENT_ID } from "./schema.js";
 import { ContextRepository } from "./context-repository.js";
@@ -71,27 +82,188 @@ export class ProjectRepository {
     );
     return projectFromRow(result.rows[0]!);
   }
+
+  async update(
+    id: string,
+    input: UpdateProjectInput,
+  ): Promise<Project | undefined> {
+    const result = await this.database.query<ProjectRow>(
+      `UPDATE projects
+       SET
+         name = COALESCE($2, name),
+         code = COALESCE($3, code),
+         description = COALESCE($4, description),
+         status = COALESCE($5, status),
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        id,
+        input.name ?? null,
+        input.code ?? null,
+        input.description ?? null,
+        input.status ?? null,
+      ],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : projectFromRow(row);
+  }
 }
 
 export class AgentRepository {
   constructor(private readonly database: Database) {}
 
-  async list(): Promise<Agent[]> {
+  async list(includeDisabled = false): Promise<Agent[]> {
     const result = await this.database.query<AgentRow>(
       `SELECT * FROM agents
-       WHERE status = 'active'
-       ORDER BY CASE runtime_kind WHEN 'fake' THEN 0 ELSE 1 END, name`,
+       WHERE ($1::boolean OR status = 'active')
+       ORDER BY
+         CASE runtime_kind WHEN 'fake' THEN 0 ELSE 1 END,
+         status,
+         name`,
+      [includeDisabled],
     );
     return result.rows.map(agentFromRow);
   }
 
-  async get(id: string): Promise<Agent | undefined> {
+  async get(id: string, includeDisabled = false): Promise<Agent | undefined> {
     const result = await this.database.query<AgentRow>(
-      "SELECT * FROM agents WHERE id = $1 AND status = 'active'",
-      [id],
+      `SELECT * FROM agents
+       WHERE id = $1 AND ($2::boolean OR status = 'active')`,
+      [id, includeDisabled],
     );
     const row = result.rows[0];
     return row === undefined ? undefined : agentFromRow(row);
+  }
+
+  async create(
+    input: CreateAgentInput,
+    ownerId: string,
+    actorId: string,
+  ): Promise<Agent> {
+    return this.database.transaction(async (client) => {
+      const result = await client.query<AgentRow>(
+        `INSERT INTO agents (
+           id, name, description, soul, scenarios, goals, tools,
+           runtime_kind, status, source, owner_id, version, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
+           $8, 'active', $9, $10, 1, NOW(), NOW()
+         )
+         RETURNING *`,
+        [
+          randomUUID(),
+          input.name,
+          input.description,
+          input.soul,
+          JSON.stringify(input.scenarios),
+          JSON.stringify(input.goals),
+          JSON.stringify(input.tools),
+          input.runtimeKind,
+          input.source,
+          ownerId,
+        ],
+      );
+      const agent = agentFromRow(result.rows[0]!);
+      await this.appendEventWithClient(
+        client,
+        agent.id,
+        "created",
+        `创建 AI 伙伴“${agent.name}”`,
+        actorId,
+      );
+      return agent;
+    });
+  }
+
+  async update(
+    id: string,
+    input: UpdateAgentInput,
+    actorId: string,
+  ): Promise<Agent | undefined> {
+    return this.database.transaction(async (client) => {
+      const result = await client.query<AgentRow>(
+        `UPDATE agents
+         SET
+           name = COALESCE($2, name),
+           description = COALESCE($3, description),
+           soul = COALESCE($4, soul),
+           scenarios = COALESCE($5::jsonb, scenarios),
+           goals = COALESCE($6::jsonb, goals),
+           tools = COALESCE($7::jsonb, tools),
+           runtime_kind = COALESCE($8, runtime_kind),
+           source = COALESCE($9, source),
+           status = COALESCE($10, status),
+           version = version + 1,
+           updated_at = NOW()
+         WHERE id = $1
+           AND ($11::integer IS NULL OR version = $11)
+         RETURNING *`,
+        [
+          id,
+          input.name ?? null,
+          input.description ?? null,
+          input.soul ?? null,
+          input.scenarios === undefined
+            ? null
+            : JSON.stringify(input.scenarios),
+          input.goals === undefined ? null : JSON.stringify(input.goals),
+          input.tools === undefined ? null : JSON.stringify(input.tools),
+          input.runtimeKind ?? null,
+          input.source ?? null,
+          input.status ?? null,
+          input.expectedVersion ?? null,
+        ],
+      );
+      const row = result.rows[0];
+      if (row === undefined) return undefined;
+      const agent = agentFromRow(row);
+      await this.appendEventWithClient(
+        client,
+        id,
+        "updated",
+        `更新 AI 伙伴“${agent.name}”至 v${agent.version}`,
+        actorId,
+      );
+      return agent;
+    });
+  }
+
+  async setStatus(
+    id: string,
+    status: Agent["status"],
+    actorId: string,
+  ): Promise<Agent | undefined> {
+    return this.database.transaction(async (client) => {
+      const result = await client.query<AgentRow>(
+        `UPDATE agents
+         SET status = $2, version = version + 1, updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [id, status],
+      );
+      const row = result.rows[0];
+      if (row === undefined) return undefined;
+      const agent = agentFromRow(row);
+      await this.appendEventWithClient(
+        client,
+        id,
+        "status",
+        status === "active" ? "AI 伙伴已启用" : "AI 伙伴已停用",
+        actorId,
+      );
+      return agent;
+    });
+  }
+
+  async listEvents(id: string): Promise<AgentEvent[]> {
+    const result = await this.database.query<AgentEventRow>(
+      `SELECT * FROM agent_events
+       WHERE agent_id = $1
+       ORDER BY seq DESC`,
+      [id],
+    );
+    return result.rows.map(agentEventFromRow);
   }
 
   async default(): Promise<Agent> {
@@ -100,6 +272,24 @@ export class AgentRepository {
       throw new Error("default fake agent is not configured");
     }
     return agent;
+  }
+
+  private async appendEventWithClient(
+    client: PoolClient,
+    agentId: string,
+    kind: AgentEvent["kind"],
+    message: string,
+    actorId: string,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO agent_events (
+         id, agent_id, seq, kind, message, actor_id, created_at
+       )
+       SELECT $1, $2, COALESCE(MAX(seq), 0) + 1, $3, $4, $5, NOW()
+       FROM agent_events
+       WHERE agent_id = $2`,
+      [randomUUID(), agentId, kind, message, actorId],
+    );
   }
 }
 
@@ -145,6 +335,65 @@ export class TaskRepository {
       ],
     );
     return taskFromRow(result.rows[0]!);
+  }
+
+  async update(id: string, input: UpdateTaskInput): Promise<Task | undefined> {
+    const result = await this.database.query<TaskRow>(
+      `UPDATE tasks
+       SET
+         title = COALESCE($2, title),
+         description = COALESCE($3, description),
+         acceptance = COALESCE($4::jsonb, acceptance),
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [
+        id,
+        input.title ?? null,
+        input.description ?? null,
+        input.acceptance === undefined
+          ? null
+          : JSON.stringify(input.acceptance),
+      ],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : taskFromRow(row);
+  }
+
+  async listMessages(id: string): Promise<TaskMessage[]> {
+    const result = await this.database.query<TaskMessageRow>(
+      `SELECT * FROM task_messages
+       WHERE task_id = $1
+       ORDER BY created_at, id`,
+      [id],
+    );
+    return result.rows.map(taskMessageFromRow);
+  }
+
+  async addMessage(
+    id: string,
+    input: CreateTaskMessageInput,
+    authorType: TaskMessage["authorType"],
+    authorId: string,
+    authorName: string,
+  ): Promise<TaskMessage> {
+    const result = await this.database.query<TaskMessageRow>(
+      `INSERT INTO task_messages (
+         id, task_id, author_type, author_id, author_name,
+         content, reply_to_id, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       RETURNING *`,
+      [
+        randomUUID(),
+        id,
+        authorType,
+        authorId,
+        authorName,
+        input.content,
+        input.replyToId ?? null,
+      ],
+    );
+    return taskMessageFromRow(result.rows[0]!);
   }
 
   async setStatus(

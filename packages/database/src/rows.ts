@@ -1,10 +1,12 @@
 import type {
   Agent,
+  AgentEvent,
   PlatformRunEvent,
   Project,
   Run,
   RunDelta,
   Task,
+  TaskMessage,
 } from "@pluginmax/contracts";
 
 export interface ProjectRow {
@@ -21,10 +23,27 @@ export interface AgentRow {
   id: string;
   name: string;
   description: string;
+  soul: string;
+  scenarios: string[];
+  goals: string[];
+  tools: string[];
   runtime_kind: Agent["runtimeKind"];
   status: Agent["status"];
+  source: Agent["source"];
+  owner_id: string;
+  version: number;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface AgentEventRow {
+  id: string;
+  agent_id: string;
+  seq: string;
+  kind: AgentEvent["kind"];
+  message: string;
+  actor_id: string;
+  created_at: Date;
 }
 
 export interface TaskRow {
@@ -37,6 +56,17 @@ export interface TaskRow {
   agent_id: string;
   created_at: Date;
   updated_at: Date;
+}
+
+export interface TaskMessageRow {
+  id: string;
+  task_id: string;
+  author_type: TaskMessage["authorType"];
+  author_id: string;
+  author_name: string;
+  content: string;
+  reply_to_id: string | null;
+  created_at: Date;
 }
 
 export interface RunRow {
@@ -91,10 +121,29 @@ export function agentFromRow(row: AgentRow): Agent {
     id: row.id,
     name: row.name,
     description: row.description,
+    soul: row.soul,
+    scenarios: row.scenarios,
+    goals: row.goals,
+    tools: row.tools,
     runtimeKind: row.runtime_kind,
     status: row.status,
+    source: row.source,
+    ownerId: row.owner_id,
+    version: row.version,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+export function agentEventFromRow(row: AgentEventRow): AgentEvent {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    seq: Number(row.seq),
+    kind: row.kind,
+    message: row.message,
+    actorId: row.actor_id,
+    createdAt: row.created_at.toISOString(),
   };
 }
 
@@ -109,6 +158,19 @@ export function taskFromRow(row: TaskRow): Task {
     agentId: row.agent_id,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+export function taskMessageFromRow(row: TaskMessageRow): TaskMessage {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    authorType: row.author_type,
+    authorId: row.author_id,
+    authorName: row.author_name,
+    content: row.content,
+    replyToId: row.reply_to_id,
+    createdAt: row.created_at.toISOString(),
   };
 }
 

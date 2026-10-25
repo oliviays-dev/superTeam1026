@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 import {
   type ApiError,
+  agentStatusInputSchema,
+  createAgentInputSchema,
   createMeetingInputSchema,
   createProjectInputSchema,
+  createTaskMessageInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
   taskReviewInputSchema,
+  updateAgentInputSchema,
+  updateProjectInputSchema,
+  updateTaskInputSchema,
 } from "@pluginmax/contracts";
 import { ApplicationError, PlatformApplication } from "@pluginmax/application";
 import { Database, PlatformRepositories } from "@pluginmax/database";
@@ -43,6 +49,12 @@ const meetingCloseInputSchema = z.object({
 });
 const listTasksQuerySchema = z.object({
   projectId: z.string().uuid().optional(),
+});
+const listAgentsQuerySchema = z.object({
+  includeDisabled: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
 });
 const eventQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().default(0),
@@ -102,8 +114,51 @@ export function buildApi(options: BuildApiOptions): {
     return reply.status(201).send(await application.createProject(input));
   });
 
-  app.get("/api/v1/agents", async (_request, reply) => {
-    return reply.send({ items: await application.listAgents() });
+  app.get("/api/v1/projects/:projectId", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const projects = await application.listProjects();
+    const project = projects.find((item) => item.id === projectId);
+    if (project === undefined) {
+      throw new ApplicationError("project_not_found", "Project not found", 404);
+    }
+    return reply.send(project);
+  });
+
+  app.patch("/api/v1/projects/:projectId", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const input = updateProjectInputSchema.parse(request.body);
+    return reply.send(await application.updateProject(projectId, input));
+  });
+
+  app.get("/api/v1/agents", async (request, reply) => {
+    const { includeDisabled } = listAgentsQuerySchema.parse(request.query);
+    return reply.send({
+      items: includeDisabled
+        ? await application.listAllAgents()
+        : await application.listAgents(),
+    });
+  });
+
+  app.post("/api/v1/agents", async (request, reply) => {
+    const input = createAgentInputSchema.parse(request.body);
+    return reply.status(201).send(await application.createAgent(input));
+  });
+
+  app.get("/api/v1/agents/:id", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    return reply.send(await application.getAgent(id));
+  });
+
+  app.patch("/api/v1/agents/:id", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = updateAgentInputSchema.parse(request.body);
+    return reply.send(await application.updateAgent(id, input));
+  });
+
+  app.post("/api/v1/agents/:id/status", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const { status } = agentStatusInputSchema.parse(request.body);
+    return reply.send(await application.setAgentStatus(id, status));
   });
 
   app.get("/api/v1/tasks", async (request, reply) => {
@@ -121,6 +176,17 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.getTask(id));
   });
 
+  app.get("/api/v1/tasks/:id/detail", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    return reply.send(await application.getTaskDetail(id));
+  });
+
+  app.patch("/api/v1/tasks/:id", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = updateTaskInputSchema.parse(request.body);
+    return reply.send(await application.updateTask(id, input));
+  });
+
   app.post("/api/v1/tasks/:id/dispatch", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     return reply.status(202).send(await application.dispatchTask(id));
@@ -135,6 +201,12 @@ export function buildApi(options: BuildApiOptions): {
   app.get("/api/v1/tasks/:id/runs", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     return reply.send({ items: await application.listTaskRuns(id) });
+  });
+
+  app.post("/api/v1/tasks/:id/messages", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = createTaskMessageInputSchema.parse(request.body);
+    return reply.status(201).send(await application.postTaskMessage(id, input));
   });
 
   app.get("/api/v1/runs/:runId", async (request, reply) => {
