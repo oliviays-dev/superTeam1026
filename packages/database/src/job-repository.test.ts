@@ -182,4 +182,27 @@ integration("JobRepository PostgreSQL semantics", () => {
       undefined,
     );
   });
+
+  it("dead-letters a job immediately when retry is disabled", async () => {
+    const claimed = await jobs.claimNext("worker-non-retryable", 30);
+    const result = await jobs.fail(
+      claimed!.id,
+      "worker-non-retryable",
+      claimed!.leaseToken,
+      "external runtime already started",
+      { retryable: false },
+    );
+    expect(result.outcome).toBe("dead_letter");
+    expect((await jobs.get(claimed!.id))?.status).toBe("dead_letter");
+    const run = await database.query<{ status: string }>(
+      "SELECT status FROM runs WHERE id = $1",
+      [claimed!.runId],
+    );
+    expect(run.rows[0]?.status).toBe("failed");
+    const task = await database.query<{ status: string }>(
+      "SELECT status FROM tasks WHERE id = $1",
+      ["10000000-0000-4000-8000-000000000002"],
+    );
+    expect(task.rows[0]?.status).toBe("queued");
+  });
 });

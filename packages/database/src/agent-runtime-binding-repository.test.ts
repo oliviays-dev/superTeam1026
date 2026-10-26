@@ -116,7 +116,7 @@ integration("agent runtime binding repository", () => {
     return enabled.kind === "updated" ? enabled.runtime : runtime;
   }
 
-  it("applies migration 22 without changing migration 21 data", async () => {
+  it("applies migration 23 without changing migration 21/22 data", async () => {
     const schema = `batch13c_${randomUUID().replaceAll("-", "")}`;
     await database.query(`CREATE SCHEMA ${schema}`);
     const separator = databaseUrl!.includes("?") ? "&" : "?";
@@ -126,15 +126,24 @@ integration("agent runtime binding repository", () => {
       )}`,
     );
     try {
-      await migrate(isolated, 21);
+      await migrate(isolated, 22);
       const before = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(before.rows[0]?.version).toBe(21);
-      const tableBefore = await isolated.query<{ name: string | null }>(
+      expect(before.rows[0]?.version).toBe(22);
+      const bindingTable = await isolated.query<{ name: string | null }>(
         "SELECT to_regclass('agent_runtime_bindings')::text AS name",
       );
-      expect(tableBefore.rows[0]?.name).toBeNull();
+      expect(bindingTable.rows[0]?.name).toBe("agent_runtime_bindings");
+      const executionColumnBefore = await isolated.query<{ name: string | null }>(
+        `SELECT column_name AS name
+         FROM information_schema.columns
+         WHERE table_schema = $1
+           AND table_name = 'runs'
+           AND column_name = 'execution_snapshot'`,
+        [schema],
+      );
+      expect(executionColumnBefore.rows[0]?.name).toBeUndefined();
 
       const runtimeId = randomUUID();
       await isolated.query(
@@ -156,11 +165,20 @@ integration("agent runtime binding repository", () => {
       const after = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(after.rows[0]?.version).toBe(22);
+      expect(after.rows[0]?.version).toBe(23);
       const tableAfter = await isolated.query<{ name: string | null }>(
         "SELECT to_regclass('agent_runtime_bindings')::text AS name",
       );
       expect(tableAfter.rows[0]?.name).toBe("agent_runtime_bindings");
+      const executionColumnAfter = await isolated.query<{ name: string }>(
+        `SELECT column_name AS name
+         FROM information_schema.columns
+         WHERE table_schema = $1
+           AND table_name = 'runs'
+           AND column_name = 'execution_snapshot'`,
+        [schema],
+      );
+      expect(executionColumnAfter.rows[0]?.name).toBe("execution_snapshot");
       const preserved = await isolated.query<{ count: string }>(
         "SELECT COUNT(*)::text AS count FROM external_runtimes WHERE id = $1",
         [runtimeId],

@@ -44,11 +44,13 @@ cd "$ROOT"
 TEST_DATABASE_URL="$database_url" CI=true \
   pnpm vitest run \
     packages/database/src/agent-runtime-binding-repository.test.ts \
+    packages/database/src/job-repository.test.ts \
     apps/api/src/app.test.ts \
     apps/api/src/meeting-ai-participation.test.ts \
     apps/api/src/ai-direct-chat.test.ts \
     apps/api/src/external-runtimes.test.ts \
     apps/api/src/agent-runtime-bindings.test.ts \
+    apps/api/src/external-runtime-execution.test.ts \
     apps/worker/src/runtime-probe-service.test.ts \
     --no-file-parallelism
 

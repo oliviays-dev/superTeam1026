@@ -1,5 +1,5 @@
 import type { ClaimedJob, PlatformRepositories } from "@pluginmax/database";
-import type { RunExecutor } from "@pluginmax/application";
+import { RunNonRetryableError, type RunExecutor } from "@pluginmax/application";
 import { describe, expect, it, vi } from "vitest";
 import {
   WorkerShutdownError,
@@ -150,5 +150,27 @@ describe("WorkerRuntime", () => {
     await runtime.stop("SIGTERM");
     await running;
     expect(interrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("dead-letters non-retryable external execution errors immediately", async () => {
+    const { runtime, fail } = harness({
+      jobs: [claimed(1)],
+      execute: async () => {
+        throw new RunNonRetryableError("external process already started");
+      },
+    });
+    const running = runtime.run();
+    await vi.waitFor(() => expect(fail).toHaveBeenCalledTimes(1), {
+      timeout: 2_000,
+    });
+    await runtime.stop();
+    await running;
+    expect(fail).toHaveBeenCalledWith(
+      "job-1",
+      "worker-test",
+      "token-1",
+      "external process already started",
+      expect.objectContaining({ retryable: false }),
+    );
   });
 });

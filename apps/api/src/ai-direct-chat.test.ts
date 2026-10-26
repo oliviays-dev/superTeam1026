@@ -556,9 +556,14 @@ integration("AI direct chat", () => {
     const unavailableChat = await request("POST", "/api/v1/direct-chats", {
       agentId: unavailable.id,
     });
-    expect(unavailableChat.statusCode).toBe(409);
-    expect(unavailableChat.body).toMatchObject({
-      code: "runtime_unavailable",
+    expect(unavailableChat.statusCode).toBe(200);
+    const unavailableSend = await send(
+      (unavailableChat.body as { id: string }).id,
+      "External runtime still needs a binding",
+    );
+    expect(unavailableSend.statusCode).toBe(409);
+    expect(unavailableSend.body).toMatchObject({
+      code: "runtime_binding_missing",
     });
   });
 

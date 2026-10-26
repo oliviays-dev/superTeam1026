@@ -2294,3 +2294,21 @@ CREATE INDEX IF NOT EXISTS external_runtime_events_agent_idx
   ON external_runtime_events(agent_id, created_at DESC)
   WHERE agent_id IS NOT NULL;
 `;
+
+export const EXTERNAL_RUN_EXECUTION_SCHEMA_SQL = `
+ALTER TABLE runs
+  ADD COLUMN IF NOT EXISTS execution_snapshot JSONB,
+  ADD COLUMN IF NOT EXISTS external_runtime_id UUID
+    REFERENCES external_runtimes(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS external_runtime_revision INTEGER
+    CHECK (external_runtime_revision IS NULL OR external_runtime_revision > 0),
+  ADD COLUMN IF NOT EXISTS external_runtime_provider TEXT,
+  ADD COLUMN IF NOT EXISTS external_runtime_protocol TEXT,
+  ADD COLUMN IF NOT EXISTS external_session_id TEXT,
+  ADD COLUMN IF NOT EXISTS external_runtime_version TEXT,
+  ADD COLUMN IF NOT EXISTS external_started_at TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS runs_external_runtime_idx
+  ON runs(external_runtime_id, external_runtime_revision)
+  WHERE external_runtime_id IS NOT NULL;
+`;

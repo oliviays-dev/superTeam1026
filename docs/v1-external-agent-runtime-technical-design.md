@@ -1,11 +1,11 @@
 # Pluginmax V1 External Agent Runtime Technical Design
 
-> 状态：Batch 13A（注册、Probe、Capability、权限和审计）与 Batch 13B
-> Adapter Core 已实现
+> 状态：Batch 13A-D 已实现（Runtime 管理、Adapter Core、Binding/Preflight、
+> Worker Run 执行）
 >
 > 基线：`7e85bc8b1faa89ee6e016928b191353dc14715a7`
 >
-> 预计 Migration：21
+> Migration：23
 
 ## 1. 设计结论
 

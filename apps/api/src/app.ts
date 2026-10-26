@@ -1220,12 +1220,15 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/tasks/:id/dispatch", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
     return reply
       .status(202)
       .send(
         await application.dispatchTask(
           id,
           requestTraces.get(request) ?? createRootTraceContext(),
+          actorId,
+          actorId === localActorId,
         ),
       );
   });

@@ -1,8 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
+  CodexJsonlAdapter,
   DshSdkAdapter,
   FakeRuntimeAdapter,
+  PlainTextAdapter,
   type AgentRuntimeAdapter,
   type AgentRuntimeEvent,
   type DshSdkAdapterOptions,
@@ -12,7 +14,13 @@ import {
   buildMeetingContext,
   buildTaskContext,
 } from "@pluginmax/context";
-import type { Agent, Project, Run, Task } from "@pluginmax/contracts";
+import type {
+  Agent,
+  ExternalRunExecutionSnapshot,
+  Project,
+  Run,
+  Task,
+} from "@pluginmax/contracts";
 import {
   DirectChatPreconditionError,
   type DirectChatRunContext,
@@ -22,6 +30,7 @@ import {
 } from "@pluginmax/database";
 import { isTerminalRunStatus } from "@pluginmax/domain";
 import { LocalFileStore } from "@pluginmax/files";
+import { AgentRuntimePreflightService } from "./agent-runtime-preflight.js";
 
 export class RunCancelledError extends Error {
   constructor() {
@@ -44,6 +53,13 @@ export class RunLeaseLostError extends Error {
   }
 }
 
+export class RunNonRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunNonRetryableError";
+  }
+}
+
 export function runtimeEffectKey(runId: string): string {
   return `run:${runId}:agent.execute:v1`;
 }
@@ -58,7 +74,32 @@ export interface RunExecutorOptions {
 function runtimeFor(
   agent: Agent,
   options: RunExecutorOptions,
+  execution: ExternalRunExecutionSnapshot | null,
 ): AgentRuntimeAdapter {
+  if (execution !== null) {
+    const args = [
+      ...execution.runtime.managedArgs,
+      ...execution.runtime.customArgs,
+    ];
+    if (execution.runtime.protocol === "codex-jsonl") {
+      return new CodexJsonlAdapter({
+        command: execution.runtime.command,
+        args,
+        provider: execution.runtime.provider,
+        sandbox: execution.runtime.sandboxMode,
+        ...(execution.model === undefined ? {} : { model: execution.model }),
+        ...(execution.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: execution.reasoningEffort }),
+      });
+    }
+    return new PlainTextAdapter({
+      command: execution.runtime.command,
+      args,
+      provider: execution.runtime.provider,
+      sandbox: execution.runtime.sandboxMode,
+    });
+  }
   if (agent.runtimeKind === "fake") {
     return new FakeRuntimeAdapter();
   }
@@ -70,12 +111,14 @@ function runtimeFor(
 
 export class RunExecutor {
   private readonly fileStore: LocalFileStore;
+  private readonly preflight: AgentRuntimePreflightService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
     private readonly options: RunExecutorOptions,
   ) {
     this.fileStore = new LocalFileStore(options.fileStoreRoot);
+    this.preflight = new AgentRuntimePreflightService(repositories);
   }
 
   async execute(
@@ -173,6 +216,7 @@ export class RunExecutor {
     }
     const agent = await this.repositories.agents.get(run.agentId);
     if (agent === undefined) throw new Error("agent is unavailable");
+    const executionSnapshot = run.executionSnapshot;
     let project: Project | null = null;
     if (run.projectId !== null) {
       const loadedProject = await this.repositories.projects.get(run.projectId);
@@ -222,6 +266,28 @@ export class RunExecutor {
       throw new RunLeaseLostError("runtime effect is leased elsewhere");
     }
     const effectLeaseToken = effect.leaseToken;
+    if (executionSnapshot !== null) {
+      try {
+        if (run.externalStartedAt !== null && run.status !== "completed") {
+          throw new RunNonRetryableError(
+            "external runtime already started in a previous attempt; automatic retry is prohibited",
+          );
+        }
+        await this.assertExternalRuntimeReady(agent, executionSnapshot);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "external preflight failed";
+        await this.repositories.runtimeEffects.fail(
+          effectKey,
+          owner,
+          effectLeaseToken,
+          message,
+        );
+        throw error instanceof RunNonRetryableError
+          ? error
+          : new Error(message);
+      }
+    }
     try {
       await assertLease();
     } catch (error) {
@@ -369,7 +435,10 @@ export class RunExecutor {
         });
     }, this.options.runtimeEffectPollIntervalMs ?? 500);
     try {
-      const adapter = runtimeFor(agent, this.options);
+      if (executionSnapshot !== null) {
+        await this.repositories.runs.markExternalStarted(runId);
+      }
+      const adapter = runtimeFor(agent, this.options, executionSnapshot);
       for await (const event of adapter.execute(
         {
           runId,
@@ -403,6 +472,15 @@ export class RunExecutor {
         if (event.type === "completed") {
           const current = await this.requireRun(runId);
           if (current.status === "cancelled") throw new RunCancelledError();
+          if (executionSnapshot !== null && event.execution !== undefined) {
+            await this.repositories.runs.recordExternalCompletion(runId, {
+              provider: event.execution.provider,
+              runtimeVersion: event.execution.runtimeVersion,
+              ...(event.execution.sessionId === undefined
+                ? {}
+                : { sessionId: event.execution.sessionId }),
+            });
+          }
           const completed = await this.repositories.runtimeEffects.complete(
             effectKey,
             owner,
@@ -495,12 +573,64 @@ export class RunExecutor {
       await this.repositories.runs.appendEvent(runId, "error", "Run 执行失败", {
         error: message,
       });
+      if (executionSnapshot !== null) {
+        throw new RunNonRetryableError(message);
+      }
       throw error;
     } finally {
       clearInterval(effectTimer);
       clearInterval(controlTimer);
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       options.signal?.removeEventListener("abort", relayExternalAbort);
+    }
+  }
+
+  private async assertExternalRuntimeReady(
+    agent: Agent,
+    execution: ExternalRunExecutionSnapshot,
+  ): Promise<void> {
+    const binding =
+      await this.repositories.agentRuntimeBindings.getCurrent(agent.id);
+    if (
+      binding === undefined ||
+      binding.status !== "active" ||
+      binding.id !== execution.binding.id ||
+      binding.revision !== execution.binding.revision
+    ) {
+      throw new Error("external runtime binding changed after dispatch");
+    }
+    const evaluation = await this.preflight.preflight({
+      agentId: agent.id,
+      actorId: "system-worker",
+      administrator: true,
+      request: {
+        expectedRevision: execution.binding.revision,
+        workspaceId: execution.envelope.workspaceId,
+        taskId: execution.envelope.taskId,
+        requiredCapabilities: [],
+        ...(execution.model === undefined
+          ? {}
+          : { model: execution.model }),
+        ...(execution.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: execution.reasoningEffort }),
+      },
+    });
+    if (evaluation.kind === "failed") {
+      throw new Error(
+        `${evaluation.code}: ${evaluation.message}. ${evaluation.remediation}`,
+      );
+    }
+    if (
+      evaluation.result.runtimeRevision !== execution.runtime.revision ||
+      evaluation.result.capabilitySnapshotId !==
+        execution.capabilitySnapshotId ||
+      evaluation.result.envelopePreview.launch.commandDigest !==
+        execution.runtime.commandDigest ||
+      evaluation.result.envelopePreview.launch.argsDigest !==
+        execution.runtime.argsDigest
+    ) {
+      throw new Error("external runtime snapshot is stale");
     }
   }
 

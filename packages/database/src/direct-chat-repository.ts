@@ -9,6 +9,7 @@ import {
   type DirectChatThread,
   type DirectChatThreadListItem,
   type DirectChatTurn,
+  type ExternalRunExecutionSnapshot,
   type RunInputSnapshot,
   type SendDirectChatMessageInput,
   type TraceContext,
@@ -186,7 +187,12 @@ function threadFromRows(
 }
 
 function supportedRuntime(runtimeKind: string): boolean {
-  return runtimeKind === "fake" || runtimeKind === "dsh-sdk";
+  return (
+    runtimeKind === "fake" ||
+    runtimeKind === "dsh-sdk" ||
+    runtimeKind === "codex-jsonl" ||
+    runtimeKind === "plain-text"
+  );
 }
 
 function assertDispatchable(agent: Agent): void {
@@ -323,6 +329,9 @@ export class DirectChatRepository {
     ownerId: string,
     input: SendDirectChatMessageInput,
     trace: TraceContext = createRootTraceContext(),
+    resolveExternalExecution?: (
+      agent: Agent,
+    ) => Promise<ExternalRunExecutionSnapshot | undefined>,
   ): Promise<DirectChatSendResult> {
     return this.database.transaction(async (client) => {
       const thread = await this.lockOwnedThread(client, threadId, ownerId);
@@ -346,6 +355,17 @@ export class DirectChatRepository {
         );
       }
       assertDispatchable(agent);
+      const executionSnapshot = await resolveExternalExecution?.(agent);
+      if (
+        (agent.runtimeKind === "codex-jsonl" ||
+          agent.runtimeKind === "plain-text") &&
+        executionSnapshot === undefined
+      ) {
+        throw new DirectChatPreconditionError(
+          "runtime_binding_missing",
+          "The AI partner has no prepared external runtime execution",
+        );
+      }
       const message = await this.insertMessageWithClient(client, {
         threadId,
         senderType: "owner",
@@ -369,6 +389,7 @@ export class DirectChatRepository {
         turnId,
         source: message,
         trace,
+        ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
       });
       await client.query(
         `UPDATE direct_chat_messages
@@ -390,6 +411,9 @@ export class DirectChatRepository {
     turnId: string,
     ownerId: string,
     trace: TraceContext = createRootTraceContext(),
+    resolveExternalExecution?: (
+      agent: Agent,
+    ) => Promise<ExternalRunExecutionSnapshot | undefined>,
   ): Promise<DirectChatSendResult> {
     return this.database.transaction(async (client) => {
       const thread = await this.lockOwnedThread(client, threadId, ownerId);
@@ -420,6 +444,17 @@ export class DirectChatRepository {
         );
       }
       assertDispatchable(agent);
+      const executionSnapshot = await resolveExternalExecution?.(agent);
+      if (
+        (agent.runtimeKind === "codex-jsonl" ||
+          agent.runtimeKind === "plain-text") &&
+        executionSnapshot === undefined
+      ) {
+        throw new DirectChatPreconditionError(
+          "runtime_binding_missing",
+          "The AI partner has no prepared external runtime execution",
+        );
+      }
       const source = await this.messageWithClient(
         client,
         current.source_message_id,
@@ -450,6 +485,7 @@ export class DirectChatRepository {
         turnId: retryTurnId,
         source: messageFromRow(source),
         trace,
+        ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
       });
       return this.sendResultForSource(client, messageFromRow(source), false);
     });
@@ -584,12 +620,6 @@ export class DirectChatRepository {
         throw new DirectChatPreconditionError(
           "agent_disabled",
           "The AI partner was disabled before execution",
-        );
-      }
-      if (!supportedRuntime(row.runtime_kind)) {
-        throw new DirectChatPreconditionError(
-          "runtime_unavailable",
-          `Runtime adapter is unavailable: ${row.runtime_kind}`,
         );
       }
       await client.query(
@@ -762,6 +792,7 @@ export class DirectChatRepository {
       readonly turnId: string;
       readonly source: DirectChatMessage;
       readonly trace: TraceContext;
+      readonly executionSnapshot?: ExternalRunExecutionSnapshot;
     },
   ): Promise<string> {
     const runId = randomUUID();
@@ -782,12 +813,16 @@ export class DirectChatRepository {
     const run = await client.query<RunRow>(
       `INSERT INTO runs (
          id, project_id, task_id, meeting_turn_id, direct_chat_turn_id,
-         agent_id, status, input_snapshot, observability, attempt,
+         agent_id, status, input_snapshot, execution_snapshot,
+         external_runtime_id, external_runtime_revision,
+         external_runtime_provider, external_runtime_protocol,
+         observability, attempt,
          timeout_at, idempotency_key, trace_id, trace_root_span_id,
          created_at, updated_at
        ) VALUES (
          $1, NULL, NULL, NULL, $2, $3, 'queued', $4::jsonb, $5::jsonb,
-         1, NULL, $6, $7, $8, NOW(), NOW()
+         $6, $7, $8, $9, $10::jsonb, 1, NULL, $11, $12, $13,
+         NOW(), NOW()
        )
        RETURNING *`,
       [
@@ -795,10 +830,30 @@ export class DirectChatRepository {
         input.turnId,
         input.agent.id,
         JSON.stringify(inputSnapshot),
+        input.executionSnapshot === undefined
+          ? null
+          : JSON.stringify(input.executionSnapshot),
+        input.executionSnapshot?.runtime.id ?? null,
+        input.executionSnapshot?.runtime.revision ?? null,
+        input.executionSnapshot?.runtime.provider ?? null,
+        input.executionSnapshot?.runtime.protocol ?? null,
         JSON.stringify({
-          planVisibility: "summary",
-          toolEventCompleteness: "partial",
-          textStreaming: "message",
+          planVisibility:
+            input.executionSnapshot?.runtime.protocol === "codex-jsonl"
+              ? "summary"
+              : input.executionSnapshot === undefined
+                ? "summary"
+                : "opaque",
+          toolEventCompleteness:
+            input.executionSnapshot?.runtime.protocol === "codex-jsonl"
+              ? "partial"
+              : input.executionSnapshot === undefined
+                ? "partial"
+                : "none",
+          textStreaming:
+            input.executionSnapshot?.runtime.protocol === "plain-text"
+              ? "final-only"
+              : "message",
           subagentVisibility: "none",
         }),
         `direct-chat:${input.turnId}`,

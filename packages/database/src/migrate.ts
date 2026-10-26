@@ -4,6 +4,7 @@ import {
   AI_DIRECT_CHAT_SCHEMA_SQL,
   COLLABORATION_SCHEMA_SQL,
   CONTEXT_SCHEMA_SQL,
+  EXTERNAL_RUN_EXECUTION_SCHEMA_SQL,
   EXTERNAL_RUNTIME_SCHEMA_SQL,
   INITIAL_SCHEMA_SQL,
   MEMORY_CLOSURE_SCHEMA_SQL,
@@ -47,6 +48,7 @@ const migrations = [
   { version: 20, sql: AI_DIRECT_CHAT_SCHEMA_SQL },
   { version: 21, sql: EXTERNAL_RUNTIME_SCHEMA_SQL },
   { version: 22, sql: AGENT_RUNTIME_BINDING_SCHEMA_SQL },
+  { version: 23, sql: EXTERNAL_RUN_EXECUTION_SCHEMA_SQL },
 ] as const;
 
 export async function migrate(

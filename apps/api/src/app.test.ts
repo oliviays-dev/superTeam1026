@@ -215,7 +215,7 @@ integration("runtime operations API contract", () => {
     expect(response.json()).toMatchObject({
       metrics: {
         expectedMigrationVersion: 21,
-        migrationVersion: 22,
+        migrationVersion: 23,
         activeWorkers: 1,
         deadLetterCount: expect.any(Number),
       },
@@ -387,7 +387,7 @@ integration("runtime operations API contract", () => {
       });
       expect(externalResponse.statusCode).toBe(409);
       expect(externalResponse.json().code).toBe(
-        "runtime_adapter_unavailable",
+        "runtime_binding_missing",
       );
     }
   });

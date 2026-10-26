@@ -146,6 +146,39 @@ export type AgentRuntimePreflightResult = z.infer<
   typeof agentRuntimePreflightResultSchema
 >;
 
+export const externalRunExecutionSnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  runtime: externalRuntimeSchema.pick({
+    id: true,
+    name: true,
+    revision: true,
+    provider: true,
+    protocol: true,
+    command: true,
+    managedArgs: true,
+    customArgs: true,
+    supportedModels: true,
+    defaultModel: true,
+    sandboxMode: true,
+    networkMode: true,
+    commandDigest: true,
+    argsDigest: true,
+  }),
+  binding: agentRuntimeBindingSchema.pick({
+    id: true,
+    revision: true,
+  }),
+  capabilitySnapshotId: z.string().uuid(),
+  capability: runtimeCapabilityProfileSchema,
+  envelope: executionEnvelopeSchema,
+  model: z.string().trim().min(1).max(160).optional(),
+  reasoningEffort: reasoningEffortSchema.optional(),
+  capturedAt: z.string().datetime({ offset: true }),
+});
+export type ExternalRunExecutionSnapshot = z.infer<
+  typeof externalRunExecutionSnapshotSchema
+>;
+
 export {
   executionEnvelopeSchema,
   executionPreflightResultSchema,

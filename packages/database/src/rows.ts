@@ -83,6 +83,14 @@ export interface RunRow {
   status: Run["status"];
   context_pack_id: string | null;
   input_snapshot: Run["inputSnapshot"];
+  execution_snapshot: Run["executionSnapshot"];
+  external_runtime_id: string | null;
+  external_runtime_revision: number | null;
+  external_runtime_provider: string | null;
+  external_runtime_protocol: string | null;
+  external_session_id: string | null;
+  external_runtime_version: string | null;
+  external_started_at: Date | null;
   output: string | null;
   error: string | null;
   attempt: number;
@@ -204,6 +212,14 @@ export function runFromRow(row: RunRow): Run {
     status: row.status,
     contextPackId: row.context_pack_id,
     inputSnapshot: row.input_snapshot,
+    executionSnapshot: row.execution_snapshot,
+    externalRuntimeId: row.external_runtime_id,
+    externalRuntimeRevision: row.external_runtime_revision,
+    externalRuntimeProvider: row.external_runtime_provider,
+    externalRuntimeProtocol: row.external_runtime_protocol,
+    externalSessionId: row.external_session_id,
+    externalRuntimeVersion: row.external_runtime_version,
+    externalStartedAt: row.external_started_at?.toISOString() ?? null,
     output: row.output,
     error: row.error,
     attempt: row.attempt,

@@ -6,6 +6,7 @@ import {
   type MeetingAiPolicyStatus,
   type MeetingAiTriggerKind,
   type MeetingAiTurnSummary,
+  type ExternalRunExecutionSnapshot,
   type RunInputSnapshot,
   type TriggerMeetingAiInput,
   type TriggerMeetingAiResult,
@@ -416,6 +417,11 @@ export class MeetingAiRepository {
     readonly actorId: string;
     readonly trigger: TriggerMeetingAiInput;
     readonly fallbackSummaryKey: string;
+    readonly resolveExternalExecution?: (input: {
+      readonly agentId: string;
+      readonly turnId: string;
+      readonly projectId: string;
+    }) => Promise<ExternalRunExecutionSnapshot | undefined>;
   }): Promise<TriggerMeetingAiResult> {
     return this.database.transaction(async (client) => {
       await client.query(
@@ -740,15 +746,32 @@ export class MeetingAiRepository {
         const runtimeKind = runtime.rows[0]?.runtime_kind ?? "fake";
         inputSnapshot.runtimeKind =
           runtimeKind as RunInputSnapshot["runtimeKind"];
+        const executionSnapshot =
+          await input.resolveExternalExecution?.({
+            agentId: participant.agent_id,
+            turnId,
+            projectId: input.projectId,
+          });
+        if (
+          (runtimeKind === "codex-jsonl" || runtimeKind === "plain-text") &&
+          executionSnapshot === undefined
+        ) {
+          throw new MeetingAiPreconditionError(
+            "runtime_binding_missing",
+            "The AI participant has no prepared external runtime execution",
+          );
+        }
         const run = await client.query(
           `INSERT INTO runs (
              id, project_id, task_id, meeting_turn_id, agent_id, status,
-             input_snapshot, observability, attempt, timeout_at,
+             input_snapshot, execution_snapshot, external_runtime_id,
+             external_runtime_revision, external_runtime_provider,
+             external_runtime_protocol, observability, attempt, timeout_at,
              idempotency_key, trace_id, trace_root_span_id,
              created_at, updated_at
            ) VALUES (
              $1, $2, NULL, $3, $4, 'queued', $5::jsonb, $6::jsonb,
-             1, NULL, $7, $8, $9,
+             $7, $8, $9, $10, $11::jsonb, 1, NULL, $12, $13, $14,
              NOW(), NOW()
            )`,
           [
@@ -757,10 +780,30 @@ export class MeetingAiRepository {
             turnId,
             participant.agent_id,
             JSON.stringify(inputSnapshot),
+            executionSnapshot === undefined
+              ? null
+              : JSON.stringify(executionSnapshot),
+            executionSnapshot?.runtime.id ?? null,
+            executionSnapshot?.runtime.revision ?? null,
+            executionSnapshot?.runtime.provider ?? null,
+            executionSnapshot?.runtime.protocol ?? null,
             JSON.stringify({
-              planVisibility: "summary",
-              toolEventCompleteness: "partial",
-              textStreaming: "message",
+              planVisibility:
+                executionSnapshot?.runtime.protocol === "codex-jsonl"
+                  ? "summary"
+                  : executionSnapshot === undefined
+                    ? "summary"
+                    : "opaque",
+              toolEventCompleteness:
+                executionSnapshot?.runtime.protocol === "codex-jsonl"
+                  ? "partial"
+                  : executionSnapshot === undefined
+                    ? "partial"
+                    : "none",
+              textStreaming:
+                executionSnapshot?.runtime.protocol === "plain-text"
+                  ? "final-only"
+                  : "message",
               subagentVisibility: "none",
             }),
             `meeting-ai:${turnId}`,

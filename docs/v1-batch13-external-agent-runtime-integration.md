@@ -1,12 +1,12 @@
 # V1 Batch 13: External Agent Runtime Integration
 
-> 状态：Batch 13A 与 13B Adapter Core 已实现；绑定和外部执行待后续阶段
+> 状态：Batch 13A、13B、13C、13D 已实现；GUI 与发布门禁待后续阶段
 >
 > 分支：`feat/v1-batch13-external-agent-runtime`
 >
 > 基线：`7e85bc8b1faa89ee6e016928b191353dc14715a7`
 >
-> 预计 Migration：21
+> Migration：23
 
 ## 1. 当前结论
 
@@ -20,20 +20,16 @@
 - 这些能力通过插件 KV 表 `external_runtimes` 和 `/api/collab/agent/...` 暴露，
   执行结果写回旧 AgentRun 与旧任务执行历史。
 
-Pluginmax Platform V1 **尚未完成外部 Agent Runtime 接入**：
+Pluginmax Platform V1 已完成 Batch 13A-D：
 
-- `packages/application/src/run-executor.ts` 的 `runtimeFor` 只支持 `fake` 和
-  `dsh-sdk`；
-- `packages/application/src/index.ts` 的 `implementedRuntimeKinds` 也只有这两个值；
-- `packages/contracts/src/platform.ts` 声明的 `codex-jsonl`、`plain-text` 只是格式
-  占位；`apps/web/src/AgentsView.tsx` 的选项不代表可执行；
-- `apps/api/src/app.test.ts` 已明确验证外部 Runtime 派发返回
-  `runtime_adapter_unavailable`；
-- PostgreSQL 没有外部 Runtime 定义、绑定、Probe、Capability 或治理事件表；
-- V1 没有等价的 `/api/v1` Runtime 注册、探测、绑定和 Preflight API；
-- V1 Worker 没有外部 CLI Adapter，也不存在外部进程取消和 Session 回写链路。
+- PostgreSQL 具备 Runtime、Probe、Capability、治理事件和 Agent Binding；
+- `/api/v1/runtimes` 与 Agent Binding/Preflight API 已交付；
+- Task、Workflow Task、Meeting AI 和 AI Direct Chat 可持久化外部执行快照；
+- Worker 可按快照启动 `codex-jsonl` 或 `plain-text` Adapter；
+- 取消、超时、失败、Session 诊断和既有业务回写使用统一 Run/Effect/Job 链路；
+- spawn marker 阻止启动后的自动重放，reasoning 正文不持久化。
 
-因此，当前 V1 任务、会议和 AI 私聊都不能实际调用 Codex 或通用外部 CLI Runtime。
+剩余工作集中在 GUI、TaskExecutionPolicy 深化、发布门禁和全量兼容验收。
 
 ## 2. 目标
 
@@ -116,7 +112,7 @@ Pluginmax Platform V1 **尚未完成外部 Agent Runtime 接入**：
 
 退出条件：适配器单元测试、假 CLI 测试、取消和超时测试通过。
 
-### Phase 3: Agent 绑定与 Preflight
+### Phase 3: Agent 绑定与 Preflight（Batch 13C 已完成）
 
 依赖：Phase 1、Phase 2。
 
@@ -129,7 +125,7 @@ Pluginmax Platform V1 **尚未完成外部 Agent Runtime 接入**：
 
 退出条件：任务、会议和私聊派发均使用同一 Preflight。
 
-### Phase 4: Worker/Run/Outbox 执行闭环
+### Phase 4: Worker/Run/Outbox 执行闭环（Batch 13D 已完成）
 
 依赖：Phase 2、Phase 3。
 

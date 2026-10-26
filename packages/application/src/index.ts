@@ -81,6 +81,7 @@ import type {
   WorkflowTemplate,
   RunDetail,
   RunInputSnapshot,
+  RunObservability,
   SendDirectChatMessageInput,
   SetAgentRuntimeBindingInput,
   RetryWorkflowNodeInput,
@@ -134,6 +135,7 @@ import type {
   ExternalRuntimeCapabilitySnapshot,
   ExternalRuntimeDetail,
   ExternalRuntimeEvent,
+  ExternalRunExecutionSnapshot,
   ExternalRuntimeProbeRequestResult,
   ExternalRuntimeStatus,
   UpdateExternalRuntimeInput,
@@ -142,6 +144,7 @@ import type {
 import {
   createExternalRuntimeInputSchema,
   createRootTraceContext,
+  reasoningEffortSchema,
 } from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
@@ -189,6 +192,13 @@ export class ApplicationError extends Error {
 const implementedRuntimeKinds = new Set<Agent["runtimeKind"]>([
   "fake",
   "dsh-sdk",
+  "codex-jsonl",
+  "plain-text",
+]);
+
+const externalRuntimeKinds = new Set<Agent["runtimeKind"]>([
+  "codex-jsonl",
+  "plain-text",
 ]);
 
 function requireExecutableRuntime(agent: Agent): void {
@@ -206,6 +216,25 @@ function requireExecutableRuntime(agent: Agent): void {
       409,
     );
   }
+}
+
+function runObservability(
+  execution: ExternalRunExecutionSnapshot,
+): RunObservability {
+  if (execution.runtime.protocol === "plain-text") {
+    return {
+      planVisibility: "opaque",
+      toolEventCompleteness: "none",
+      textStreaming: "final-only",
+      subagentVisibility: "none",
+    };
+  }
+  return {
+    planVisibility: "summary",
+    toolEventCompleteness: "partial",
+    textStreaming: "message",
+    subagentVisibility: "none",
+  };
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -1140,6 +1169,83 @@ export class PlatformApplication {
     throwPreflightFailure(result);
   }
 
+  private async prepareExternalRun(input: {
+    readonly agent: Agent;
+    readonly actorId: string;
+    readonly administrator: boolean;
+    readonly workspaceId: string;
+    readonly taskId: string;
+    readonly model?: string;
+    readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
+  }): Promise<ExternalRunExecutionSnapshot | undefined> {
+    const binding =
+      await this.repositories.agentRuntimeBindings.getCurrent(input.agent.id);
+    if (
+      binding?.status !== "active" &&
+      !externalRuntimeKinds.has(input.agent.runtimeKind)
+    ) {
+      return undefined;
+    }
+    const result = await this.preflightAgentRuntime(
+      input.agent.id,
+      {
+        expectedRevision: binding?.revision ?? 1,
+        workspaceId: input.workspaceId,
+        taskId: input.taskId,
+        ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.reasoningEffort === undefined
+          ? {}
+          : { reasoningEffort: input.reasoningEffort }),
+        requiredCapabilities: [],
+      },
+      input.actorId,
+      input.administrator,
+    );
+    if (binding === undefined) {
+      throw new ApplicationError(
+        "runtime_binding_missing",
+        "The agent has no external runtime binding",
+        409,
+      );
+    }
+    const runtime = await this.requireExternalRuntime(binding.runtimeId);
+    const reasoningEffort = reasoningEffortSchema.safeParse(
+      result.envelopePreview.launch.reasoningEffort,
+    );
+    return {
+      schemaVersion: 1,
+      runtime: {
+        id: runtime.id,
+        name: runtime.name,
+        revision: runtime.revision,
+        provider: runtime.provider,
+        protocol: runtime.protocol,
+        command: runtime.command,
+        managedArgs: runtime.managedArgs,
+        customArgs: runtime.customArgs,
+        supportedModels: runtime.supportedModels,
+        defaultModel: runtime.defaultModel,
+        sandboxMode: runtime.sandboxMode,
+        networkMode: runtime.networkMode,
+        commandDigest: runtime.commandDigest,
+        argsDigest: runtime.argsDigest,
+      },
+      binding: { id: binding.id, revision: binding.revision },
+      capabilitySnapshotId: result.capabilitySnapshotId,
+      capability: result.runtime,
+      envelope: result.envelopePreview,
+      ...(result.envelopePreview.launch.model === undefined
+        ? {}
+        : { model: result.envelopePreview.launch.model }),
+      ...(!reasoningEffort.success
+        ? {}
+        : {
+            reasoningEffort: reasoningEffort.data,
+          }),
+      capturedAt: result.checkedAt,
+    };
+  }
+
   private async requireExternalRuntime(
     runtimeId: string,
   ): Promise<ExternalRuntime> {
@@ -1198,6 +1304,14 @@ export class PlatformApplication {
         actorId,
         input,
         trace,
+        (agent) =>
+          this.prepareExternalRun({
+            agent,
+            actorId,
+            administrator: actorId === "local-admin",
+            workspaceId: `direct-chat/${threadId}`,
+            taskId: threadId,
+          }),
       );
     } catch (error) {
       throw directChatApplicationError(error);
@@ -1216,6 +1330,14 @@ export class PlatformApplication {
         turnId,
         actorId,
         trace,
+        (agent) =>
+          this.prepareExternalRun({
+            agent,
+            actorId,
+            administrator: actorId === "local-admin",
+            workspaceId: `direct-chat/${threadId}`,
+            taskId: threadId,
+          }),
       );
     } catch (error) {
       throw directChatApplicationError(error);
@@ -1610,6 +1732,8 @@ export class PlatformApplication {
   async dispatchTask(
     taskId: string,
     trace: TraceContext = createRootTraceContext(),
+    actorId = "local-admin",
+    administrator = actorId === "local-admin",
   ): Promise<{ runId: string }> {
     const task = await this.getTask(taskId);
     if (!canTransitionTask(task.status, "in_progress")) {
@@ -1636,6 +1760,13 @@ export class PlatformApplication {
       );
     }
     requireExecutableRuntime(agent);
+    const executionSnapshot = await this.prepareExternalRun({
+      agent,
+      actorId,
+      administrator,
+      workspaceId: task.projectId,
+      taskId: task.id,
+    });
     const projectTasks = await this.repositories.tasks.list(task.projectId);
     const unresolved = unresolvedTaskDependencies(task, projectTasks);
     if (unresolved.length > 0) {
@@ -1659,6 +1790,10 @@ export class PlatformApplication {
       runId,
       task,
       inputSnapshot,
+      ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
+      ...(executionSnapshot === undefined
+        ? {}
+        : { observability: runObservability(executionSnapshot) }),
       trace,
     });
     await this.repositories.runs.appendEvent(
@@ -4722,10 +4857,21 @@ export class PlatformApplication {
       },
     };
     const deadline = timeoutAt(definition.timeoutSeconds);
+    const executionSnapshot = await this.prepareExternalRun({
+      agent,
+      actorId,
+      administrator: actorId === "local-admin",
+      workspaceId: instance.projectId,
+      taskId: task.id,
+    });
     await this.repositories.runs.enqueue({
       runId,
       task,
       inputSnapshot,
+      ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
+      ...(executionSnapshot === undefined
+        ? {}
+        : { observability: runObservability(executionSnapshot) }),
       attempt: node.attempt,
       timeoutAt: deadline,
       maxAttempts: definition.maxAttempts,
@@ -5281,6 +5427,23 @@ export class PlatformApplication {
         trigger,
         fallbackSummaryKey:
           trigger.sourceMessageId ?? detail.messages.at(-1)?.id ?? meetingId,
+        resolveExternalExecution: async ({ agentId, turnId, projectId }) => {
+          const agent = await this.repositories.agents.get(agentId);
+          if (agent === undefined) {
+            throw new ApplicationError(
+              "agent_unavailable",
+              "Meeting AI participant is unavailable",
+              409,
+            );
+          }
+          return this.prepareExternalRun({
+            agent,
+            actorId,
+            administrator: actorId === "local-admin",
+            workspaceId: projectId,
+            taskId: turnId,
+          });
+        },
       });
     } catch (error) {
       if (error instanceof MeetingAiPreconditionError) {
@@ -5734,7 +5897,14 @@ export class PlatformApplication {
     const task = await this.getTask(converted.taskId);
     let runId: string | null = null;
     if (input.dispatch && task.status === "queued") {
-      runId = (await this.dispatchTask(task.id)).runId;
+      runId = (
+        await this.dispatchTask(
+          task.id,
+          createRootTraceContext(),
+          actorId,
+          actorId === "local-admin",
+        )
+      ).runId;
     } else if (task.status === "in_progress" || task.status === "review") {
       const runs = await this.repositories.runs.listByTask(task.id);
       runId = runs[0]?.id ?? null;

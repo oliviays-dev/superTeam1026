@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  externalRunExecutionSnapshotSchema,
+  type ExternalRunExecutionSnapshot,
+} from "./agent-runtime-binding.js";
 import { spanIdSchema, traceIdSchema } from "./trace.js";
 
 export const projectStatusSchema = z.enum(["active", "archived"]);
@@ -357,6 +361,14 @@ export const runSchema = z.object({
   status: runStatusSchema,
   contextPackId: z.string().uuid().nullable(),
   inputSnapshot: runInputSnapshotSchema,
+  executionSnapshot: externalRunExecutionSnapshotSchema.nullable(),
+  externalRuntimeId: z.string().uuid().nullable(),
+  externalRuntimeRevision: z.number().int().positive().nullable(),
+  externalRuntimeProvider: z.string().trim().min(1).max(120).nullable(),
+  externalRuntimeProtocol: z.string().trim().min(1).max(120).nullable(),
+  externalSessionId: z.string().trim().min(1).max(500).nullable(),
+  externalRuntimeVersion: z.string().trim().min(1).max(240).nullable(),
+  externalStartedAt: z.string().datetime({ offset: true }).nullable(),
   output: z.string().nullable(),
   error: z.string().nullable(),
   attempt: z.number().int().positive(),
@@ -372,6 +384,7 @@ export const runSchema = z.object({
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type Run = z.infer<typeof runSchema>;
+export type { ExternalRunExecutionSnapshot };
 
 export const platformRunEventTypeSchema = z.enum([
   "run.queued",

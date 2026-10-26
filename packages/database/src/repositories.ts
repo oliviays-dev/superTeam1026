@@ -6,6 +6,7 @@ import type {
   CreateProjectInput,
   CreateTaskInput,
   CreateTaskMessageInput,
+  ExternalRunExecutionSnapshot,
   Job,
   PlatformRunEvent,
   PlatformRunEventType,
@@ -13,6 +14,7 @@ import type {
   Run,
   RunDelta,
   RunInputSnapshot,
+  RunObservability,
   Task,
   TaskMessage,
   TaskStatus,
@@ -556,6 +558,8 @@ export interface EnqueueRunInput {
   readonly runId: string;
   readonly task: Task;
   readonly inputSnapshot: RunInputSnapshot;
+  readonly executionSnapshot?: ExternalRunExecutionSnapshot;
+  readonly observability?: RunObservability;
   readonly attempt?: number;
   readonly timeoutAt?: string;
   readonly idempotencyKey?: string;
@@ -574,12 +578,15 @@ export class RunRepository {
       const result = await client.query<RunRow>(
         `INSERT INTO runs (
            id, project_id, task_id, agent_id, status, input_snapshot,
+           execution_snapshot, external_runtime_id, external_runtime_revision,
+           external_runtime_provider, external_runtime_protocol,
            observability, attempt, timeout_at, idempotency_key,
            workflow_instance_id, workflow_node_id, trace_id,
            trace_root_span_id, created_at, updated_at
          ) VALUES (
            $1, $2, $3, $4, 'queued', $5::jsonb,
-           $6::jsonb, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+           $6::jsonb, $7, $8, $9, $10, $11::jsonb,
+           $12, $13, $14, $15, $16, $17, $18, NOW(), NOW()
          )
          RETURNING *`,
         [
@@ -588,12 +595,21 @@ export class RunRepository {
           input.task.id,
           input.task.agentId,
           JSON.stringify(input.inputSnapshot),
-          JSON.stringify({
-            planVisibility: "structured",
-            toolEventCompleteness: "complete",
-            textStreaming: "delta",
-            subagentVisibility: "none",
-          }),
+          input.executionSnapshot === undefined
+            ? null
+            : JSON.stringify(input.executionSnapshot),
+          input.executionSnapshot?.runtime.id ?? null,
+          input.executionSnapshot?.runtime.revision ?? null,
+          input.executionSnapshot?.runtime.provider ?? null,
+          input.executionSnapshot?.runtime.protocol ?? null,
+          JSON.stringify(
+            input.observability ?? {
+              planVisibility: "structured",
+              toolEventCompleteness: "complete",
+              textStreaming: "delta",
+              subagentVisibility: "none",
+            },
+          ),
           input.attempt ?? 1,
           input.timeoutAt ?? null,
           input.idempotencyKey ?? null,
@@ -679,6 +695,43 @@ export class RunRepository {
        SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
        WHERE id = $1 AND status = 'queued'`,
       [id],
+    );
+  }
+
+  async markExternalStarted(id: string): Promise<void> {
+    await this.database.query(
+      `UPDATE runs
+       SET external_started_at = COALESCE(external_started_at, NOW()),
+           updated_at = NOW()
+       WHERE id = $1
+         AND external_runtime_id IS NOT NULL`,
+      [id],
+    );
+  }
+
+  async recordExternalCompletion(
+    id: string,
+    input: {
+      readonly provider: string;
+      readonly runtimeVersion: string;
+      readonly sessionId?: string;
+    },
+  ): Promise<void> {
+    await this.database.query(
+      `UPDATE runs
+       SET
+         external_runtime_provider = $2,
+         external_runtime_version = $3,
+         external_session_id = $4,
+         updated_at = NOW()
+       WHERE id = $1
+         AND external_runtime_id IS NOT NULL`,
+      [
+        id,
+        input.provider.slice(0, 120),
+        input.runtimeVersion.slice(0, 240),
+        input.sessionId?.slice(0, 500) ?? null,
+      ],
     );
   }
 
@@ -1165,6 +1218,7 @@ export class JobRepository {
     options: {
       readonly baseBackoffMs?: number;
       readonly maxBackoffMs?: number;
+      readonly retryable?: boolean;
     } = {},
   ): Promise<FailedJobResult> {
     return this.database.transaction(async (client) => {
@@ -1195,7 +1249,8 @@ export class JobRepository {
       const row = current.rows[0];
       if (row === undefined) return { outcome: "ignored" };
       const safeError = error.slice(0, 4_000);
-      const hasAttempts = row.attempts < row.max_attempts;
+      const hasAttempts =
+        options.retryable !== false && row.attempts < row.max_attempts;
       if (hasAttempts) {
         const delayMs = jobRetryDelayMs(
           row.attempts,

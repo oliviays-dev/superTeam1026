@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 import {
   RunCancelledError,
   RunLeaseLostError,
+  RunNonRetryableError,
   type RunExecutor,
 } from "@pluginmax/application";
 import type { ClaimedJob, PlatformRepositories } from "@pluginmax/database";
@@ -340,6 +341,7 @@ export class WorkerRuntime {
           {
             baseBackoffMs: this.options.retryBaseDelayMs,
             maxBackoffMs: this.options.retryMaxDelayMs,
+            retryable: !(error instanceof RunNonRetryableError),
           },
         );
         this.log("job.failed", {
