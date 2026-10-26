@@ -6,6 +6,8 @@ const config = loadConfig();
 const { app } = buildApi({
   databaseUrl: config.databaseUrl,
   fileStoreRoot: config.fileStoreRoot,
+  localActorId: config.localActorId,
+  workerHeartbeatStaleAfterSeconds: config.workerHeartbeatStaleAfterSeconds,
   logger: { level: config.logLevel },
 });
 

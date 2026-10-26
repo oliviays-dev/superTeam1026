@@ -43,6 +43,7 @@ export default defineConfig({
     },
   },
   test: {
+    fileParallelism: false,
     include: [
       "packages/*/src/**/*.test.ts",
       "apps/*/src/**/*.test.ts",

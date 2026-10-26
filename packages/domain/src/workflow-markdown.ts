@@ -216,10 +216,7 @@ export function validateWorkflowMarkdown(
         approvalDueValue === undefined
           ? undefined
           : parseDurationSeconds(approvalDueValue);
-      if (
-        approvalDueValue !== undefined &&
-        approvalDueSeconds === undefined
-      ) {
+      if (approvalDueValue !== undefined && approvalDueSeconds === undefined) {
         errors.push({
           line: raw.line,
           code: "invalid_approval_due",
@@ -301,8 +298,9 @@ export function validateWorkflowMarkdown(
           message: `节点“${raw.name}”的 approval-expire-after 必须使用 ms、s、m 或 h 单位`,
         });
       }
-      const approvalExpireActionValue =
-        raw.fields.get("approval-expire-action")?.[0];
+      const approvalExpireActionValue = raw.fields.get(
+        "approval-expire-action",
+      )?.[0];
       if (
         approvalExpireActionValue !== undefined &&
         !["reject", "block"].includes(approvalExpireActionValue)

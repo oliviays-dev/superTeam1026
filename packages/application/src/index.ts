@@ -18,6 +18,9 @@ import type {
   CompleteWorkflowNodeInput,
   DecideWorkflowApprovalInput,
   ImportWorkflowMarkdownInput,
+  IdempotencyCleanupInput,
+  Job,
+  JobListQuery,
   Meeting,
   MeetingDetail,
   MeetingMessage,
@@ -58,6 +61,7 @@ import type {
   WorkflowSweepResult,
   WorkflowStepDefinition,
   WorkflowValidationResult,
+  OperationsSnapshot,
 } from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
@@ -991,6 +995,71 @@ export class PlatformApplication {
 
   async getWorkbench(): Promise<WorkbenchSummary> {
     return this.repositories.workbench.summary();
+  }
+
+  async getOperationsSnapshot(input: {
+    readonly expectedMigrationVersion: number;
+    readonly workerHeartbeatStaleAfterSeconds: number;
+  }): Promise<OperationsSnapshot> {
+    const [metrics, workers, deadLetters, approvalSlaOverdue] =
+      await Promise.all([
+        this.repositories.runtimeReliability.getMetrics(input),
+        this.repositories.runtimeReliability.listWorkers(
+          input.workerHeartbeatStaleAfterSeconds,
+        ),
+        this.repositories.jobs.list({ status: "dead_letter", limit: 20 }),
+        this.repositories.runtimeReliability.listApprovalSlaOverdue(20),
+      ]);
+    return {
+      metrics,
+      workers,
+      deadLetters,
+      approvalSlaOverdue,
+    };
+  }
+
+  async listJobs(query: JobListQuery): Promise<Job[]> {
+    return this.repositories.jobs.list({
+      limit: query.limit,
+      ...(query.status === undefined ? {} : { status: query.status }),
+    });
+  }
+
+  async recoverDeadLetterJob(
+    jobId: string,
+    reason: string,
+    actorId: string,
+  ): Promise<Job> {
+    const job = await this.repositories.jobs.get(jobId);
+    if (job === undefined) {
+      throw new ApplicationError("job_not_found", "Job not found", 404);
+    }
+    if (job.status !== "dead_letter" && job.status !== "failed") {
+      throw new ApplicationError(
+        "job_not_recoverable",
+        `Job cannot be recovered from status ${job.status}`,
+        409,
+      );
+    }
+    const recovered = await this.repositories.jobs.recoverDeadLetter(
+      jobId,
+      actorId,
+      reason,
+    );
+    if (recovered === undefined) {
+      throw new ApplicationError(
+        "job_recovery_conflict",
+        "Job changed concurrently and could not be recovered",
+        409,
+      );
+    }
+    return recovered;
+  }
+
+  cleanupIdempotencyReceipts(input: IdempotencyCleanupInput) {
+    return this.repositories.runtimeReliability.cleanupIdempotencyReceipts(
+      input,
+    );
   }
 
   private async requireProject(projectId: string): Promise<Project> {
@@ -2461,9 +2530,7 @@ export class PlatformApplication {
         );
       }
       const escalations =
-        await this.repositories.workflowRuntime.escalateDueApprovals(
-          batchSize,
-        );
+        await this.repositories.workflowRuntime.escalateDueApprovals(batchSize);
       for (const group of escalations) {
         escalated += Math.max(1, group.count);
         affectedInstances.add(group.instanceId);
@@ -2497,13 +2564,15 @@ export class PlatformApplication {
         expired,
         affectedInstances: affectedInstances.size,
       };
-      await this.repositories.runtimeReliability.recordMaintenance({
-        kind: "approval_sla",
-        status: "completed",
-        processedCount: reminded + escalated + expired,
-        metrics: result,
-        startedAt,
-      });
+      if (reminded + escalated + expired > 0) {
+        await this.repositories.runtimeReliability.recordMaintenance({
+          kind: "approval_sla",
+          status: "completed",
+          processedCount: reminded + escalated + expired,
+          metrics: result,
+          startedAt,
+        });
+      }
       return result;
     } catch (error) {
       await this.repositories.runtimeReliability.recordMaintenance({

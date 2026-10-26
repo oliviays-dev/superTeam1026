@@ -91,11 +91,7 @@ export type ReadinessResponse = z.infer<typeof readinessResponseSchema>;
 
 export const runtimeMaintenanceSchema = z.object({
   id: z.string().uuid(),
-  kind: z.enum([
-    "idempotency_cleanup",
-    "approval_sla",
-    "lease_recovery",
-  ]),
+  kind: z.enum(["idempotency_cleanup", "approval_sla", "lease_recovery"]),
   status: z.enum(["completed", "failed"]),
   processedCount: z.number().int().nonnegative(),
   archivedCount: z.number().int().nonnegative(),
@@ -180,3 +176,8 @@ export const approvalSlaSweepResultSchema = z.object({
 export type ApprovalSlaSweepResult = z.infer<
   typeof approvalSlaSweepResultSchema
 >;
+
+export const approvalSlaSweepInputSchema = z.object({
+  batchSize: z.number().int().min(1).max(1_000).default(100),
+});
+export type ApprovalSlaSweepInput = z.infer<typeof approvalSlaSweepInputSchema>;

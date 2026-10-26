@@ -1,12 +1,6 @@
 import { hostname } from "node:os";
-import {
-  RunLeaseLostError,
-  type RunExecutor,
-} from "@pluginmax/application";
-import type {
-  ClaimedJob,
-  PlatformRepositories,
-} from "@pluginmax/database";
+import { RunLeaseLostError, type RunExecutor } from "@pluginmax/application";
+import type { ClaimedJob, PlatformRepositories } from "@pluginmax/database";
 import type { WorkerStatus } from "@pluginmax/contracts";
 
 export class WorkerShutdownError extends Error {
@@ -124,7 +118,9 @@ export class WorkerRuntime {
         active.controller.abort(new WorkerShutdownError());
       }
       await Promise.race([
-        Promise.allSettled([...this.active.values()].map((job) => job.completion)),
+        Promise.allSettled(
+          [...this.active.values()].map((job) => job.completion),
+        ),
         sleep(5_000),
       ]);
     }
@@ -142,7 +138,6 @@ export class WorkerRuntime {
         job = await this.dependencies.repositories.jobs.claimNext(
           this.options.workerId,
           this.options.leaseSeconds,
-          this.options.retryBaseDelayMs,
         );
       } catch (error) {
         this.log("job.claim_failed", { error: this.message(error) });
@@ -307,18 +302,21 @@ export class WorkerRuntime {
           retryScheduled: recovered.filter(
             (job) => job.outcome === "retry_scheduled",
           ).length,
-          deadLetters: recovered.filter(
-            (job) => job.outcome === "dead_letter",
-          ).length,
+          deadLetters: recovered.filter((job) => job.outcome === "dead_letter")
+            .length,
         });
       }
-      await this.dependencies.repositories.runtimeReliability.recordMaintenance({
-        kind: "lease_recovery",
-        status: "completed",
-        processedCount: recovered.length,
-        metrics: { recovered },
-        startedAt,
-      });
+      if (recovered.length > 0) {
+        await this.dependencies.repositories.runtimeReliability.recordMaintenance(
+          {
+            kind: "lease_recovery",
+            status: "completed",
+            processedCount: recovered.length,
+            metrics: { recovered },
+            startedAt,
+          },
+        );
+      }
       if (this.dependencies.sweep !== undefined) {
         await this.dependencies.sweep();
       }

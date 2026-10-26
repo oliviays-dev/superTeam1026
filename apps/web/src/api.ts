@@ -1,6 +1,7 @@
 import type {
   Agent,
   AgentDetail,
+  ApprovalSlaSweepResult,
   Artifact,
   ContextPack,
   ContextReceipt,
@@ -18,6 +19,9 @@ import type {
   CreateWorkflowInput,
   CosignWorkflowApprovalInput,
   ImportWorkflowMarkdownInput,
+  IdempotencyCleanupInput,
+  IdempotencyCleanupResult,
+  Job,
   Meeting,
   MeetingDetail,
   MeetingMessage,
@@ -28,10 +32,12 @@ import type {
   ProjectMember,
   ProjectRole,
   PublishMemoryTruthInput,
+  ReadinessResponse,
   RetryWorkflowNodeInput,
   Run,
   RunDelta,
   RunDetail,
+  OperationsSnapshot,
   Task,
   TaskDetail,
   TaskMessage,
@@ -402,6 +408,50 @@ export function publishMemoryTruth(
 
 export function getWorkbench(): Promise<WorkbenchSummary> {
   return request("/workbench");
+}
+
+export function getOperationsSnapshot(): Promise<OperationsSnapshot> {
+  return request("/operations");
+}
+
+export function getReadiness(): Promise<ReadinessResponse> {
+  return request("/ready");
+}
+
+export async function listJobs(status?: Job["status"]): Promise<Job[]> {
+  const query = status === undefined ? "" : `?status=${status}`;
+  return (await request<ListResponse<Job>>(`/jobs${query}`)).items;
+}
+
+export function recoverDeadLetterJob(
+  jobId: string,
+  reason: string,
+): Promise<Job> {
+  return request(`/jobs/${jobId}/recover`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+    headers: { "idempotency-key": crypto.randomUUID() },
+  });
+}
+
+export function cleanupIdempotencyReceipts(
+  input: IdempotencyCleanupInput,
+): Promise<IdempotencyCleanupResult> {
+  return request("/operations/idempotency/cleanup", {
+    method: "POST",
+    body: JSON.stringify(input),
+    headers: { "idempotency-key": crypto.randomUUID() },
+  });
+}
+
+export function sweepApprovalSla(
+  batchSize = 100,
+): Promise<ApprovalSlaSweepResult> {
+  return request("/operations/approval-sla/sweep", {
+    method: "POST",
+    body: JSON.stringify({ batchSize }),
+    headers: { "idempotency-key": crypto.randomUUID() },
+  });
 }
 
 export async function listWorkflows(

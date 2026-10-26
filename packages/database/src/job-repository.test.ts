@@ -156,10 +156,9 @@ integration("JobRepository PostgreSQL semantics", () => {
   });
 
   it("moves exhausted jobs to dead letter and supports manual recovery", async () => {
-    await database.query(
-      "UPDATE jobs SET max_attempts = 1 WHERE id = $1",
-      ["10000000-0000-4000-8000-000000000004"],
-    );
+    await database.query("UPDATE jobs SET max_attempts = 1 WHERE id = $1", [
+      "10000000-0000-4000-8000-000000000004",
+    ]);
     const claimed = await jobs.claimNext("worker-dead", 30);
     await database.query(
       "UPDATE jobs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
@@ -175,7 +174,8 @@ integration("JobRepository PostgreSQL semantics", () => {
     );
     expect(manuallyRecovered).toMatchObject({
       status: "queued",
-      attempts: 0,
+      attempts: 1,
+      maxAttempts: 2,
       manualRecoveryCount: 1,
     });
     expect(await jobs.recoverDeadLetter(randomUUID(), "local-admin", "x")).toBe(

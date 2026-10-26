@@ -99,3 +99,6 @@ Workflow runtime semantics and migration notes are in
 [v1-batch5-workflow-runtime.md](./docs/v1-batch5-workflow-runtime.md).
 Recovery, idempotency and approval governance are documented in
 [v1-batch6-workflow-governance.md](./docs/v1-batch6-workflow-governance.md).
+
+批次 7 的运行可靠性、审批 SLA、保留策略和运维入口见
+[v1-batch7-runtime-reliability.md](./docs/v1-batch7-runtime-reliability.md).

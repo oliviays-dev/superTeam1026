@@ -592,10 +592,9 @@ export class WorkflowRuntimeRepository {
       );
       const escalated: ApprovalSlaGroup[] = [];
       for (const candidate of candidates.rows) {
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtext($1))",
-          [candidate.instance_id],
-        );
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+          candidate.instance_id,
+        ]);
         const approvals = await client.query<WorkflowApprovalRow>(
           `SELECT *
            FROM workflow_approvals
@@ -708,10 +707,9 @@ export class WorkflowRuntimeRepository {
       );
       const expired: ApprovalSlaGroup[] = [];
       for (const candidate of candidates.rows) {
-        await client.query(
-          "SELECT pg_advisory_xact_lock(hashtext($1))",
-          [candidate.instance_id],
-        );
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+          candidate.instance_id,
+        ]);
         const updated = await client.query(
           `UPDATE workflow_approvals
            SET

@@ -97,11 +97,7 @@ export function loadConfig(
       20,
       "WORKER_RECOVERY_BATCH_SIZE",
     ),
-    workerConcurrency: integer(
-      env.WORKER_CONCURRENCY,
-      4,
-      "WORKER_CONCURRENCY",
-    ),
+    workerConcurrency: integer(env.WORKER_CONCURRENCY, 4, "WORKER_CONCURRENCY"),
     workerShutdownGraceMs: integer(
       env.WORKER_SHUTDOWN_GRACE_MS,
       30_000,

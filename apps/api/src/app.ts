@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   type ApiError,
   agentStatusInputSchema,
+  approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
   createAgentInputSchema,
   createMemoryClaimInputSchema,
@@ -17,6 +18,9 @@ import {
   cosignWorkflowApprovalInputSchema,
   decideWorkflowApprovalInputSchema,
   importWorkflowMarkdownInputSchema,
+  idempotencyCleanupInputSchema,
+  jobListQuerySchema,
+  jobRecoveryInputSchema,
   publishMemoryTruthInputSchema,
   taskReviewInputSchema,
   retryWorkflowNodeInputSchema,
@@ -47,6 +51,9 @@ import { ZodError, z } from "zod";
 export interface BuildApiOptions {
   readonly databaseUrl: string;
   readonly fileStoreRoot: string;
+  readonly localActorId?: string;
+  readonly expectedMigrationVersion?: number;
+  readonly workerHeartbeatStaleAfterSeconds?: number;
   readonly logger?: FastifyServerOptions["logger"];
   readonly database?: Database;
 }
@@ -57,6 +64,7 @@ const artifactParamsSchema = z.object({ artifactId: z.string().uuid() });
 const taskAttachmentParamsSchema = z.object({
   attachmentId: z.string().uuid(),
 });
+const jobParamsSchema = z.object({ jobId: z.string().uuid() });
 const workflowParamsSchema = z.object({ workflowId: z.string().uuid() });
 const workflowInstanceParamsSchema = z.object({
   instanceId: z.string().uuid(),
@@ -159,6 +167,11 @@ export function buildApi(options: BuildApiOptions): {
   const fileStore = new LocalFileStore(options.fileStoreRoot);
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
+  const localActorId = options.localActorId ?? "local-admin";
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 12;
+  const workerHeartbeatStaleAfterSeconds =
+    options.workerHeartbeatStaleAfterSeconds ?? 30;
+  const startedAt = Date.now();
   const app = Fastify({
     logger: options.logger ?? true,
     genReqId: () => randomUUID(),
@@ -251,6 +264,16 @@ export function buildApi(options: BuildApiOptions): {
     }
   }
 
+  function assertAdministrator(actorId: string): void {
+    if (actorId !== localActorId) {
+      throw new ApplicationError(
+        "forbidden",
+        "Platform administrator permission is required",
+        403,
+      );
+    }
+  }
+
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
       return reply
@@ -294,8 +317,103 @@ export function buildApi(options: BuildApiOptions): {
   });
 
   app.get("/api/v1/health", async (_request, reply) => {
-    await database.ping();
-    return reply.send({ ok: true });
+    return reply.send({
+      ok: true,
+      service: "pluginmax-api",
+      uptimeSeconds: Math.floor((Date.now() - startedAt) / 1_000),
+    });
+  });
+
+  app.get("/api/v1/ready", async (_request, reply) => {
+    let databaseReady = false;
+    let databaseDetail = "database reachable";
+    let metrics:
+      | Awaited<ReturnType<typeof repositories.runtimeReliability.getMetrics>>
+      | undefined;
+    try {
+      await database.ping();
+      databaseReady = true;
+      metrics = await repositories.runtimeReliability.getMetrics({
+        expectedMigrationVersion,
+        workerHeartbeatStaleAfterSeconds,
+      });
+    } catch (error) {
+      databaseDetail = error instanceof Error ? error.message : String(error);
+    }
+    const migrationReady =
+      metrics !== undefined &&
+      metrics.migrationVersion >= expectedMigrationVersion;
+    const workerReady = (metrics?.activeWorkers ?? 0) > 0;
+    const ready = databaseReady && migrationReady && workerReady;
+    return reply.status(ready ? 200 : 503).send({
+      ok: ready,
+      status: ready ? "ready" : "not_ready",
+      checks: {
+        database: {
+          ok: databaseReady,
+          status: databaseReady ? "up" : "down",
+          detail: databaseDetail,
+        },
+        worker: {
+          ok: workerReady,
+          status: workerReady ? "online" : "unavailable",
+          ...(metrics === undefined
+            ? {}
+            : {
+                detail: `${metrics.activeWorkers} active worker(s), heartbeat TTL ${workerHeartbeatStaleAfterSeconds}s`,
+              }),
+        },
+        migration: {
+          ok: migrationReady,
+          status: migrationReady ? "current" : "behind",
+          ...(metrics === undefined
+            ? {}
+            : {
+                detail: `database version ${metrics.migrationVersion}, expected ${expectedMigrationVersion}`,
+              }),
+        },
+      },
+    });
+  });
+
+  app.get("/api/v1/operations", async (_request, reply) => {
+    return reply.send(
+      await application.getOperationsSnapshot({
+        expectedMigrationVersion,
+        workerHeartbeatStaleAfterSeconds,
+      }),
+    );
+  });
+
+  app.get("/api/v1/jobs", async (request, reply) => {
+    const query = jobListQuerySchema.parse(request.query);
+    return reply.send({ items: await application.listJobs(query) });
+  });
+
+  app.post("/api/v1/jobs/:jobId/recover", async (request, reply) => {
+    const { jobId } = jobParamsSchema.parse(request.params);
+    const input = jobRecoveryInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    return reply.send(
+      await application.recoverDeadLetterJob(jobId, input.reason, actorId),
+    );
+  });
+
+  app.post("/api/v1/operations/approval-sla/sweep", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    const input = approvalSlaSweepInputSchema.parse(request.body ?? {});
+    return reply.send(
+      await application.sweepApprovalSla(actorId, input.batchSize),
+    );
+  });
+
+  app.post("/api/v1/operations/idempotency/cleanup", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    const input = idempotencyCleanupInputSchema.parse(request.body ?? {});
+    return reply.send(await application.cleanupIdempotencyReceipts(input));
   });
 
   app.get("/api/v1/projects", async (_request, reply) => {

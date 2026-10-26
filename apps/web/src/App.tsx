@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  Activity,
   Bot,
   FolderKanban,
   LayoutDashboard,
@@ -13,6 +14,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { AgentsView } from "./AgentsView.js";
+import { OperationsDashboardView } from "./OperationsDashboardView.js";
 import {
   MeetingsView,
   WorkbenchView,
@@ -22,7 +24,13 @@ import { ProjectsView, TasksView } from "./WorkspaceViews.js";
 import { listAllAgents, listProjects } from "./api.js";
 
 type AppView =
-  "workbench" | "projects" | "tasks" | "workflows" | "meetings" | "agents";
+  | "workbench"
+  | "projects"
+  | "tasks"
+  | "workflows"
+  | "meetings"
+  | "agents"
+  | "operations";
 
 type Theme = "dark" | "light";
 
@@ -33,6 +41,7 @@ const navItems = [
   { key: "workflows", label: "工作流", icon: WorkflowIcon },
   { key: "meetings", label: "沟通", icon: MessagesSquare },
   { key: "agents", label: "AI伙伴", icon: Bot },
+  { key: "operations", label: "运维", icon: Activity },
 ] as const satisfies ReadonlyArray<{
   key: AppView;
   label: string;
@@ -259,6 +268,7 @@ export function App() {
           />
         )}
         {view === "agents" && <AgentsView />}
+        {view === "operations" && <OperationsDashboardView />}
       </div>
     </div>
   );

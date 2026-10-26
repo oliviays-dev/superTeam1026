@@ -817,7 +817,6 @@ export class JobRepository {
   async claimNext(
     owner: string,
     leaseSeconds: number,
-    baseBackoffMs = 1_000,
   ): Promise<ClaimedJob | undefined> {
     return this.database.transaction(async (client) => {
       const candidate = await client.query<{
@@ -1253,7 +1252,11 @@ export class JobRepository {
              dead_letter_at = CASE WHEN $2 = 'dead_letter' THEN NOW() ELSE NULL END,
              updated_at = NOW()
            WHERE id = $1`,
-          [job.id, outcome === "retry_scheduled" ? "queued" : "dead_letter", delayMs],
+          [
+            job.id,
+            outcome === "retry_scheduled" ? "queued" : "dead_letter",
+            delayMs,
+          ],
         );
         await client.query(
           `UPDATE job_attempts
@@ -1342,7 +1345,7 @@ export class JobRepository {
         `UPDATE jobs
          SET
            status = 'queued',
-           attempts = 0,
+           max_attempts = LEAST(100, GREATEST(max_attempts + 1, attempts + 1)),
            available_at = NOW(),
            last_error = NULL,
            lease_owner = NULL,

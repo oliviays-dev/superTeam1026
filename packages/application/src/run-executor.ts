@@ -108,9 +108,7 @@ export class RunExecutor {
 
     const controller = new AbortController();
     const relayExternalAbort = () => {
-      controller.abort(
-        options.signal?.reason ?? new RunLeaseLostError(),
-      );
+      controller.abort(options.signal?.reason ?? new RunLeaseLostError());
     };
     if (options.signal?.aborted) {
       relayExternalAbort();
@@ -169,8 +167,7 @@ export class RunExecutor {
           const artifact =
             existingArtifacts.find(
               (candidate) =>
-                candidate.name === ref.name &&
-                candidate.sha256 === ref.sha256,
+                candidate.name === ref.name && candidate.sha256 === ref.sha256,
             ) ??
             (await this.repositories.artifacts.save({
               runId,

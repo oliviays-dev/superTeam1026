@@ -125,9 +125,14 @@ export class RuntimeReliabilityRepository {
     const result = await this.database.query<WorkerRow>(
       `SELECT *
        FROM runtime_workers
-       WHERE heartbeat_at >= NOW() - ($1 || ' seconds')::interval
-          OR status IN ('draining', 'stopped')
-       ORDER BY heartbeat_at DESC
+       WHERE heartbeat_at >= NOW() - (($1::integer * 5) || ' seconds')::interval
+       ORDER BY
+         CASE status
+           WHEN 'running' THEN 0
+           WHEN 'draining' THEN 1
+           ELSE 2
+         END,
+         heartbeat_at DESC
        LIMIT $2`,
       [staleAfterSeconds, limit],
     );
@@ -150,24 +155,17 @@ export class RuntimeReliabilityRepository {
     readonly workerHeartbeatStaleAfterSeconds: number;
   }): Promise<RuntimeMetrics> {
     const stale = input.workerHeartbeatStaleAfterSeconds;
-    const [
-      migration,
-      workers,
-      jobs,
-      runs,
-      approvals,
-      archive,
-      maintenance,
-    ] = await Promise.all([
-      this.database.query<{ version: number | null }>(
-        "SELECT MAX(version) AS version FROM platform_migrations",
-      ),
-      this.database.query<{
-        active_workers: string;
-        total_concurrency: string;
-        active_jobs: string;
-      }>(
-        `SELECT
+    const [migration, workers, jobs, runs, approvals, archive, maintenance] =
+      await Promise.all([
+        this.database.query<{ version: number | null }>(
+          "SELECT MAX(version) AS version FROM platform_migrations",
+        ),
+        this.database.query<{
+          active_workers: string;
+          total_concurrency: string;
+          active_jobs: string;
+        }>(
+          `SELECT
            (SELECT COUNT(*) FROM runtime_workers
             WHERE status = 'running'
               AND heartbeat_at >= NOW() - ($1 || ' seconds')::interval)::text
@@ -178,15 +176,15 @@ export class RuntimeReliabilityRepository {
              AS total_concurrency,
            (SELECT COUNT(*) FROM jobs WHERE status = 'running')::text
              AS active_jobs`,
-        [stale],
-      ),
-      this.database.query<{
-        queue_depth: string;
-        dead_letter_count: string;
-        completed_24h: string;
-        failed_24h: string;
-      }>(
-        `SELECT
+          [stale],
+        ),
+        this.database.query<{
+          queue_depth: string;
+          dead_letter_count: string;
+          completed_24h: string;
+          failed_24h: string;
+        }>(
+          `SELECT
            COUNT(*) FILTER (WHERE status = 'queued')::text AS queue_depth,
            COUNT(*) FILTER (WHERE status = 'dead_letter')::text
              AS dead_letter_count,
@@ -199,12 +197,12 @@ export class RuntimeReliabilityRepository {
                AND updated_at >= NOW() - INTERVAL '24 hours'
            )::text AS failed_24h
          FROM jobs`,
-      ),
-      this.database.query<{
-        timed_out_24h: string;
-        completed_24h: string;
-      }>(
-        `SELECT
+        ),
+        this.database.query<{
+          timed_out_24h: string;
+          completed_24h: string;
+        }>(
+          `SELECT
            COUNT(*) FILTER (
              WHERE status = 'timeout'
                AND ended_at >= NOW() - INTERVAL '24 hours'
@@ -214,13 +212,13 @@ export class RuntimeReliabilityRepository {
                AND ended_at >= NOW() - INTERVAL '24 hours'
            )::text AS completed_24h
          FROM runs`,
-      ),
-      this.database.query<{
-        backlog: string;
-        overdue: string;
-        expired_24h: string;
-      }>(
-        `SELECT
+        ),
+        this.database.query<{
+          backlog: string;
+          overdue: string;
+          expired_24h: string;
+        }>(
+          `SELECT
            COUNT(*) FILTER (WHERE status = 'pending')::text AS backlog,
            COUNT(*) FILTER (
              WHERE status = 'pending' AND due_at IS NOT NULL AND due_at <= NOW()
@@ -230,20 +228,20 @@ export class RuntimeReliabilityRepository {
                AND expired_at >= NOW() - INTERVAL '24 hours'
            )::text AS expired_24h
          FROM workflow_approvals`,
-      ),
-      this.database.query<{ count: string; bytes: string }>(
-        `SELECT
+        ),
+        this.database.query<{ count: string; bytes: string }>(
+          `SELECT
            COUNT(*)::text AS count,
            COALESCE(SUM(pg_column_size(row_to_json(archive))), 0)::text AS bytes
          FROM workflow_idempotency_archive AS archive`,
-      ),
-      this.database.query<MaintenanceRow>(
-        `SELECT *
+        ),
+        this.database.query<MaintenanceRow>(
+          `SELECT *
          FROM runtime_maintenance_runs
          ORDER BY completed_at DESC
          LIMIT 1`,
-      ),
-    ]);
+        ),
+      ]);
     const jobStats = jobs.rows[0]!;
     const runStats = runs.rows[0]!;
     const approvalStats = approvals.rows[0]!;
@@ -259,9 +257,7 @@ export class RuntimeReliabilityRepository {
       migrationVersion: Number(migration.rows[0]?.version ?? 0),
       workerHeartbeatStaleAfterSeconds: stale,
       activeWorkers: Number(workers.rows[0]?.active_workers ?? 0),
-      totalWorkerConcurrency: Number(
-        workers.rows[0]?.total_concurrency ?? 0,
-      ),
+      totalWorkerConcurrency: Number(workers.rows[0]?.total_concurrency ?? 0),
       activeJobs: Number(workers.rows[0]?.active_jobs ?? 0),
       queueDepth: Number(jobStats.queue_depth),
       deadLetterCount: Number(jobStats.dead_letter_count),

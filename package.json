@@ -31,6 +31,8 @@
     "test:smoke:workflow-runtime": "./scripts/workflow-runtime-smoke.sh",
     "test:smoke:workflow-postgres": "./scripts/workflow-postgres-smoke.sh",
     "test:smoke:workflow-governance": "./scripts/workflow-governance-smoke.sh",
+    "test:smoke:runtime": "./scripts/runtime-reliability-smoke.sh",
+    "test:smoke:runtime-postgres": "./scripts/runtime-postgres-smoke.sh",
     "test:membership": "./scripts/membership-smoke.sh",
     "typecheck": "pnpm run build:packages && pnpm -r typecheck"
   },
