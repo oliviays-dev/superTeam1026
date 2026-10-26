@@ -12,6 +12,10 @@ import type {
   WorkerHeartbeat,
   WorkerStatus,
 } from "@pluginmax/contracts";
+import {
+  createRootTraceContext,
+  type TraceContext,
+} from "@pluginmax/contracts";
 import type { Database } from "./database.js";
 
 interface WorkerRow {
@@ -31,6 +35,7 @@ interface MaintenanceRow {
   id: string;
   kind: RuntimeMaintenance["kind"];
   status: RuntimeMaintenance["status"];
+  trace_id: string | null;
   trigger_source: RuntimeMaintenanceTrigger;
   scheduled_for: Date | null;
   duration_ms: number | null;
@@ -78,6 +83,7 @@ function maintenanceFromRow(row: MaintenanceRow): RuntimeMaintenance {
     id: row.id,
     kind: row.kind,
     status: row.status,
+    traceId: row.trace_id,
     triggerSource: row.trigger_source,
     scheduledFor: row.scheduled_for?.toISOString() ?? null,
     durationMs: row.duration_ms,
@@ -225,6 +231,7 @@ export class RuntimeReliabilityRepository {
       const claimed: ClaimedMaintenance[] = [];
       for (const row of due.rows) {
         const leaseToken = randomUUID();
+        const trace = createRootTraceContext();
         await client.query(
           `UPDATE runtime_maintenance_schedules
            SET
@@ -243,6 +250,8 @@ export class RuntimeReliabilityRepository {
           scheduledFor: row.next_run_at.toISOString(),
           intervalSeconds: row.interval_seconds,
           consecutiveFailures: row.consecutive_failures,
+          traceId: trace.traceId,
+          spanId: trace.spanId,
         });
       }
       return claimed;
@@ -645,10 +654,12 @@ export class RuntimeReliabilityRepository {
     options: {
       readonly triggerSource?: RuntimeMaintenanceTrigger;
       readonly scheduledFor?: Date;
+      readonly trace?: TraceContext;
     } = {},
   ): Promise<IdempotencyCleanupResult> {
     return this.database.transaction(async (client) => {
       const maintenanceId = randomUUID();
+      const trace = options.trace ?? createRootTraceContext();
       const startedAt = new Date();
       const cutoff = new Date(Date.now() - input.olderThanSeconds * 1_000);
       const candidates = await client.query<{ id: string }>(
@@ -691,11 +702,11 @@ export class RuntimeReliabilityRepository {
         `INSERT INTO runtime_maintenance_runs (
            id, kind, status, processed_count, archived_count, deleted_count,
            metrics, trigger_source, scheduled_for, duration_ms,
-           started_at, completed_at
+           trace_id, span_id, started_at, completed_at
          ) VALUES (
            $1, 'idempotency_cleanup', 'completed', $2, $3, $4,
-           $5::jsonb, $6, $7,
-           $8, $9, NOW()
+           $5::jsonb, $6, $7, $8,
+           $9, $10, $11, NOW()
          )`,
         [
           maintenanceId,
@@ -709,6 +720,8 @@ export class RuntimeReliabilityRepository {
           options.triggerSource ?? "manual",
           options.scheduledFor ?? null,
           Math.max(0, Date.now() - startedAt.getTime()),
+          trace.traceId,
+          trace.spanId,
           startedAt,
         ],
       );
@@ -734,15 +747,17 @@ export class RuntimeReliabilityRepository {
     readonly scheduledFor?: Date;
     readonly durationMs?: number;
     readonly startedAt: Date;
+    readonly trace?: TraceContext;
   }): Promise<RuntimeMaintenance> {
+    const trace = input.trace ?? createRootTraceContext();
     const result = await this.database.query<MaintenanceRow>(
       `INSERT INTO runtime_maintenance_runs (
          id, kind, status, processed_count, archived_count, deleted_count,
          error, metrics, trigger_source, scheduled_for, duration_ms,
-         started_at, completed_at
+         trace_id, span_id, started_at, completed_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11,
-         $12, NOW()
+         $12, $13, $14, NOW()
        )
        RETURNING *`,
       [
@@ -757,6 +772,8 @@ export class RuntimeReliabilityRepository {
         input.triggerSource ?? "manual",
         input.scheduledFor ?? null,
         input.durationMs ?? Math.max(0, Date.now() - input.startedAt.getTime()),
+        trace.traceId,
+        trace.spanId,
         input.startedAt,
       ],
     );

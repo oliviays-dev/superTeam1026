@@ -83,6 +83,9 @@ pnpm test:smoke:workflow-agent
 pnpm test:smoke:workflow-runtime
 pnpm test:smoke:workflow-governance
 pnpm test:smoke:workflow-postgres
+pnpm test:smoke:production-postgres
+pnpm test:smoke:backup
+pnpm test:smoke:backup-restore
 pnpm test:e2e:browser
 ```
 
@@ -105,3 +108,6 @@ Recovery, idempotency and approval governance are documented in
 
 批次 8 的持久化维护调度、Runtime effect 回执、取消交接、指标与告警见
 [v1-batch8-maintenance-effect-safety.md](./docs/v1-batch8-maintenance-effect-safety.md).
+
+批次 9 的源码/PostgreSQL 备份恢复、W3C Run 追踪和生产负向验收见
+[v1-batch9-production-readiness.md](./docs/v1-batch9-production-readiness.md).

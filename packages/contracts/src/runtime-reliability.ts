@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { spanIdSchema, traceIdSchema } from "./trace.js";
 
 export const jobStatusSchema = z.enum([
   "queued",
@@ -17,6 +18,7 @@ export const jobSchema = z.object({
   status: jobStatusSchema,
   attempts: z.number().int().nonnegative(),
   maxAttempts: z.number().int().positive(),
+  traceId: traceIdSchema.nullable(),
   availableAt: z.string().datetime({ offset: true }),
   leaseOwner: z.string().nullable(),
   leaseExpiresAt: z.string().datetime({ offset: true }).nullable(),
@@ -113,6 +115,7 @@ export const runtimeMaintenanceSchema = z.object({
   id: z.string().uuid(),
   kind: runtimeMaintenanceKindSchema,
   status: z.enum(["completed", "failed"]),
+  traceId: traceIdSchema.nullable(),
   triggerSource: runtimeMaintenanceTriggerSchema,
   scheduledFor: z.string().datetime({ offset: true }).nullable(),
   durationMs: z.number().int().nonnegative().nullable(),
@@ -159,6 +162,8 @@ export const claimedMaintenanceSchema = z.object({
   scheduledFor: z.string().datetime({ offset: true }),
   intervalSeconds: z.number().int().positive(),
   consecutiveFailures: z.number().int().nonnegative(),
+  traceId: traceIdSchema,
+  spanId: spanIdSchema,
 });
 export type ClaimedMaintenance = z.infer<typeof claimedMaintenanceSchema>;
 
@@ -174,6 +179,7 @@ export const runtimeEffectReceiptSchema = z.object({
   id: z.string().uuid(),
   effectKey: z.string().min(1).max(500),
   runId: z.string().uuid(),
+  traceId: traceIdSchema.nullable(),
   jobId: z.string().uuid().nullable(),
   operation: z.string(),
   status: runtimeEffectStatusSchema,

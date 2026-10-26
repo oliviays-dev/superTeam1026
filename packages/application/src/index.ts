@@ -38,6 +38,8 @@ import type {
   TaskDetail,
   TaskMessage,
   TaskReviewInput,
+  TraceContext,
+  TransferTaskInput,
   TransferWorkflowApprovalInput,
   UpdateAgentInput,
   UpdateMemoryClaimInput,
@@ -63,6 +65,7 @@ import type {
   WorkflowValidationResult,
   OperationsSnapshot,
 } from "@pluginmax/contracts";
+import { createRootTraceContext } from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
   assertValidTaskDependencies,
@@ -91,6 +94,28 @@ export class ApplicationError extends Error {
   ) {
     super(message);
     this.name = "ApplicationError";
+  }
+}
+
+const implementedRuntimeKinds = new Set<Agent["runtimeKind"]>([
+  "fake",
+  "dsh-sdk",
+]);
+
+function requireExecutableRuntime(agent: Agent): void {
+  if (agent.status !== "active") {
+    throw new ApplicationError(
+      "agent_unavailable",
+      "The assigned agent is disabled",
+      409,
+    );
+  }
+  if (!implementedRuntimeKinds.has(agent.runtimeKind)) {
+    throw new ApplicationError(
+      "runtime_adapter_unavailable",
+      `Runtime adapter ${agent.runtimeKind} is not available on this platform worker`,
+      409,
+    );
   }
 }
 
@@ -471,6 +496,13 @@ export class PlatformApplication {
     if (project === undefined) {
       throw new ApplicationError("project_not_found", "Project not found", 404);
     }
+    if (project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Tasks cannot be created in an archived project",
+        409,
+      );
+    }
     const projectTasks = await this.repositories.tasks.list(input.projectId);
     const candidateTaskId = randomUUID();
     guardTaskDependencyRule(() =>
@@ -534,6 +566,110 @@ export class PlatformApplication {
         input.dependsOn === undefined
           ? null
           : { dependsOn: [...input.dependsOn] },
+    });
+    return this.getTaskDetail(id);
+  }
+
+  async transferTask(
+    id: string,
+    input: TransferTaskInput,
+  ): Promise<TaskDetail> {
+    const task = await this.getTask(id);
+    const project = await this.requireProject(task.projectId);
+    if (project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Tasks in an archived project cannot be transferred",
+        409,
+      );
+    }
+    if (task.status === "done" || task.status === "cancelled") {
+      throw new ApplicationError(
+        "task_terminal",
+        "A completed or cancelled task cannot be transferred",
+        409,
+      );
+    }
+    const runs = await this.repositories.runs.listByTask(id);
+    if (
+      runs.some((run) =>
+        ["queued", "running", "waiting_approval", "interrupted"].includes(
+          run.status,
+        ),
+      )
+    ) {
+      throw new ApplicationError(
+        "task_run_active",
+        "A task with an active or recoverable Run cannot be transferred",
+        409,
+      );
+    }
+    const members = await this.repositories.projectMemberships.listMembers(
+      task.projectId,
+    );
+    let agentId: string;
+    if (input.roleId !== undefined) {
+      const member = members.find(
+        (candidate) =>
+          candidate.kind === "agent" &&
+          candidate.status === "active" &&
+          candidate.roles.some((role) => role.id === input.roleId),
+      );
+      if (member === undefined) {
+        throw new ApplicationError(
+          "project_role_has_no_agent",
+          "The selected project role has no active AI member",
+          409,
+        );
+      }
+      agentId = member.actorId;
+    } else {
+      const member = members.find(
+        (candidate) =>
+          candidate.kind === "agent" &&
+          candidate.status === "active" &&
+          candidate.actorId === input.agentId,
+      );
+      if (member === undefined) {
+        throw new ApplicationError(
+          "transfer_target_not_member",
+          "The transfer target must be an active AI project member",
+          409,
+        );
+      }
+      agentId = member.actorId;
+    }
+    const agent = await this.repositories.agents.get(agentId);
+    if (agent === undefined) {
+      throw new ApplicationError(
+        "agent_not_found",
+        "Transfer target agent was not found",
+        404,
+      );
+    }
+    requireExecutableRuntime(agent);
+    const updated = await this.repositories.tasks.transferAssignee(
+      id,
+      agentId,
+      input.roleId,
+    );
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "task_transfer_conflict",
+        "Task state changed while the transfer was being applied",
+        409,
+      );
+    }
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: id,
+      kind: "transfer",
+      actorId: "local-admin",
+      actorName: "Local Admin",
+      summary: `将任务转移给 AI 伙伴“${agent.name}”`,
+      data: {
+        agentId,
+        ...(input.roleId === undefined ? {} : { roleId: input.roleId }),
+      },
     });
     return this.getTaskDetail(id);
   }
@@ -684,12 +820,23 @@ export class PlatformApplication {
     return updated;
   }
 
-  async dispatchTask(taskId: string): Promise<{ runId: string }> {
+  async dispatchTask(
+    taskId: string,
+    trace: TraceContext = createRootTraceContext(),
+  ): Promise<{ runId: string }> {
     const task = await this.getTask(taskId);
     if (!canTransitionTask(task.status, "in_progress")) {
       throw new ApplicationError(
         "invalid_task_status",
         `Task cannot be dispatched from status ${task.status}`,
+        409,
+      );
+    }
+    const project = await this.requireProject(task.projectId);
+    if (project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Tasks in an archived project cannot be dispatched",
         409,
       );
     }
@@ -701,6 +848,7 @@ export class PlatformApplication {
         409,
       );
     }
+    requireExecutableRuntime(agent);
     const projectTasks = await this.repositories.tasks.list(task.projectId);
     const unresolved = unresolvedTaskDependencies(task, projectTasks);
     if (unresolved.length > 0) {
@@ -720,7 +868,12 @@ export class PlatformApplication {
       runtimeKind: agent.runtimeKind,
     };
     const runId = randomUUID();
-    await this.repositories.runs.enqueue({ runId, task, inputSnapshot });
+    await this.repositories.runs.enqueue({
+      runId,
+      task,
+      inputSnapshot,
+      trace,
+    });
     await this.repositories.runs.appendEvent(
       runId,
       "input.snapshot",
@@ -1074,6 +1227,7 @@ export class PlatformApplication {
     options: {
       readonly triggerSource?: "scheduler" | "manual" | "api" | "legacy";
       readonly scheduledFor?: Date;
+      readonly trace?: TraceContext;
     } = {},
   ) {
     return this.repositories.runtimeReliability.cleanupIdempotencyReceipts(
@@ -2525,6 +2679,7 @@ export class PlatformApplication {
     options: {
       readonly triggerSource?: "scheduler" | "manual" | "api" | "legacy";
       readonly scheduledFor?: Date;
+      readonly trace?: TraceContext;
     } = {},
   ): Promise<ApprovalSlaSweepResult> {
     const startedAt = new Date();
@@ -2598,6 +2753,7 @@ export class PlatformApplication {
           ...(options.scheduledFor === undefined
             ? {}
             : { scheduledFor: options.scheduledFor }),
+          ...(options.trace === undefined ? {} : { trace: options.trace }),
           startedAt,
         });
       }
@@ -2618,6 +2774,7 @@ export class PlatformApplication {
         ...(options.scheduledFor === undefined
           ? {}
           : { scheduledFor: options.scheduledFor }),
+        ...(options.trace === undefined ? {} : { trace: options.trace }),
         startedAt,
       });
       throw error;
@@ -3030,14 +3187,23 @@ export class PlatformApplication {
     if (existingTask !== undefined) {
       await this.repositories.tasks.setStatus(task.id, "queued");
     }
+    const project = await this.requireProject(instance.projectId);
+    if (project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Workflow nodes in an archived project cannot be dispatched",
+        409,
+      );
+    }
     const agent = await this.repositories.agents.get(task.agentId);
-    if (agent === undefined || agent.status !== "active") {
+    if (agent === undefined) {
       throw new ApplicationError(
         "agent_unavailable",
         "Workflow Agent is unavailable",
         409,
       );
     }
+    requireExecutableRuntime(agent);
     node.attempt += 1;
     if (node.attempt > definition.maxAttempts) {
       throw new ApplicationError(
@@ -3074,6 +3240,7 @@ export class PlatformApplication {
       idempotencyKey: `${instance.id}:${node.nodeId}:${node.visits}:${node.attempt}`,
       workflowInstanceId: instance.id,
       workflowNodeId: node.nodeId,
+      trace: createRootTraceContext(),
     });
     await this.repositories.runs.appendEvent(
       runId,

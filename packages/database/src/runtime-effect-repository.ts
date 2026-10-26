@@ -10,6 +10,7 @@ interface RuntimeEffectRow {
   id: string;
   effect_key: string;
   run_id: string;
+  trace_id: string | null;
   job_id: string | null;
   operation: string;
   status: RuntimeEffectStatus;
@@ -32,6 +33,7 @@ function effectFromRow(row: RuntimeEffectRow): RuntimeEffectReceipt {
     id: row.id,
     effectKey: row.effect_key,
     runId: row.run_id,
+    traceId: row.trace_id,
     jobId: row.job_id,
     operation: row.operation,
     status: row.status,
@@ -99,11 +101,12 @@ export class RuntimeEffectRepository {
       if (row === undefined) {
         const inserted = await client.query<RuntimeEffectRow>(
           `INSERT INTO runtime_effect_receipts (
-             id, effect_key, run_id, job_id, operation, status, attempt,
+             id, effect_key, run_id, trace_id, job_id, operation, status, attempt,
              lease_owner, lease_token, lease_expires_at,
              started_at, updated_at
            ) VALUES (
-             $1, $2, $3, $4, $5, 'running', 1,
+             $1, $2, $3, (SELECT trace_id FROM runs WHERE id = $3),
+             $4, $5, 'running', 1,
              $6, $7, NOW() + ($8 || ' seconds')::interval,
              NOW(), NOW()
            )

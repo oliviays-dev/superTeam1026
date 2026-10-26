@@ -3,3 +3,5 @@ export * from "./runtime-execution.js";
 export * from "./platform.js";
 export * from "./collaboration.js";
 export * from "./runtime-reliability.js";
+export * from "./trace.js";
+export * from "./trace-projection.js";

@@ -23,6 +23,8 @@ import {
   jobRecoveryInputSchema,
   publishMemoryTruthInputSchema,
   taskReviewInputSchema,
+  traceIdSchema,
+  transferTaskInputSchema,
   retryWorkflowNodeInputSchema,
   startWorkflowInputSchema,
   uploadTaskAttachmentInputSchema,
@@ -36,6 +38,10 @@ import {
   validateWorkflowMarkdownInputSchema,
   workflowAuditQuerySchema,
   workflowReasonInputSchema,
+  createRootTraceContext,
+  formatTraceparent,
+  parseTraceparent,
+  type TraceContext,
 } from "@pluginmax/contracts";
 import {
   ApplicationError,
@@ -64,6 +70,7 @@ export interface BuildApiOptions {
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
 const runParamsSchema = z.object({ runId: z.string().uuid() });
+const traceParamsSchema = z.object({ traceId: traceIdSchema });
 const artifactParamsSchema = z.object({ artifactId: z.string().uuid() });
 const taskAttachmentParamsSchema = z.object({
   attachmentId: z.string().uuid(),
@@ -172,7 +179,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 13;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 14;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -180,6 +187,37 @@ export function buildApi(options: BuildApiOptions): {
     logger: options.logger ?? true,
     genReqId: () => randomUUID(),
     bodyLimit: 32 * 1024 * 1024,
+  });
+  const requestTraces = new WeakMap<FastifyRequest, TraceContext>();
+
+  app.addHook("onRequest", async (request, reply) => {
+    const header = request.headers.traceparent;
+    const incoming = Array.isArray(header) ? header[0] : header;
+    const parsed = parseTraceparent(incoming);
+    const trace = parsed ?? createRootTraceContext();
+    requestTraces.set(request, trace);
+    reply.header("traceparent", formatTraceparent(trace));
+    reply.header("x-pluginmax-trace-id", trace.traceId);
+    if (incoming !== undefined && parsed === undefined) {
+      reply.header("x-pluginmax-trace-invalid", "1");
+    }
+  });
+  app.addHook("onResponse", async (request, reply) => {
+    request.log.info(
+      {
+        requestId: String(request.id),
+        traceId: requestTraces.get(request)?.traceId,
+        route: request.routeOptions.url,
+        statusCode: reply.statusCode,
+      },
+      "request.completed",
+    );
+  });
+  app.addHook("onSend", async (request, reply, payload) => {
+    if (request.url.startsWith("/api/v1/")) {
+      reply.header("cache-control", "no-store");
+    }
+    return payload;
   });
 
   async function idempotentRoute<T>(input: {
@@ -421,6 +459,7 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(
       await application.sweepApprovalSla(actorId, input.batchSize, {
         triggerSource: "api",
+        trace: requestTraces.get(request) ?? createRootTraceContext(),
       }),
     );
   });
@@ -432,6 +471,7 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(
       await application.cleanupIdempotencyReceipts(input, {
         triggerSource: "api",
+        trace: requestTraces.get(request) ?? createRootTraceContext(),
       }),
     );
   });
@@ -598,7 +638,37 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/tasks/:id/dispatch", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
-    return reply.status(202).send(await application.dispatchTask(id));
+    return reply
+      .status(202)
+      .send(
+        await application.dispatchTask(
+          id,
+          requestTraces.get(request) ?? createRootTraceContext(),
+        ),
+      );
+  });
+
+  app.post("/api/v1/tasks/:id/transfer", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = transferTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    if (actorId !== localActorId) {
+      throw new ApplicationError(
+        "forbidden",
+        "Only the local administrator can transfer tasks",
+        403,
+      );
+    }
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.transfer",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.transferTask(id, input),
+    });
   });
 
   app.post("/api/v1/tasks/:id/review", async (request, reply) => {
@@ -673,6 +743,15 @@ export function buildApi(options: BuildApiOptions): {
   app.get("/api/v1/runs/:runId", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
     return reply.send(await application.getRunDetail(runId));
+  });
+
+  app.get("/api/v1/traces/:traceId", async (request, reply) => {
+    const { traceId } = traceParamsSchema.parse(request.params);
+    const trace = await repositories.traces.get(traceId);
+    if (trace === undefined) {
+      throw new ApplicationError("trace_not_found", "Trace was not found", 404);
+    }
+    return reply.send(trace);
   });
 
   app.get("/api/v1/runs/:runId/events", async (request, reply) => {

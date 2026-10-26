@@ -424,7 +424,7 @@ wait_pid_exit "$worker_int"
 wait_log "$LOG_DIR/sigint-a.log" '"event":"worker.drained"' 10
 
 metrics="$(api GET /operations)"
-if [[ "$(printf '%s' "$metrics" | jq '.metrics.migrationVersion')" != "13" ||
+if [[ "$(printf '%s' "$metrics" | jq '.metrics.migrationVersion')" != "14" ||
       "$(printf '%s' "$metrics" | jq '.maintenanceSchedules | length')" != "4" ]]; then
   printf 'operations migration version mismatch\n' >&2
   exit 1

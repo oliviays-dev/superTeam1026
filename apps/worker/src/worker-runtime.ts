@@ -170,6 +170,8 @@ export class WorkerRuntime {
       this.log("job.claimed", {
         jobId: job.id,
         runId: job.runId,
+        traceId: job.traceId,
+        traceparent: `00-${job.traceId}-${job.spanId}-01`,
         attempt: job.attempts,
         maxAttempts: job.maxAttempts,
         recovered: job.recoveredRun,
@@ -227,6 +229,8 @@ export class WorkerRuntime {
         owner: this.options.workerId,
         leaseSeconds: this.options.leaseSeconds,
         leaseRenewIntervalMs: this.options.leaseRenewIntervalMs,
+        traceId: job.traceId,
+        jobSpanId: job.spanId,
         assertLease: async () => {
           const owned = await this.dependencies.repositories.jobs.hasLease(
             job.id,
@@ -254,7 +258,11 @@ export class WorkerRuntime {
         job.leaseToken,
       );
       if (completed) {
-        this.log("job.completed", { jobId: job.id, runId: job.runId });
+        this.log("job.completed", {
+          jobId: job.id,
+          runId: job.runId,
+          traceId: job.traceId,
+        });
       } else {
         this.log("job.complete_ignored", {
           jobId: job.id,
@@ -267,7 +275,11 @@ export class WorkerRuntime {
         error instanceof RunCancelledError ||
         reason instanceof RunCancelledError
       ) {
-        this.log("job.cancelled", { jobId: job.id, runId: job.runId });
+        this.log("job.cancelled", {
+          jobId: job.id,
+          runId: job.runId,
+          traceId: job.traceId,
+        });
         return;
       }
       if (reason instanceof WorkerShutdownError) {
@@ -309,6 +321,7 @@ export class WorkerRuntime {
         this.log("job.failed", {
           jobId: job.id,
           runId: job.runId,
+          traceId: job.traceId,
           outcome: result.outcome,
           error: message,
           availableAt: result.availableAt,

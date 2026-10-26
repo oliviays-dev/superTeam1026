@@ -98,3 +98,20 @@ groups:
         annotations:
           summary: Runtime effect replay volume is elevated.
           runbook: docs/v1-batch8-maintenance-effect-safety.md#runtime-effect-recovery
+
+      - alert: PluginmaxBackupFailed
+        expr: pluginmax_backup_last_attempt_success == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The latest Pluginmax source or PostgreSQL backup failed.
+          runbook: docs/v1-batch9-production-readiness.md#backup-failure
+
+      - alert: PluginmaxBackupStale
+        expr: time() - pluginmax_backup_last_success_timestamp_seconds > 129600
+        labels:
+          severity: critical
+        annotations:
+          summary: No successful Pluginmax backup has completed in 36 hours.
+          runbook: docs/v1-batch9-production-readiness.md#backup-failure

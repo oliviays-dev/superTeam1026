@@ -148,7 +148,7 @@ psql_database "$upgrade_database" "
   );
 "
 
-DATABASE_URL="$upgrade_database_url" CI=true \
+DATABASE_URL="$upgrade_database_url" MIGRATION_TARGET_VERSION=13 CI=true \
   pnpm --filter @pluginmax/database exec tsx src/migrate-cli.ts
 
 version="$(psql_database "$upgrade_database" \

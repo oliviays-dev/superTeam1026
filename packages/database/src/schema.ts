@@ -966,3 +966,149 @@ CREATE INDEX IF NOT EXISTS runtime_effect_cancel_idx
   WHERE cancel_requested_at IS NOT NULL
     AND status = 'running';
 `;
+
+export const PRODUCTION_READINESS_SCHEMA_SQL = `
+ALTER TABLE runs
+  ADD COLUMN IF NOT EXISTS trace_id TEXT,
+  ADD COLUMN IF NOT EXISTS trace_root_span_id TEXT;
+
+ALTER TABLE run_events
+  ADD COLUMN IF NOT EXISTS trace_id TEXT,
+  ADD COLUMN IF NOT EXISTS span_id TEXT,
+  ADD COLUMN IF NOT EXISTS parent_span_id TEXT;
+
+ALTER TABLE jobs
+  ADD COLUMN IF NOT EXISTS trace_id TEXT;
+
+ALTER TABLE job_attempts
+  ADD COLUMN IF NOT EXISTS trace_id TEXT,
+  ADD COLUMN IF NOT EXISTS span_id TEXT;
+
+ALTER TABLE runtime_effect_receipts
+  ADD COLUMN IF NOT EXISTS trace_id TEXT;
+
+ALTER TABLE runtime_maintenance_runs
+  ADD COLUMN IF NOT EXISTS trace_id TEXT,
+  ADD COLUMN IF NOT EXISTS span_id TEXT;
+
+UPDATE runs
+SET
+  trace_id = md5(id::text),
+  trace_root_span_id = substring(md5('root-span:' || id::text), 1, 16)
+WHERE trace_id IS NULL;
+
+UPDATE jobs AS job
+SET trace_id = run.trace_id
+FROM runs AS run
+WHERE job.run_id = run.id
+  AND job.trace_id IS NULL;
+
+UPDATE run_events AS event
+SET
+  trace_id = run.trace_id,
+  span_id = substring(md5('event-span:' || event.id::text), 1, 16),
+  parent_span_id = run.trace_root_span_id
+FROM runs AS run
+WHERE event.run_id = run.id
+  AND event.trace_id IS NULL;
+
+UPDATE job_attempts AS attempt
+SET
+  trace_id = job.trace_id,
+  span_id = substring(md5('attempt-span:' || attempt.id::text), 1, 16)
+FROM jobs AS job
+WHERE attempt.job_id = job.id
+  AND attempt.trace_id IS NULL;
+
+UPDATE runtime_effect_receipts AS effect
+SET trace_id = run.trace_id
+FROM runs AS run
+WHERE effect.run_id = run.id
+  AND effect.trace_id IS NULL;
+
+UPDATE runtime_maintenance_runs
+SET
+  trace_id = md5(id::text),
+  span_id = substring(md5('maintenance-span:' || id::text), 1, 16)
+WHERE trace_id IS NULL;
+
+ALTER TABLE runs
+  DROP CONSTRAINT IF EXISTS runs_trace_id_check,
+  DROP CONSTRAINT IF EXISTS runs_trace_root_span_id_check,
+  ADD CONSTRAINT runs_trace_id_check
+    CHECK (trace_id ~ '^[0-9a-f]{32}$'),
+  ADD CONSTRAINT runs_trace_root_span_id_check
+    CHECK (trace_root_span_id ~ '^[0-9a-f]{16}$');
+
+ALTER TABLE run_events
+  DROP CONSTRAINT IF EXISTS run_events_trace_id_check,
+  DROP CONSTRAINT IF EXISTS run_events_span_id_check,
+  DROP CONSTRAINT IF EXISTS run_events_parent_span_id_check,
+  ADD CONSTRAINT run_events_trace_id_check
+    CHECK (trace_id ~ '^[0-9a-f]{32}$'),
+  ADD CONSTRAINT run_events_span_id_check
+    CHECK (span_id ~ '^[0-9a-f]{16}$'),
+  ADD CONSTRAINT run_events_parent_span_id_check
+    CHECK (parent_span_id ~ '^[0-9a-f]{16}$');
+
+ALTER TABLE jobs
+  DROP CONSTRAINT IF EXISTS jobs_trace_id_check,
+  ADD CONSTRAINT jobs_trace_id_check
+    CHECK (trace_id ~ '^[0-9a-f]{32}$');
+
+ALTER TABLE job_attempts
+  DROP CONSTRAINT IF EXISTS job_attempts_trace_id_check,
+  DROP CONSTRAINT IF EXISTS job_attempts_span_id_check,
+  ADD CONSTRAINT job_attempts_trace_id_check
+    CHECK (trace_id ~ '^[0-9a-f]{32}$'),
+  ADD CONSTRAINT job_attempts_span_id_check
+    CHECK (span_id ~ '^[0-9a-f]{16}$');
+
+ALTER TABLE runtime_effect_receipts
+  DROP CONSTRAINT IF EXISTS runtime_effect_receipts_trace_id_check,
+  ADD CONSTRAINT runtime_effect_receipts_trace_id_check
+    CHECK (trace_id ~ '^[0-9a-f]{32}$');
+
+ALTER TABLE runtime_maintenance_runs
+  DROP CONSTRAINT IF EXISTS runtime_maintenance_runs_trace_id_check,
+  DROP CONSTRAINT IF EXISTS runtime_maintenance_runs_span_id_check,
+  ADD CONSTRAINT runtime_maintenance_runs_trace_id_check
+    CHECK (trace_id ~ '^[0-9a-f]{32}$'),
+  ADD CONSTRAINT runtime_maintenance_runs_span_id_check
+    CHECK (span_id ~ '^[0-9a-f]{16}$');
+
+CREATE INDEX IF NOT EXISTS runs_trace_idx
+  ON runs(trace_id);
+
+CREATE INDEX IF NOT EXISTS run_events_trace_idx
+  ON run_events(trace_id, created_at);
+
+CREATE INDEX IF NOT EXISTS jobs_trace_idx
+  ON jobs(trace_id);
+
+CREATE INDEX IF NOT EXISTS job_attempts_trace_idx
+  ON job_attempts(trace_id);
+
+CREATE INDEX IF NOT EXISTS runtime_effect_trace_idx
+  ON runtime_effect_receipts(trace_id);
+
+CREATE INDEX IF NOT EXISTS runtime_maintenance_trace_idx
+  ON runtime_maintenance_runs(trace_id);
+
+ALTER TABLE task_events
+  DROP CONSTRAINT IF EXISTS task_events_kind_check;
+
+ALTER TABLE task_events
+  ADD CONSTRAINT task_events_kind_check
+  CHECK (kind IN (
+    'created',
+    'updated',
+    'status',
+    'message',
+    'review',
+    'dependency',
+    'attachment',
+    'dispatch',
+    'transfer'
+  ));
+`;

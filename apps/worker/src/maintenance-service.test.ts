@@ -69,6 +69,8 @@ describe("RuntimeMaintenanceService", () => {
           scheduledFor,
           intervalSeconds: 60,
           consecutiveFailures: 0,
+          traceId: "11111111111111111111111111111111",
+          spanId: "1111111111111111",
         },
       ],
     });
@@ -76,6 +78,12 @@ describe("RuntimeMaintenanceService", () => {
     expect(sweepApprovalSla).toHaveBeenCalledWith("worker-test", 100, {
       triggerSource: "scheduler",
       scheduledFor: new Date(scheduledFor),
+      trace: {
+        traceId: "11111111111111111111111111111111",
+        spanId: "1111111111111111",
+        parentSpanId: null,
+        traceFlags: 1,
+      },
     });
     expect(complete).toHaveBeenCalledWith(
       "approval_sla",
@@ -94,6 +102,8 @@ describe("RuntimeMaintenanceService", () => {
           scheduledFor: new Date().toISOString(),
           intervalSeconds: 60,
           consecutiveFailures: 2,
+          traceId: "22222222222222222222222222222222",
+          spanId: "2222222222222222",
         },
       ],
       rejection: new Error("approval store unavailable"),

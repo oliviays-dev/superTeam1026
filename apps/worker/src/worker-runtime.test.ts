@@ -30,6 +30,8 @@ function claimed(index: number): ClaimedJob {
     maxAttempts: 3,
     leaseToken: `token-${index}`,
     recoveredRun: false,
+    traceId: index.toString(16).padStart(32, "0"),
+    spanId: index.toString(16).padStart(16, "0"),
   };
 }
 

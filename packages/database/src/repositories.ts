@@ -16,10 +16,12 @@ import type {
   Task,
   TaskMessage,
   TaskStatus,
+  TraceContext,
   UpdateAgentInput,
   UpdateProjectInput,
   UpdateTaskInput,
 } from "@pluginmax/contracts";
+import { createRootTraceContext, newSpanId } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import { Database } from "./database.js";
 import {
@@ -56,6 +58,7 @@ import { WorkflowIdempotencyRepository } from "./workflow-idempotency-repository
 import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
 import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.js";
 import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
+import { RuntimeTraceRepository } from "./runtime-trace-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -438,6 +441,33 @@ export class TaskRepository {
     return result.rows.map(taskMessageFromRow);
   }
 
+  async transferAssignee(
+    id: string,
+    agentId: string,
+    roleId?: string,
+  ): Promise<Task | undefined> {
+    const result = await this.database.query(
+      `UPDATE tasks
+       SET agent_id = $2, role_id = $3, updated_at = NOW()
+       WHERE id = $1
+         AND status IN ('queued', 'in_progress', 'review')
+         AND NOT EXISTS (
+           SELECT 1
+           FROM runs
+           WHERE runs.task_id = tasks.id
+             AND runs.status IN (
+               'queued',
+               'running',
+               'waiting_approval',
+               'interrupted'
+             )
+         )
+       RETURNING id`,
+      [id, agentId, roleId ?? null],
+    );
+    return (result.rowCount ?? 0) === 0 ? undefined : this.get(id);
+  }
+
   async addMessage(
     id: string,
     input: CreateTaskMessageInput,
@@ -508,21 +538,24 @@ export interface EnqueueRunInput {
   readonly maxAttempts?: number;
   readonly workflowInstanceId?: string;
   readonly workflowNodeId?: string;
+  readonly trace?: TraceContext;
 }
 
 export class RunRepository {
   constructor(private readonly database: Database) {}
 
   async enqueue(input: EnqueueRunInput): Promise<Run> {
+    const trace = input.trace ?? createRootTraceContext();
     return this.database.transaction(async (client) => {
       const result = await client.query<RunRow>(
         `INSERT INTO runs (
            id, project_id, task_id, agent_id, status, input_snapshot,
            observability, attempt, timeout_at, idempotency_key,
-           workflow_instance_id, workflow_node_id, created_at, updated_at
+           workflow_instance_id, workflow_node_id, trace_id,
+           trace_root_span_id, created_at, updated_at
          ) VALUES (
            $1, $2, $3, $4, 'queued', $5::jsonb,
-           $6::jsonb, $7, $8, $9, $10, $11, NOW(), NOW()
+           $6::jsonb, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
          )
          RETURNING *`,
         [
@@ -542,26 +575,35 @@ export class RunRepository {
           input.idempotencyKey ?? null,
           input.workflowInstanceId ?? null,
           input.workflowNodeId ?? null,
+          trace.traceId,
+          trace.spanId,
         ],
       );
       await client.query(
         `INSERT INTO jobs (
-           id, run_id, kind, status, available_at, max_attempts,
+           id, run_id, kind, status, available_at, max_attempts, trace_id,
            created_at, updated_at
          ) VALUES (
-           $1, $2, 'agent.run', 'queued', NOW(), $3, NOW(), NOW()
+           $1, $2, 'agent.run', 'queued', NOW(), $3, $4, NOW(), NOW()
          )`,
-        [randomUUID(), input.runId, input.maxAttempts ?? 3],
+        [randomUUID(), input.runId, input.maxAttempts ?? 3, trace.traceId],
       );
       await client.query(
         `INSERT INTO run_events (
-           id, run_id, seq, type, visibility, summary, data, created_at
-         ) VALUES ($1, $2, 1, 'run.queued', 'public', $3, $4::jsonb, NOW())`,
+           id, run_id, seq, type, visibility, summary, data,
+           trace_id, span_id, parent_span_id, created_at
+         ) VALUES (
+           $1, $2, 1, 'run.queued', 'public', $3, $4::jsonb,
+           $5, $6, $7, NOW()
+         )`,
         [
           randomUUID(),
           input.runId,
           "Run 已进入执行队列",
           JSON.stringify({ taskId: input.task.id }),
+          trace.traceId,
+          newSpanId(),
+          trace.spanId,
         ],
       );
       await client.query(
@@ -649,19 +691,25 @@ export class RunRepository {
     client: PoolClient | Database = this.database,
   ): Promise<PlatformRunEvent> {
     const text = `INSERT INTO run_events (
-         id, run_id, seq, type, visibility, summary, data, created_at
+         id, run_id, seq, type, visibility, summary, data,
+         trace_id, span_id, parent_span_id, created_at
        )
        SELECT
          $1,
          $2,
-         COALESCE(MAX(seq), 0) + 1,
+         COALESCE(MAX(event.seq), 0) + 1,
          $3,
          $4,
          $5,
          $6::jsonb,
+         run.trace_id,
+         $7,
+         run.trace_root_span_id,
          NOW()
-       FROM run_events
-       WHERE run_id = $2
+       FROM runs AS run
+       LEFT JOIN run_events AS event ON event.run_id = run.id
+       WHERE run.id = $2
+       GROUP BY run.id, run.trace_id, run.trace_root_span_id
        RETURNING *`;
     const values = [
       randomUUID(),
@@ -670,6 +718,7 @@ export class RunRepository {
       visibility,
       summary,
       data === null ? null : JSON.stringify(data),
+      newSpanId(),
     ];
     const result =
       client instanceof Database
@@ -778,6 +827,8 @@ export interface ClaimedJob {
   readonly maxAttempts: number;
   readonly leaseToken: string;
   readonly recoveredRun: boolean;
+  readonly traceId: string;
+  readonly spanId: string;
 }
 
 export interface RecoveredExpiredJob {
@@ -799,6 +850,7 @@ interface JobRow {
   status: Job["status"];
   attempts: number;
   max_attempts: number;
+  trace_id: string | null;
   available_at: Date;
   lease_owner: string | null;
   lease_expires_at: Date | null;
@@ -820,6 +872,7 @@ function jobFromRow(row: JobRow): Job {
     status: row.status,
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
+    traceId: row.trace_id,
     availableAt: row.available_at.toISOString(),
     leaseOwner: row.lease_owner,
     leaseExpiresAt: row.lease_expires_at?.toISOString() ?? null,
@@ -858,6 +911,8 @@ export class JobRepository {
         max_attempts: number;
         run_status: string;
         task_id: string;
+        trace_id: string | null;
+        trace_root_span_id: string | null;
       }>(
         `SELECT
            job.id,
@@ -865,7 +920,9 @@ export class JobRepository {
            job.attempts,
            job.max_attempts,
            run.status AS run_status,
-           run.task_id
+           run.task_id,
+           COALESCE(job.trace_id, run.trace_id) AS trace_id,
+           run.trace_root_span_id
          FROM jobs AS job
          JOIN runs AS run ON run.id = job.run_id
          WHERE job.status = 'queued'
@@ -878,6 +935,22 @@ export class JobRepository {
       const row = candidate.rows[0];
       if (row === undefined) return undefined;
       const leaseToken = randomUUID();
+      const traceId =
+        row.trace_id ??
+        (
+          await client.query<{ trace_id: string }>(
+            "SELECT trace_id FROM runs WHERE id = $1",
+            [row.run_id],
+          )
+        ).rows[0]?.trace_id;
+      if (traceId === undefined) {
+        throw new Error("claimed job is missing a trace id");
+      }
+      const spanId = newSpanId();
+      await client.query(
+        "UPDATE jobs SET trace_id = COALESCE(trace_id, $2) WHERE id = $1",
+        [row.id, traceId],
+      );
       const claimed = await client.query<{
         attempts: number;
       }>(
@@ -899,9 +972,10 @@ export class JobRepository {
       await client.query(
         `INSERT INTO job_attempts (
            id, job_id, attempt, worker_id, lease_token, status,
+           trace_id, span_id,
            started_at, heartbeat_at
-         ) VALUES ($1, $2, $3, $4, $5, 'running', NOW(), NOW())`,
-        [randomUUID(), row.id, attempts, owner, leaseToken],
+         ) VALUES ($1, $2, $3, $4, $5, 'running', $6, $7, NOW(), NOW())`,
+        [randomUUID(), row.id, attempts, owner, leaseToken, traceId, spanId],
       );
       if (row.run_status === "interrupted") {
         await client.query(
@@ -912,11 +986,13 @@ export class JobRepository {
         );
         await client.query(
           `INSERT INTO run_events (
-             id, run_id, seq, type, visibility, summary, data, created_at
+             id, run_id, seq, type, visibility, summary, data,
+             trace_id, span_id, parent_span_id, created_at
            )
            SELECT
              $1, $2, COALESCE(MAX(seq), 0) + 1,
-             'run.recovered', 'public', $3, $4::jsonb, NOW()
+             'run.recovered', 'public', $3, $4::jsonb,
+             $5, $6, $7, NOW()
            FROM run_events
            WHERE run_id = $2`,
           [
@@ -924,6 +1000,9 @@ export class JobRepository {
             row.run_id,
             "Run 已由新的 Worker 租约恢复",
             JSON.stringify({ workerId: owner, attempt: attempts }),
+            traceId,
+            newSpanId(),
+            row.trace_root_span_id,
           ],
         );
       }
@@ -940,6 +1019,8 @@ export class JobRepository {
         maxAttempts: row.max_attempts,
         leaseToken,
         recoveredRun: row.run_status === "interrupted",
+        traceId,
+        spanId,
       };
     });
   }
@@ -1467,13 +1548,17 @@ async function appendRunEventWithClient(
 ): Promise<void> {
   await client.query(
     `INSERT INTO run_events (
-       id, run_id, seq, type, visibility, summary, data, created_at
+       id, run_id, seq, type, visibility, summary, data,
+       trace_id, span_id, parent_span_id, created_at
      )
      SELECT
-       $1, $2, COALESCE(MAX(seq), 0) + 1, $3, 'public', $4, $5::jsonb, NOW()
-     FROM run_events
-     WHERE run_id = $2`,
-    [randomUUID(), runId, type, summary, JSON.stringify(data)],
+       $1, $2, COALESCE(MAX(event.seq), 0) + 1, $3, 'public', $4, $5::jsonb,
+       run.trace_id, $6, run.trace_root_span_id, NOW()
+     FROM runs AS run
+     LEFT JOIN run_events AS event ON event.run_id = run.id
+     WHERE run.id = $2
+     GROUP BY run.id, run.trace_id, run.trace_root_span_id`,
+    [randomUUID(), runId, type, summary, JSON.stringify(data), newSpanId()],
   );
 }
 
@@ -1496,6 +1581,7 @@ export class PlatformRepositories {
   readonly workbench: WorkbenchRepository;
   readonly runtimeReliability: RuntimeReliabilityRepository;
   readonly runtimeEffects: RuntimeEffectRepository;
+  readonly traces: RuntimeTraceRepository;
 
   constructor(database: Database) {
     this.projects = new ProjectRepository(database);
@@ -1516,5 +1602,6 @@ export class PlatformRepositories {
     this.workbench = new WorkbenchRepository(database);
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
     this.runtimeEffects = new RuntimeEffectRepository(database);
+    this.traces = new RuntimeTraceRepository(database);
   }
 }

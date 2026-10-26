@@ -1,0 +1,7 @@
+# Install as a host cron entry after replacing PLUGINMAX_ROOT and BACKUP_ROOT.
+# A successful run writes a Prometheus textfile when the collector is configured.
+17 3 * * * cd /srv/pluginmax-platform && \
+  PLUGINMAX_BACKUP_ROOT=/var/backups/pluginmax \
+  PLUGINMAX_BACKUP_METRICS_FILE=/var/lib/node_exporter/textfile/pluginmax-backup.prom \
+  PLUGINMAX_BACKUP_ALERT_WEBHOOK=https://alerts.example.invalid/pluginmax-backup \
+  ./scripts/backup.sh >> /var/log/pluginmax-backup.log 2>&1

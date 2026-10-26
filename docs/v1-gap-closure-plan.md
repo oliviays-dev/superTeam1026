@@ -73,8 +73,8 @@
 
 ### 2.7 工程保障
 
-- [ ] 定期源码和数据库备份。
-- [ ] OpenTelemetry 或等价 Run 追踪。
+- [x] 定期源码和数据库备份。
+- [x] OpenTelemetry 或等价 Run 追踪。
 - [x] Playwright 浏览器自动化回归。
 
 ## 3. 下一执行批次

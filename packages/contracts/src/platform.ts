@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { spanIdSchema, traceIdSchema } from "./trace.js";
 
 export const projectStatusSchema = z.enum(["active", "archived"]);
 export type ProjectStatus = z.infer<typeof projectStatusSchema>;
@@ -103,6 +104,21 @@ export const updateTaskInputSchema = z.object({
 });
 export type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
 
+export const transferTaskInputSchema = z
+  .object({
+    agentId: z.string().uuid().optional(),
+    roleId: z.string().uuid().optional(),
+  })
+  .superRefine((input, context) => {
+    if ((input.agentId === undefined) === (input.roleId === undefined)) {
+      context.addIssue({
+        code: "custom",
+        message: "Exactly one of agentId or roleId is required",
+      });
+    }
+  });
+export type TransferTaskInput = z.infer<typeof transferTaskInputSchema>;
+
 export const taskMessageSchema = z.object({
   id: z.string().uuid(),
   taskId: z.string().uuid(),
@@ -146,6 +162,7 @@ export const taskDetailSchema = z.object({
         "dependency",
         "attachment",
         "dispatch",
+        "transfer",
       ]),
       actorId: z.string(),
       actorName: z.string(),
@@ -317,6 +334,8 @@ export const runSchema = z.object({
   timeoutAt: z.string().datetime({ offset: true }).nullable(),
   workflowInstanceId: z.string().uuid().nullable(),
   workflowNodeId: z.string().nullable(),
+  traceId: traceIdSchema.nullable(),
+  traceRootSpanId: spanIdSchema.nullable(),
   observability: runObservabilitySchema,
   createdAt: z.string().datetime({ offset: true }),
   startedAt: z.string().datetime({ offset: true }).nullable(),
@@ -365,6 +384,9 @@ export const platformRunEventSchema = z.object({
   visibility: z.enum(["public", "restricted", "admin-only"]),
   summary: z.string().min(1).max(20_000),
   data: z.record(z.string(), z.unknown()).nullable(),
+  traceId: traceIdSchema.nullable(),
+  spanId: spanIdSchema.nullable(),
+  parentSpanId: spanIdSchema.nullable(),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type PlatformRunEvent = z.infer<typeof platformRunEventSchema>;

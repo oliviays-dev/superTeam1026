@@ -31,6 +31,13 @@ export class RuntimeMaintenanceService {
         leaseSeconds: this.options.claimLeaseSeconds,
         limit,
       });
+    for (const claim of claims) {
+      this.log?.("maintenance.claimed", {
+        kind: claim.kind,
+        traceId: claim.traceId,
+        traceparent: `00-${claim.traceId}-${claim.spanId}-01`,
+      });
+    }
     await Promise.all(claims.map((claim) => this.execute(claim)));
     return claims.length;
   }
@@ -46,12 +53,16 @@ export class RuntimeMaintenanceService {
           claim.leaseToken,
         );
       if (!completed) {
-        this.log?.("maintenance.claim_lost", { kind: claim.kind });
+        this.log?.("maintenance.claim_lost", {
+          kind: claim.kind,
+          traceId: claim.traceId,
+        });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log?.("maintenance.failed", {
         kind: claim.kind,
+        traceId: claim.traceId,
         error: message,
       });
       await this.repositories.runtimeReliability.failMaintenanceClaim(
@@ -67,6 +78,12 @@ export class RuntimeMaintenanceService {
     claim: ClaimedMaintenance,
     startedAt: Date,
   ): Promise<void> {
+    const trace = {
+      traceId: claim.traceId,
+      spanId: claim.spanId,
+      parentSpanId: null,
+      traceFlags: 1,
+    } as const;
     switch (claim.kind) {
       case "approval_sla": {
         const result = await this.application.sweepApprovalSla(
@@ -75,6 +92,7 @@ export class RuntimeMaintenanceService {
           {
             triggerSource: "scheduler",
             scheduledFor: new Date(claim.scheduledFor),
+            trace,
           },
         );
         if (result.reminded + result.escalated + result.expired > 0) {
@@ -92,6 +110,7 @@ export class RuntimeMaintenanceService {
             {
               triggerSource: "scheduler",
               scheduledFor: new Date(claim.scheduledFor),
+              trace,
             },
           );
         if (result.deletedCount > 0) {
@@ -116,6 +135,7 @@ export class RuntimeMaintenanceService {
             triggerSource: "scheduler",
             scheduledFor: new Date(claim.scheduledFor),
             startedAt,
+            trace,
           });
           this.log?.("jobs.expired_leases_recovered", {
             count: recovered.length,
@@ -137,6 +157,7 @@ export class RuntimeMaintenanceService {
             triggerSource: "scheduler",
             scheduledFor: new Date(claim.scheduledFor),
             startedAt,
+            trace,
           });
           this.log?.("runtime_effects.reconciled", reconciled);
         }

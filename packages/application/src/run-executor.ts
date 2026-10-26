@@ -77,6 +77,8 @@ export class RunExecutor {
       readonly owner?: string;
       readonly leaseSeconds?: number;
       readonly leaseRenewIntervalMs?: number;
+      readonly traceId?: string;
+      readonly jobSpanId?: string;
     } = {},
   ): Promise<void> {
     if (options.jobId === undefined) {
@@ -93,6 +95,13 @@ export class RunExecutor {
     };
     await assertLease();
     const run = await this.requireRun(runId);
+    if (
+      options.traceId !== undefined &&
+      run.traceId !== null &&
+      run.traceId !== options.traceId
+    ) {
+      throw new Error("claimed job trace does not match its run");
+    }
     const task = await this.requireTask(run.taskId);
     const agent = await this.repositories.agents.get(run.agentId);
     if (agent === undefined) throw new Error("agent is unavailable");

@@ -85,6 +85,8 @@ export interface RunRow {
   timeout_at: Date | null;
   workflow_instance_id: string | null;
   workflow_node_id: string | null;
+  trace_id: string | null;
+  trace_root_span_id: string | null;
   observability: Run["observability"];
   created_at: Date;
   started_at: Date | null;
@@ -100,6 +102,9 @@ export interface RunEventRow {
   visibility: PlatformRunEvent["visibility"];
   summary: string;
   data: Record<string, unknown> | null;
+  trace_id: string | null;
+  span_id: string | null;
+  parent_span_id: string | null;
   created_at: Date;
 }
 
@@ -197,6 +202,8 @@ export function runFromRow(row: RunRow): Run {
     timeoutAt: row.timeout_at?.toISOString() ?? null,
     workflowInstanceId: row.workflow_instance_id,
     workflowNodeId: row.workflow_node_id,
+    traceId: row.trace_id,
+    traceRootSpanId: row.trace_root_span_id,
     observability: row.observability,
     createdAt: row.created_at.toISOString(),
     startedAt: row.started_at?.toISOString() ?? null,
@@ -214,6 +221,9 @@ export function runEventFromRow(row: RunEventRow): PlatformRunEvent {
     visibility: row.visibility,
     summary: row.summary,
     data: row.data,
+    traceId: row.trace_id,
+    spanId: row.span_id,
+    parentSpanId: row.parent_span_id,
     createdAt: row.created_at.toISOString(),
   };
 }

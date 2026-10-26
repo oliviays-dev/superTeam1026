@@ -76,8 +76,11 @@ curl -fsS -X POST "$API_BASE/tasks/$task_id/messages" \
   -d '{"content":"E2E task comment"}' >/dev/null
 task_detail="$(curl -fsS "$API_BASE/tasks/$task_id/detail")"
 task_message_count="$(printf '%s' "$task_detail" | jq '.messages | length')"
+trace_id="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')"
+span_id="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(8).toString("hex"))')"
 run_id="$(
-  curl -fsS -X POST "$API_BASE/tasks/$task_id/dispatch" |
+  curl -fsS -X POST "$API_BASE/tasks/$task_id/dispatch" \
+    -H "traceparent: 00-$trace_id-$span_id-01" |
     jq -r '.runId'
 )"
 
@@ -104,9 +107,19 @@ context_hash="$(printf '%s' "$context_json" | jq -r '.pack.contentHash')"
 source_count="$(printf '%s' "$context_json" | jq '.pack.sources | length')"
 artifact_json="$(curl -fsS "$API_BASE/runs/$run_id/artifacts")"
 artifact_id="$(printf '%s' "$artifact_json" | jq -r '.items[0].id')"
-if [[ "$event_count" -lt 5 || "$output_length" -lt 20 || ${#context_hash} -ne 64 || "$source_count" -lt 2 || "$artifact_id" == "null" ]]; then
-  printf 'run verification failed: events=%s output=%s\n' \
-    "$event_count" "$output_length" >&2
+trace_json="$(curl -fsS "$API_BASE/traces/$trace_id")"
+trace_run_id="$(printf '%s' "$trace_json" | jq -r '.runs[0].id')"
+trace_job_count="$(printf '%s' "$trace_json" | jq '.jobs | length')"
+trace_attempt_count="$(printf '%s' "$trace_json" | jq '.jobAttempts | length')"
+trace_effect_count="$(printf '%s' "$trace_json" | jq '.runtimeEffects | length')"
+trace_event_mismatch="$(
+  printf '%s' "$trace_json" |
+    jq --arg traceId "$trace_id" '[.runEvents[] | select(.traceId != $traceId)] | length'
+)"
+if [[ "$event_count" -lt 5 || "$output_length" -lt 20 || ${#context_hash} -ne 64 || "$source_count" -lt 2 || "$artifact_id" == "null" || "$trace_run_id" != "$run_id" || "$trace_job_count" -lt 1 || "$trace_attempt_count" -lt 1 || "$trace_effect_count" -lt 1 || "$trace_event_mismatch" != "0" ]]; then
+  printf 'run verification failed: events=%s output=%s trace=%s jobs=%s attempts=%s effects=%s mismatch=%s\n' \
+    "$event_count" "$output_length" "$trace_id" "$trace_job_count" \
+    "$trace_attempt_count" "$trace_effect_count" "$trace_event_mismatch" >&2
   exit 1
 fi
 
@@ -169,12 +182,14 @@ if [[ "$agent_version" -ne 2 || "$agent_event_count" -lt 2 || "$project_descript
   exit 1
 fi
 
-API_BASE="$API_BASE" "$SCRIPT_DIR/dependency-memory-smoke.sh"
-API_BASE="$API_BASE" "$SCRIPT_DIR/task-collaboration-smoke.sh"
-API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-markdown-smoke.sh"
-API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-agent-smoke.sh"
-API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-runtime-smoke.sh"
-API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-governance-smoke.sh"
+if [[ "${E2E_SKIP_DOMAIN_SMOKES:-0}" != "1" ]]; then
+  API_BASE="$API_BASE" "$SCRIPT_DIR/dependency-memory-smoke.sh"
+  API_BASE="$API_BASE" "$SCRIPT_DIR/task-collaboration-smoke.sh"
+  API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-markdown-smoke.sh"
+  API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-agent-smoke.sh"
+  API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-runtime-smoke.sh"
+  API_BASE="$API_BASE" "$SCRIPT_DIR/workflow-governance-smoke.sh"
+fi
 
 printf 'e2e_smoke=ok\n'
 printf 'agent_id=%s\n' "$agent_id"
@@ -189,6 +204,7 @@ printf 'task_id=%s\n' "$task_id"
 printf 'task_acceptance=%s\n' "$task_acceptance_count"
 printf 'task_messages=%s\n' "$task_message_count"
 printf 'run_id=%s\n' "$run_id"
+printf 'trace_id=%s\n' "$trace_id"
 printf 'events=%s\n' "$event_count"
 printf 'output_length=%s\n' "$output_length"
 printf 'context_hash=%s\n' "$context_hash"
