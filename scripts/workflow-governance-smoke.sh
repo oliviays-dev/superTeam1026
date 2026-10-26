@@ -489,12 +489,21 @@ for _ in $(seq 1 50); do
 done
 assert_value "$lease_job_status" "running" "lease job claim"
 psql_query \
-  "UPDATE jobs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE run_id = '$lease_run_id';" \
+  "UPDATE jobs
+   SET
+     max_attempts = attempts,
+     lease_expires_at = NOW() - INTERVAL '1 second'
+   WHERE run_id = '$lease_run_id';" \
   >/dev/null
 wait_run "$lease_run_id" interrupted "worker lease recovery"
-assert_value \
-  "$(psql_query "SELECT status FROM jobs WHERE run_id = '$lease_run_id';")" \
-  "failed" "expired job status"
+lease_retry_status="$(
+  psql_query "SELECT status FROM jobs WHERE run_id = '$lease_run_id';"
+)"
+if [[ "$lease_retry_status" != "dead_letter" ]]; then
+  printf 'expired job dead-letter status mismatch: %s\n' \
+    "$lease_retry_status" >&2
+  exit 1
+fi
 wait_instance "$lease_instance_id" \
   '.runtime.nodes[] | select(.nodeId == "lease-agent") | .failureCount >= 1' \
   "interrupted run reconciliation" 80
