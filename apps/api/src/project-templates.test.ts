@@ -82,7 +82,7 @@ integration("project templates", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 18,
+      expectedMigrationVersion: 25,
     });
     app = built.app;
     await app.ready();

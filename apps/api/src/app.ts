@@ -73,6 +73,8 @@ import {
   updateTemplateRoleInputSchema,
   updateWorkflowTemplateInputSchema,
   updateTaskInputSchema,
+  updateTaskExecutionPolicyInputSchema,
+  type TaskExecutionPolicyContextType,
   updateWorkbenchBriefSettingsInputSchema,
   transferWorkflowApprovalInputSchema,
   validateWorkflowMarkdownInputSchema,
@@ -340,7 +342,7 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 24;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 25;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -663,6 +665,59 @@ export function buildApi(options: BuildApiOptions): {
     return reply
       .status(500)
       .send(apiError(String(request.id), "internal_error", "Internal error"));
+  });
+
+  function registerExecutionPolicyRoutes(input: {
+    readonly path: string;
+    readonly contextType: TaskExecutionPolicyContextType;
+    readonly contextId: (params: unknown) => string;
+  }): void {
+    app.get(input.path, async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.getTaskExecutionPolicy(
+          input.contextType,
+          input.contextId(request.params),
+          actorId,
+        ),
+      );
+    });
+    app.put(input.path, async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const body = updateTaskExecutionPolicyInputSchema.parse(request.body);
+      return reply.send(
+        await application.updateTaskExecutionPolicy(
+          input.contextType,
+          input.contextId(request.params),
+          body,
+          actorId,
+        ),
+      );
+    });
+  }
+
+  registerExecutionPolicyRoutes({
+    path: "/api/v1/projects/:projectId/execution-policy",
+    contextType: "project",
+    contextId: (params) =>
+      projectParamsSchema.parse(params).projectId,
+  });
+  registerExecutionPolicyRoutes({
+    path: "/api/v1/tasks/:id/execution-policy",
+    contextType: "task",
+    contextId: (params) => idParamsSchema.parse(params).id,
+  });
+  registerExecutionPolicyRoutes({
+    path: "/api/v1/meetings/:meetingId/execution-policy",
+    contextType: "meeting",
+    contextId: (params) =>
+      meetingParamsSchema.parse(params).meetingId,
+  });
+  registerExecutionPolicyRoutes({
+    path: "/api/v1/direct-chats/:threadId/execution-policy",
+    contextType: "direct-chat",
+    contextId: (params) =>
+      directChatParamsSchema.parse(params).threadId,
   });
 
   app.get("/api/v1/health", async (_request, reply) => {
@@ -1650,13 +1705,6 @@ export function buildApi(options: BuildApiOptions): {
     const { id } = idParamsSchema.parse(request.params);
     const input = transferTaskInputSchema.parse(request.body);
     const actorId = requestActorId(request.headers);
-    if (!requestIsAdministrator(request.headers)) {
-      throw new ApplicationError(
-        "forbidden",
-        "Only the local administrator can transfer tasks",
-        403,
-      );
-    }
     return idempotentRoute({
       request,
       reply,
@@ -1665,7 +1713,7 @@ export function buildApi(options: BuildApiOptions): {
       actorId,
       payload: input,
       statusCode: 200,
-      execute: () => application.transferTask(id, input),
+      execute: () => application.transferTask(id, input, actorId),
     });
   });
 
@@ -1689,6 +1737,7 @@ export function buildApi(options: BuildApiOptions): {
   app.post("/api/v1/tasks/:id/attachments", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const input = uploadTaskAttachmentInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
     const encoded =
       input.contentBase64.startsWith("data:") &&
       input.contentBase64.includes(",")
@@ -1703,11 +1752,15 @@ export function buildApi(options: BuildApiOptions): {
       );
     }
     return reply.status(201).send(
-      await application.uploadTaskAttachment(id, {
-        name: input.name,
-        mimeType: input.mimeType,
-        content,
-      }),
+      await application.uploadTaskAttachment(
+        id,
+        {
+          name: input.name,
+          mimeType: input.mimeType,
+          content,
+        },
+        actorId,
+      ),
     );
   });
 
@@ -1735,8 +1788,9 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { attachmentId } = taskAttachmentParamsSchema.parse(request.params);
       const { archived } = archiveTaskAttachmentInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
       return reply.send(
-        await application.archiveTaskAttachment(attachmentId, archived),
+        await application.archiveTaskAttachment(attachmentId, archived, actorId),
       );
     },
   );
@@ -1794,6 +1848,14 @@ export function buildApi(options: BuildApiOptions): {
     const { runId } = runParamsSchema.parse(request.params);
     const actorId = requestActorId(request.headers);
     return reply.send(await application.getRunContext(runId, actorId));
+  });
+
+  app.get("/api/v1/runs/:runId/execution-envelope", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.getRunExecutionEnvelope(runId, actorId),
+    );
   });
 
   app.get("/api/v1/runs/:runId/artifacts", async (request, reply) => {

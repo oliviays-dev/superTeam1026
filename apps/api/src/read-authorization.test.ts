@@ -366,7 +366,7 @@ integration("RBAC read authorization API", () => {
       fileStoreRoot: join(directory, "files"),
       logger: false,
       authMode: "bearer",
-      expectedMigrationVersion: 24,
+      expectedMigrationVersion: 25,
     });
     app = built.app;
     await app.ready();
@@ -412,7 +412,8 @@ integration("RBAC read authorization API", () => {
     await database.query(
       `UPDATE role_grants
        SET status = 'expired', granted_at = NOW() - INTERVAL '2 days',
-           expires_at = NOW() - INTERVAL '1 day', updated_at = NOW()
+           expires_at = NOW() - INTERVAL '1 day',
+           updated_at = GREATEST(NOW(), created_at + INTERVAL '1 millisecond')
        WHERE principal_id = $1 AND scope_type = 'project' AND scope_id = $2
          AND status = 'active'`,
       [expired.principalId, projectId],

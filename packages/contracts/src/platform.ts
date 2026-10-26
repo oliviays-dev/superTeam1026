@@ -3,6 +3,7 @@ import {
   externalRunExecutionSnapshotSchema,
   type ExternalRunExecutionSnapshot,
 } from "./agent-runtime-binding.js";
+import { runExecutionEnvelopeSchema } from "./runtime-execution.js";
 import { spanIdSchema, traceIdSchema } from "./trace.js";
 
 export const projectStatusSchema = z.enum(["active", "archived"]);
@@ -363,6 +364,7 @@ export const runSchema = z.object({
   contextPackId: z.string().uuid().nullable(),
   inputSnapshot: runInputSnapshotSchema,
   executionSnapshot: externalRunExecutionSnapshotSchema.nullable(),
+  executionEnvelope: runExecutionEnvelopeSchema.nullable().default(null),
   externalRuntimeId: z.string().uuid().nullable(),
   externalRuntimeRevision: z.number().int().positive().nullable(),
   externalRuntimeProvider: z.string().trim().min(1).max(120).nullable(),

@@ -5,6 +5,7 @@ import type {
   Project,
   Run,
   RunDelta,
+  RunExecutionEnvelope,
   Task,
   TaskMessage,
 } from "@pluginmax/contracts";
@@ -85,6 +86,13 @@ export interface RunRow {
   context_pack_id: string | null;
   input_snapshot: Run["inputSnapshot"];
   execution_snapshot: Run["executionSnapshot"];
+  execution_envelope_snapshot: Run["executionEnvelope"];
+  execution_context_type: RunExecutionEnvelope["contextType"] | null;
+  execution_context_id: string | null;
+  execution_policy_id: string | null;
+  execution_policy_revision: number | null;
+  execution_binding_revision: number | null;
+  execution_runtime_revision: number | null;
   external_runtime_id: string | null;
   external_runtime_revision: number | null;
   external_runtime_provider: string | null;
@@ -215,6 +223,7 @@ export function runFromRow(row: RunRow): Run {
     contextPackId: row.context_pack_id,
     inputSnapshot: row.input_snapshot,
     executionSnapshot: row.execution_snapshot,
+    executionEnvelope: row.execution_envelope_snapshot,
     externalRuntimeId: row.external_runtime_id,
     externalRuntimeRevision: row.external_runtime_revision,
     externalRuntimeProvider: row.external_runtime_provider,

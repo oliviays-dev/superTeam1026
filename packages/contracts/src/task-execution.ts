@@ -137,3 +137,59 @@ export function legacyTaskExecutionPolicy(): TaskExecutionPolicy {
     budget: {},
   });
 }
+
+export const taskExecutionPolicyContextTypeSchema = z.enum([
+  "project",
+  "task",
+  "meeting",
+  "direct-chat",
+]);
+export type TaskExecutionPolicyContextType = z.infer<
+  typeof taskExecutionPolicyContextTypeSchema
+>;
+
+export const taskExecutionPolicyRecordSchema = z.object({
+  id: z.string().uuid(),
+  contextType: taskExecutionPolicyContextTypeSchema,
+  contextId: z.string().trim().min(1).max(180),
+  projectId: z.string().uuid().nullable(),
+  revision: z.number().int().positive(),
+  policy: taskExecutionPolicySchema,
+  createdBy: z.string().trim().min(1).max(180),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type TaskExecutionPolicyRecord = z.infer<
+  typeof taskExecutionPolicyRecordSchema
+>;
+
+export const updateTaskExecutionPolicyInputSchema = z
+  .object({
+    expectedRevision: z.number().int().nonnegative(),
+    policy: taskExecutionPolicySchema,
+  })
+  .strict();
+export type UpdateTaskExecutionPolicyInput = z.infer<
+  typeof updateTaskExecutionPolicyInputSchema
+>;
+
+export const taskExecutionPolicySourceSchema = z.enum([
+  "context",
+  "project-default",
+  "legacy",
+]);
+export type TaskExecutionPolicySource = z.infer<
+  typeof taskExecutionPolicySourceSchema
+>;
+
+export const resolvedTaskExecutionPolicySchema = z.object({
+  id: z.string().uuid().nullable(),
+  revision: z.number().int().nonnegative(),
+  version: z.string().trim().min(1).max(240),
+  contextType: taskExecutionPolicyContextTypeSchema,
+  contextId: z.string().trim().min(1).max(180),
+  source: taskExecutionPolicySourceSchema,
+  policy: taskExecutionPolicySchema,
+});
+export type ResolvedTaskExecutionPolicy = z.infer<
+  typeof resolvedTaskExecutionPolicySchema
+>;

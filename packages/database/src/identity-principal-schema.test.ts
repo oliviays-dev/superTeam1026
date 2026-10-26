@@ -17,7 +17,7 @@ integration("identity principal migration", () => {
     await database.close();
   });
 
-  it("applies migration 24 as an additive principal layer", async () => {
+  it("applies migration 24 and preserves it through migration 25", async () => {
     const schema = `batch14a_${randomUUID().replaceAll("-", "")}`;
     await database.query(`CREATE SCHEMA ${schema}`);
     const separator = databaseUrl!.includes("?") ? "&" : "?";
@@ -49,7 +49,7 @@ integration("identity principal migration", () => {
       const version = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(version.rows[0]?.version).toBe(24);
+      expect(version.rows[0]?.version).toBe(25);
 
       const tables = await isolated.query<{ table_name: string }>(
         `SELECT table_name

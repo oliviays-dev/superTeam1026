@@ -82,7 +82,6 @@ import type {
   WorkflowTemplate,
   RunDetail,
   RunInputSnapshot,
-  RunObservability,
   SendDirectChatMessageInput,
   SetAgentRuntimeBindingInput,
   RetryWorkflowNodeInput,
@@ -136,16 +135,18 @@ import type {
   ExternalRuntimeCapabilitySnapshot,
   ExternalRuntimeDetail,
   ExternalRuntimeEvent,
-  ExternalRunExecutionSnapshot,
   ExternalRuntimeProbeRequestResult,
   ExternalRuntimeStatus,
   UpdateExternalRuntimeInput,
   RemoveAgentRuntimeBindingInput,
+  TaskExecutionPolicyRecord,
+  TaskExecutionPolicyContextType,
+  ResolvedTaskExecutionPolicy,
+  UpdateTaskExecutionPolicyInput,
 } from "@pluginmax/contracts";
 import {
   createExternalRuntimeInputSchema,
   createRootTraceContext,
-  reasoningEffortSchema,
 } from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
@@ -170,6 +171,7 @@ import {
   MemoryReviewConflictError,
   ProjectTemplateRepositoryError,
   type PlatformRepositories,
+  type ScopedAuthorizationPermission,
   type TaskAttachment,
   todayInShanghai,
 } from "@pluginmax/database";
@@ -178,6 +180,17 @@ import {
   AgentRuntimePreflightService,
   type AgentRuntimePreflightEvaluation,
 } from "./agent-runtime-preflight.js";
+import {
+  TaskExecutionPreflightError,
+  TaskExecutionPreflightService,
+  type ExecutionContextType,
+  type TaskExecutionPreparation,
+} from "./task-execution-preflight.js";
+
+export {
+  TaskExecutionPreflightError,
+  executionEnvelopeDigest,
+} from "./task-execution-preflight.js";
 
 export {
   AuthorizationService,
@@ -205,11 +218,6 @@ const implementedRuntimeKinds = new Set<Agent["runtimeKind"]>([
   "plain-text",
 ]);
 
-const externalRuntimeKinds = new Set<Agent["runtimeKind"]>([
-  "codex-jsonl",
-  "plain-text",
-]);
-
 function requireExecutableRuntime(agent: Agent): void {
   if (agent.status !== "active") {
     throw new ApplicationError(
@@ -227,25 +235,6 @@ function requireExecutableRuntime(agent: Agent): void {
   }
 }
 
-function runObservability(
-  execution: ExternalRunExecutionSnapshot,
-): RunObservability {
-  if (execution.runtime.protocol === "plain-text") {
-    return {
-      planVisibility: "opaque",
-      toolEventCompleteness: "none",
-      textStreaming: "final-only",
-      subagentVisibility: "none",
-    };
-  }
-  return {
-    planVisibility: "summary",
-    toolEventCompleteness: "partial",
-    textStreaming: "message",
-    subagentVisibility: "none",
-  };
-}
-
 function isUniqueViolation(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -255,14 +244,33 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
+function scopedPermissions(
+  values: readonly string[],
+): ScopedAuthorizationPermission[] {
+  const allowed = new Set<ScopedAuthorizationPermission>([
+    "read",
+    "write",
+    "approve",
+    "manage_members",
+    "manage_roles",
+  ]);
+  return values.filter((value): value is ScopedAuthorizationPermission =>
+    allowed.has(value as ScopedAuthorizationPermission),
+  );
+}
+
 export class PlatformApplication {
   private readonly agentRuntimePreflight: AgentRuntimePreflightService;
+  private readonly taskExecutionPreflight: TaskExecutionPreflightService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
     private readonly files?: FileStore,
   ) {
     this.agentRuntimePreflight = new AgentRuntimePreflightService(repositories);
+    this.taskExecutionPreflight = new TaskExecutionPreflightService(
+      repositories,
+    );
   }
 
   listProjects(projectIds?: readonly string[]): Promise<Project[]> {
@@ -1229,82 +1237,106 @@ export class PlatformApplication {
     throwPreflightFailure(result);
   }
 
-  private async prepareExternalRun(input: {
+  async getTaskExecutionPolicy(
+    contextType: TaskExecutionPolicyContextType,
+    contextId: string,
+    actorId = "local-admin",
+  ): Promise<ResolvedTaskExecutionPolicy> {
+    const scope = await this.requireExecutionPolicyScope(
+      contextType,
+      contextId,
+      actorId,
+      "read",
+    );
+    return this.repositories.taskExecutionPolicies.resolve({
+      contextType,
+      contextId,
+      projectId: scope.projectId,
+    });
+  }
+
+  async updateTaskExecutionPolicy(
+    contextType: TaskExecutionPolicyContextType,
+    contextId: string,
+    input: UpdateTaskExecutionPolicyInput,
+    actorId = "local-admin",
+  ): Promise<TaskExecutionPolicyRecord> {
+    const scope = await this.requireExecutionPolicyScope(
+      contextType,
+      contextId,
+      actorId,
+      "write",
+    );
+    const result = await this.repositories.taskExecutionPolicies.replace({
+      contextType,
+      contextId,
+      projectId: scope.projectId,
+      expectedRevision: input.expectedRevision,
+      policy: input.policy,
+      actorId,
+    });
+    if (result.kind === "revision_conflict") {
+      throw new ApplicationError(
+        "task_execution_policy_revision_conflict",
+        "TaskExecutionPolicy was revised by another request",
+        409,
+        { currentRevision: result.currentRevision },
+      );
+    }
+    return result.record;
+  }
+
+  private async requireExecutionPolicyScope(
+    contextType: TaskExecutionPolicyContextType,
+    contextId: string,
+    actorId: string,
+    permission: "read" | "write",
+  ): Promise<{ readonly projectId: string | null }> {
+    if (contextType === "direct-chat") {
+      await this.getDirectChat(contextId, actorId);
+      return { projectId: null };
+    }
+    let projectId: string;
+    if (contextType === "project") {
+      projectId = contextId;
+    } else if (contextType === "task") {
+      projectId = (await this.getTask(contextId)).projectId;
+    } else {
+      projectId = (await this.getMeeting(contextId, actorId)).meeting.projectId;
+    }
+    if (permission === "read") {
+      await this.requireProjectReadAccess(projectId, actorId);
+    } else {
+      await this.requireActiveProjectPermission(projectId, "write", actorId);
+    }
+    return { projectId };
+  }
+
+  private async prepareExecution(input: {
     readonly agent: Agent;
     readonly actorId: string;
     readonly administrator: boolean;
-    readonly workspaceId: string;
+    readonly projectId: string | null;
+    readonly contextType: ExecutionContextType;
+    readonly contextId: string;
     readonly taskId: string;
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
-  }): Promise<ExternalRunExecutionSnapshot | undefined> {
-    const binding = await this.repositories.agentRuntimeBindings.getCurrent(
-      input.agent.id,
-    );
-    if (
-      binding?.status !== "active" &&
-      !externalRuntimeKinds.has(input.agent.runtimeKind)
-    ) {
-      return undefined;
+    readonly deadlineAt?: string;
+  }): Promise<TaskExecutionPreparation> {
+    try {
+      return await this.taskExecutionPreflight.prepare(input);
+    } catch (error) {
+      if (error instanceof TaskExecutionPreflightError) {
+        throw new ApplicationError(
+          error.code,
+          error.message,
+          error.statusCode,
+          error.details,
+        );
+      }
+      throw error;
     }
-    const result = await this.preflightAgentRuntime(
-      input.agent.id,
-      {
-        expectedRevision: binding?.revision ?? 1,
-        workspaceId: input.workspaceId,
-        taskId: input.taskId,
-        ...(input.model === undefined ? {} : { model: input.model }),
-        ...(input.reasoningEffort === undefined
-          ? {}
-          : { reasoningEffort: input.reasoningEffort }),
-        requiredCapabilities: [],
-      },
-      input.actorId,
-      input.administrator,
-    );
-    if (binding === undefined) {
-      throw new ApplicationError(
-        "runtime_binding_missing",
-        "The agent has no external runtime binding",
-        409,
-      );
-    }
-    const runtime = await this.requireExternalRuntime(binding.runtimeId);
-    const reasoningEffort = reasoningEffortSchema.safeParse(
-      result.envelopePreview.launch.reasoningEffort,
-    );
-    return {
-      schemaVersion: 1,
-      runtime: {
-        id: runtime.id,
-        name: runtime.name,
-        revision: runtime.revision,
-        provider: runtime.provider,
-        protocol: runtime.protocol,
-        command: runtime.command,
-        managedArgs: runtime.managedArgs,
-        customArgs: runtime.customArgs,
-        supportedModels: runtime.supportedModels,
-        defaultModel: runtime.defaultModel,
-        sandboxMode: runtime.sandboxMode,
-        networkMode: runtime.networkMode,
-        commandDigest: runtime.commandDigest,
-        argsDigest: runtime.argsDigest,
-      },
-      binding: { id: binding.id, revision: binding.revision },
-      capabilitySnapshotId: result.capabilitySnapshotId,
-      capability: result.runtime,
-      envelope: result.envelopePreview,
-      ...(result.envelopePreview.launch.model === undefined
-        ? {}
-        : { model: result.envelopePreview.launch.model }),
-      ...(!reasoningEffort.success
-        ? {}
-        : {
-            reasoningEffort: reasoningEffort.data,
-          }),
-      capturedAt: result.checkedAt,
-    };
   }
 
   private async requireExternalRuntime(
@@ -1365,11 +1397,13 @@ export class PlatformApplication {
         input,
         trace,
         (agent) =>
-          this.prepareExternalRun({
+          this.prepareExecution({
             agent,
             actorId,
             administrator: actorId === "local-admin",
-            workspaceId: `direct-chat/${threadId}`,
+            projectId: null,
+            contextType: "direct-chat",
+            contextId: threadId,
             taskId: threadId,
           }),
       );
@@ -1391,11 +1425,13 @@ export class PlatformApplication {
         actorId,
         trace,
         (agent) =>
-          this.prepareExternalRun({
+          this.prepareExecution({
             agent,
             actorId,
             administrator: actorId === "local-admin",
-            workspaceId: `direct-chat/${threadId}`,
+            projectId: null,
+            contextType: "direct-chat",
+            contextId: threadId,
             taskId: threadId,
           }),
       );
@@ -1545,16 +1581,14 @@ export class PlatformApplication {
   async transferTask(
     id: string,
     input: TransferTaskInput,
+    actorId = "local-admin",
   ): Promise<TaskDetail> {
     const task = await this.getTask(id);
-    const project = await this.requireProject(task.projectId);
-    if (project.status !== "active") {
-      throw new ApplicationError(
-        "project_archived",
-        "Tasks in an archived project cannot be transferred",
-        409,
-      );
-    }
+    await this.requireActiveProjectPermission(
+      task.projectId,
+      "manage_members",
+      actorId,
+    );
     if (task.status === "done" || task.status === "cancelled") {
       throw new ApplicationError(
         "task_terminal",
@@ -1691,9 +1725,14 @@ export class PlatformApplication {
       readonly mimeType: string;
       readonly content: Uint8Array;
     },
+    actorId = "local-admin",
   ) {
     const task = await this.getTask(taskId);
-    await this.requireProjectOwner(task.projectId);
+    await this.requireActiveProjectPermission(
+      task.projectId,
+      "write",
+      actorId,
+    );
     if (this.files === undefined) {
       throw new ApplicationError(
         "file_store_unavailable",
@@ -1761,7 +1800,11 @@ export class PlatformApplication {
     return { attachment, content: await this.files.read(ref) };
   }
 
-  async archiveTaskAttachment(attachmentId: string, archived: boolean) {
+  async archiveTaskAttachment(
+    attachmentId: string,
+    archived: boolean,
+    actorId = "local-admin",
+  ) {
     const attachment =
       await this.repositories.taskCollaboration.getAttachment(attachmentId);
     if (attachment === undefined) {
@@ -1771,7 +1814,11 @@ export class PlatformApplication {
         404,
       );
     }
-    await this.requireProjectOwner(attachment.projectId);
+    await this.requireActiveProjectPermission(
+      attachment.projectId,
+      "write",
+      actorId,
+    );
     const updated =
       await this.repositories.taskCollaboration.setAttachmentArchived(
         attachmentId,
@@ -1826,13 +1873,16 @@ export class PlatformApplication {
       );
     }
     requireExecutableRuntime(agent);
-    const executionSnapshot = await this.prepareExternalRun({
+    const prepared = await this.prepareExecution({
       agent,
       actorId,
       administrator,
-      workspaceId: task.projectId,
+      projectId: task.projectId,
+      contextType: "task",
+      contextId: task.id,
       taskId: task.id,
     });
+    const executionSnapshot = prepared.executionSnapshot;
     const projectTasks = await this.repositories.tasks.list(task.projectId);
     const unresolved = unresolvedTaskDependencies(task, projectTasks);
     if (unresolved.length > 0) {
@@ -1857,9 +1907,11 @@ export class PlatformApplication {
       task,
       inputSnapshot,
       ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
-      ...(executionSnapshot === undefined
+      executionEnvelope: prepared.executionEnvelope,
+      observability: prepared.observability,
+      ...(prepared.timeoutAt === undefined
         ? {}
-        : { observability: runObservability(executionSnapshot) }),
+        : { timeoutAt: prepared.timeoutAt }),
       trace,
     });
     await this.repositories.runs.appendEvent(
@@ -1952,6 +2004,21 @@ export class PlatformApplication {
       );
     }
     return context;
+  }
+
+  async getRunExecutionEnvelope(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<NonNullable<RunDetail["run"]["executionEnvelope"]>> {
+    const detail = await this.getRunDetail(runId, actorId);
+    if (detail.run.executionEnvelope === null) {
+      throw new ApplicationError(
+        "execution_envelope_not_found",
+        "Run has no execution envelope snapshot",
+        404,
+      );
+    }
+    return detail.run.executionEnvelope;
   }
 
   async cancelRun(runId: string, actorId = "local-admin"): Promise<void> {
@@ -2070,7 +2137,7 @@ export class PlatformApplication {
     input: CreateMemoryTopicInput,
     actorId = "local-admin",
   ): Promise<MemoryTopic> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
     return this.repositories.memory.createTopic(projectId, input);
   }
 
@@ -2080,7 +2147,7 @@ export class PlatformApplication {
     input: CreateMemoryClaimInput,
     actorId = "local-admin",
   ): Promise<MemoryClaim> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
     try {
       return await this.repositories.memory.addClaim(projectId, topicId, input);
     } catch (error) {
@@ -2105,7 +2172,7 @@ export class PlatformApplication {
     input: UpdateMemoryClaimInput,
     actorId = "local-admin",
   ): Promise<MemoryClaim> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
     let claim: MemoryClaim | undefined;
     try {
       claim = await this.repositories.memoryClosure.updateLegacyClaimStatus({
@@ -2148,7 +2215,7 @@ export class PlatformApplication {
     input: ReviewMemoryClaimsInput,
     actorId = "local-admin",
   ): Promise<MemoryReviewResult> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "approve", actorId);
     try {
       return await this.repositories.memoryClosure.reviewClaims({
         projectId,
@@ -2188,7 +2255,7 @@ export class PlatformApplication {
     input: PublishMemoryTruthInput,
     actorId = "local-admin",
   ): Promise<MemoryTopic> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "approve", actorId);
     try {
       return await this.repositories.memory.publishTruth(
         projectId,
@@ -2235,7 +2302,11 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingMemoryIngestionResult> {
     const detail = await this.getMeeting(meetingId, actorId);
-    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "approve",
+      actorId,
+    );
     try {
       return await this.repositories.memoryClosure.ingestMeetingMinutes({
         meetingId,
@@ -2290,7 +2361,7 @@ export class PlatformApplication {
     input: CreateHandoffCardInput,
     actorId = "local-admin",
   ): Promise<HandoffCard> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
     try {
       return await this.repositories.memoryClosure.createHandoff({
         projectId,
@@ -2308,7 +2379,7 @@ export class PlatformApplication {
     input: UpdateHandoffCardInput,
     actorId = "local-admin",
   ): Promise<HandoffCard> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
     try {
       const handoff = await this.repositories.memoryClosure.updateHandoff({
         projectId,
@@ -2334,7 +2405,7 @@ export class PlatformApplication {
     input: ConfirmHandoffCardInput,
     actorId = "local-admin",
   ): Promise<HandoffCard> {
-    await this.requireActiveProjectOwner(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "approve", actorId);
     try {
       const handoff = await this.repositories.memoryClosure.confirmHandoff({
         projectId,
@@ -2374,21 +2445,7 @@ export class PlatformApplication {
     input: CreateAgentEpisodeInput,
     actorId = "local-admin",
   ): Promise<AgentEpisode> {
-    const access = await this.requireProjectAccess(projectId, actorId);
-    if (access.project.status !== "active") {
-      throw new ApplicationError(
-        "project_archived",
-        "Episodes cannot be written in an archived project",
-        409,
-      );
-    }
-    if (!access.canManage && actorId !== input.agentId) {
-      throw new ApplicationError(
-        "forbidden",
-        "Only the project owner or the target agent can write this episode",
-        403,
-      );
-    }
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
     await this.requireProjectAgent(projectId, input.agentId);
     try {
       return await this.repositories.memoryClosure.createEpisode({
@@ -2423,21 +2480,7 @@ export class PlatformApplication {
     reportDate: string | undefined,
     actorId: string,
   ): Promise<ProjectReportGenerationResult> {
-    const access = await this.requireProjectAccess(projectId, actorId);
-    if (access.project.status !== "active") {
-      throw new ApplicationError(
-        "project_archived",
-        "Reports cannot be generated for an archived project",
-        409,
-      );
-    }
-    if (!access.canManage) {
-      throw new ApplicationError(
-        "forbidden",
-        "Project owner permission is required to generate reports",
-        403,
-      );
-    }
+    await this.requireActiveProjectPermission(projectId, "approve", actorId);
     const result =
       await this.repositories.workbenchReports.generateProjectReport({
         projectId,
@@ -2487,7 +2530,7 @@ export class PlatformApplication {
     actorId: string,
     read: boolean,
   ): Promise<{ readonly reportId: string; readonly read: boolean }> {
-    await this.requireProjectAccess(projectId, actorId);
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
     const updated =
       await this.repositories.workbenchReports.markProjectReportRead({
         projectId,
@@ -2618,7 +2661,7 @@ export class PlatformApplication {
     projectId: string,
     actorId: string,
   ): Promise<SupplyException[]> {
-    await this.requireProjectAccess(projectId, actorId);
+    await this.requireProjectReadAccess(projectId, actorId);
     return this.repositories.workbenchReports.listSupplyExceptions([projectId]);
   }
 
@@ -2626,21 +2669,11 @@ export class PlatformApplication {
     input: CreateSupplyExceptionInput,
     actorId: string,
   ): Promise<SupplyException> {
-    const access = await this.requireProjectAccess(input.projectId, actorId);
-    if (access.project.status !== "active") {
-      throw new ApplicationError(
-        "project_archived",
-        "Supply exceptions cannot be created in an archived project",
-        409,
-      );
-    }
-    if (!access.canManage) {
-      throw new ApplicationError(
-        "forbidden",
-        "Project owner permission is required to create supply exceptions",
-        403,
-      );
-    }
+    await this.requireActiveProjectPermission(
+      input.projectId,
+      "write",
+      actorId,
+    );
     if (
       input.sourceTaskId !== undefined &&
       input.sourceTaskId !== null &&
@@ -2681,7 +2714,7 @@ export class PlatformApplication {
     projectId: string,
     actorId: string,
   ): Promise<SupplierRisk[]> {
-    await this.requireProjectAccess(projectId, actorId);
+    await this.requireProjectReadAccess(projectId, actorId);
     return this.repositories.workbenchReports.listSupplierRisks([projectId]);
   }
 
@@ -2689,21 +2722,11 @@ export class PlatformApplication {
     input: CreateSupplierRiskInput,
     actorId: string,
   ): Promise<SupplierRisk> {
-    const access = await this.requireProjectAccess(input.projectId, actorId);
-    if (access.project.status !== "active") {
-      throw new ApplicationError(
-        "project_archived",
-        "Supplier risks cannot be created in an archived project",
-        409,
-      );
-    }
-    if (!access.canManage) {
-      throw new ApplicationError(
-        "forbidden",
-        "Project owner permission is required to create supplier risks",
-        403,
-      );
-    }
+    await this.requireActiveProjectPermission(
+      input.projectId,
+      "write",
+      actorId,
+    );
     return this.repositories.workbenchReports.createSupplierRisk(
       actorId,
       input,
@@ -2806,30 +2829,6 @@ export class PlatformApplication {
       throw new ApplicationError("project_not_found", "Project not found", 404);
     }
     return project;
-  }
-
-  private async requireProjectAccess(
-    projectId: string,
-    actorId: string,
-  ): Promise<{ readonly project: Project; readonly canManage: boolean }> {
-    const project = await this.requireProject(projectId);
-    const members =
-      await this.repositories.projectMemberships.listMembers(projectId);
-    const member = members.find(
-      (candidate) =>
-        candidate.actorId === actorId && candidate.status === "active",
-    );
-    if (member === undefined) {
-      throw new ApplicationError(
-        "forbidden",
-        "Active project membership is required",
-        403,
-      );
-    }
-    return {
-      project,
-      canManage: member.kind === "human" && member.owner,
-    };
   }
 
   private async requireProjectReadAccess(
@@ -2957,31 +2956,52 @@ export class PlatformApplication {
       : new Error("Memory operation failed");
   }
 
-  private async requireProjectOwner(
+  private async requireProjectPermission(
     projectId: string,
+    permission: ScopedAuthorizationPermission,
     actorId = "local-admin",
-  ): Promise<void> {
-    await this.requireProject(projectId);
-    const members =
-      await this.repositories.projectMemberships.listMembers(projectId);
-    const owner = members.some(
-      (member) =>
-        member.kind === "human" &&
-        member.actorId === actorId &&
-        member.owner &&
-        member.status === "active",
-    );
-    if (!owner) {
+  ): Promise<{
+    readonly project: Project;
+    readonly effectivePermissions: readonly ScopedAuthorizationPermission[];
+  }> {
+    const project = await this.requireProject(projectId);
+    const principal =
+      await this.repositories.authorization.getPrincipal(actorId);
+    const decision = await this.repositories.authorization.authorizeProject({
+      principalId: actorId,
+      authSource:
+        principal?.source === "local" ? "local-development" : "bearer",
+      projectId,
+      permission,
+    });
+    if (!decision.allowed) {
+      if (decision.reason === "project_archived") {
+        throw new ApplicationError(
+          "project_archived",
+          "The project is archived",
+          409,
+        );
+      }
       throw new ApplicationError(
         "forbidden",
-        "Project owner permission is required",
+        `Project ${permission} permission is required`,
         403,
+        {
+          reason: decision.reason ?? "permission_missing",
+          permission,
+          projectId,
+        },
       );
     }
+    return {
+      project,
+      effectivePermissions: scopedPermissions(decision.effectivePermissions),
+    };
   }
 
-  private async requireActiveProjectOwner(
+  private async requireActiveProjectPermission(
     projectId: string,
+    permission: ScopedAuthorizationPermission,
     actorId = "local-admin",
   ): Promise<Project> {
     const project = await this.requireProject(projectId);
@@ -2992,7 +3012,7 @@ export class PlatformApplication {
         409,
       );
     }
-    await this.requireProjectOwner(projectId, actorId);
+    await this.requireProjectPermission(projectId, permission, actorId);
     return project;
   }
 
@@ -3766,10 +3786,15 @@ export class PlatformApplication {
         approval.approverId === actorId &&
         approval.status === "pending",
     );
-    if (!actor.owner && actorApproval === undefined) {
+    await this.requireActiveProjectPermission(
+      instance.projectId,
+      "approve",
+      actorId,
+    );
+    if (actorApproval === undefined) {
       throw new ApplicationError(
         "workflow_approval_forbidden",
-        "Only a project owner or pending approver can add approvers",
+        "Only a pending approver can add approvers",
         403,
       );
     }
@@ -3820,7 +3845,7 @@ export class PlatformApplication {
     idempotencyKey?: string,
   ): Promise<WorkflowInstance> {
     const instance = await this.getWorkflowInstance(instanceId);
-    await this.assertWorkflowOwner(instance.projectId, actorId);
+    await this.assertWorkflowControlPermission(instance.projectId, actorId);
     if (instance.status !== "active" && instance.status !== "waiting") {
       throw new ApplicationError(
         "workflow_not_pausable",
@@ -3867,7 +3892,7 @@ export class PlatformApplication {
     idempotencyKey?: string,
   ): Promise<WorkflowInstance> {
     const instance = await this.getWorkflowInstance(instanceId);
-    await this.assertWorkflowOwner(instance.projectId, actorId);
+    await this.assertWorkflowControlPermission(instance.projectId, actorId);
     if (instance.status !== "paused") {
       throw new ApplicationError(
         "workflow_not_paused",
@@ -3919,7 +3944,7 @@ export class PlatformApplication {
     idempotencyKey?: string,
   ): Promise<WorkflowInstance> {
     const instance = await this.getWorkflowInstance(instanceId);
-    await this.assertWorkflowOwner(instance.projectId, actorId);
+    await this.assertWorkflowControlPermission(instance.projectId, actorId);
     if (instance.graph === null) {
       throw new ApplicationError(
         "workflow_graph_missing",
@@ -4965,23 +4990,26 @@ export class PlatformApplication {
       },
     };
     const deadline = timeoutAt(definition.timeoutSeconds);
-    const executionSnapshot = await this.prepareExternalRun({
+    const prepared = await this.prepareExecution({
       agent,
       actorId,
       administrator: actorId === "local-admin",
-      workspaceId: instance.projectId,
+      projectId: instance.projectId,
+      contextType: "workflow-task",
+      contextId: task.id,
       taskId: task.id,
+      deadlineAt: deadline,
     });
+    const executionSnapshot = prepared.executionSnapshot;
     await this.repositories.runs.enqueue({
       runId,
       task,
       inputSnapshot,
       ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
-      ...(executionSnapshot === undefined
-        ? {}
-        : { observability: runObservability(executionSnapshot) }),
+      executionEnvelope: prepared.executionEnvelope,
+      observability: prepared.observability,
       attempt: node.attempt,
-      timeoutAt: deadline,
+      timeoutAt: prepared.timeoutAt ?? deadline,
       maxAttempts: definition.maxAttempts,
       idempotencyKey: `${instance.id}:${node.nodeId}:${node.visits}:${node.attempt}`,
       workflowInstanceId: instance.id,
@@ -5135,23 +5163,11 @@ export class PlatformApplication {
     return instance;
   }
 
-  private async assertWorkflowOwner(
+  private async assertWorkflowControlPermission(
     projectId: string,
     actorId: string,
   ): Promise<void> {
-    const members =
-      await this.repositories.projectMemberships.listMembers(projectId);
-    const member = members.find(
-      (candidate) =>
-        candidate.status === "active" && candidate.actorId === actorId,
-    );
-    if (member === undefined || !member.owner) {
-      throw new ApplicationError(
-        "forbidden",
-        "Project owner permission is required to control this workflow",
-        403,
-      );
-    }
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
   }
 
   private async assertWorkflowNodeActor(
@@ -5173,13 +5189,7 @@ export class PlatformApplication {
       );
     }
     if (node.executor.kind === "system") {
-      if (!member.owner) {
-        throw new ApplicationError(
-          "workflow_node_forbidden",
-          "System workflow nodes require the project owner",
-          403,
-        );
-      }
+      await this.requireActiveProjectPermission(projectId, "write", actorId);
       return;
     }
     if (node.executor.kind === "user" && member.actorId !== node.executor.id) {
@@ -5322,7 +5332,7 @@ export class PlatformApplication {
     input: CreateMeetingInput,
     actorId = "local-admin",
   ): Promise<Meeting> {
-    await this.requireActiveProjectOwner(input.projectId, actorId);
+    await this.requireActiveProjectPermission(input.projectId, "write", actorId);
     const members = await this.repositories.projectMemberships.listMembers(
       input.projectId,
     );
@@ -5454,7 +5464,11 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingAiPolicy> {
     const detail = await this.getMeeting(meetingId, actorId);
-    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
     const current = await this.getMeetingAiPolicy(meetingId, actorId);
     const updated = await this.repositories.meetingAi.updatePolicy({
       id: current.id,
@@ -5511,7 +5525,11 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<TriggerMeetingAiResult> {
     const detail = await this.getMeeting(meetingId, actorId);
-    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
     const policy = await this.getMeetingAiPolicy(meetingId, actorId);
     let trigger = input;
     if (trigger.kind === "mention" && trigger.sourceMessageId === undefined) {
@@ -5544,11 +5562,13 @@ export class PlatformApplication {
               409,
             );
           }
-          return this.prepareExternalRun({
+          return this.prepareExecution({
             agent,
             actorId,
             administrator: actorId === "local-admin",
-            workspaceId: projectId,
+            projectId,
+            contextType: "meeting",
+            contextId: meetingId,
             taskId: turnId,
           });
         },
@@ -5573,7 +5593,11 @@ export class PlatformApplication {
     actorId: string,
   ): Promise<MeetingAiPolicy> {
     const detail = await this.getMeeting(meetingId, actorId);
-    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
     const current = await this.getMeetingAiPolicy(meetingId, actorId);
     const updated = await this.repositories.meetingAi.transitionPolicy({
       id: current.id,
@@ -5773,7 +5797,11 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingActionItem> {
     const detail = await this.getMeeting(meetingId, actorId);
-    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
     this.assertMeetingSourceMessages(detail, input.sourceMessageIds);
     const members = await this.repositories.projectMemberships.listMembers(
       detail.meeting.projectId,
@@ -5923,8 +5951,9 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingActionItemConversion> {
     const detail = await this.getMeeting(meetingId, actorId);
-    const project = await this.requireActiveProjectOwner(
+    const project = await this.requireActiveProjectPermission(
       detail.meeting.projectId,
+      "write",
       actorId,
     );
     const item = await this.repositories.meetingDecisions.getActionItem(

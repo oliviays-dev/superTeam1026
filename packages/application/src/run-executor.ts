@@ -31,6 +31,7 @@ import {
 import { isTerminalRunStatus } from "@pluginmax/domain";
 import { LocalFileStore } from "@pluginmax/files";
 import { AgentRuntimePreflightService } from "./agent-runtime-preflight.js";
+import { executionEnvelopeDigest } from "./task-execution-preflight.js";
 
 export class RunCancelledError extends Error {
   constructor() {
@@ -225,6 +226,7 @@ export class RunExecutor {
       }
       project = loadedProject;
     }
+    await this.assertExecutionEnvelopeReady(agent, run);
     const effectKey = runtimeEffectKey(runId);
     const effect = await this.repositories.runtimeEffects.begin({
       effectKey,
@@ -631,6 +633,66 @@ export class RunExecutor {
         execution.runtime.argsDigest
     ) {
       throw new Error("external runtime snapshot is stale");
+    }
+  }
+
+  private async assertExecutionEnvelopeReady(
+    agent: Agent,
+    run: Run,
+  ): Promise<void> {
+    const snapshot = run.executionEnvelope;
+    if (snapshot === null) return;
+    if (snapshot.digest !== executionEnvelopeDigest(snapshot)) {
+      throw new RunNonRetryableError("execution envelope digest is invalid");
+    }
+    if (
+      snapshot.agentId !== agent.id ||
+      (run.projectId !== null && snapshot.projectId !== run.projectId)
+    ) {
+      throw new RunNonRetryableError("execution envelope scope is stale");
+    }
+    if (snapshot.policy.id !== null) {
+      const policy = await this.repositories.taskExecutionPolicies.getRevision(
+        snapshot.policy.id,
+        snapshot.policy.revision,
+      );
+      if (
+        policy === undefined ||
+        policy.contextType !== snapshot.policy.contextType ||
+        policy.contextId !== snapshot.policy.contextId ||
+        executionEnvelopeDigest({ policy: policy.policy }) !==
+          executionEnvelopeDigest({ policy: snapshot.policy.policy })
+      ) {
+        throw new RunNonRetryableError(
+          "execution policy revision is unavailable or changed",
+        );
+      }
+    } else if (snapshot.policy.revision !== 0) {
+      throw new RunNonRetryableError("execution policy snapshot is invalid");
+    }
+    if (snapshot.binding.kind === "builtin") {
+      if (
+        snapshot.runtime.id !== `builtin:${agent.runtimeKind}` ||
+        snapshot.binding.revision < 1 ||
+        snapshot.runtime.revision < 1
+      ) {
+        throw new RunNonRetryableError(
+          "builtin Runtime binding snapshot is stale",
+        );
+      }
+      return;
+    }
+    const execution = run.executionSnapshot;
+    if (
+      execution === null ||
+      execution.binding.id !== snapshot.binding.id ||
+      execution.binding.revision !== snapshot.binding.revision ||
+      execution.runtime.id !== snapshot.runtime.id ||
+      execution.runtime.revision !== snapshot.runtime.revision ||
+      execution.capabilitySnapshotId !==
+        snapshot.runtime.capabilitySnapshotId
+    ) {
+      throw new RunNonRetryableError("external Runtime snapshot is stale");
     }
   }
 

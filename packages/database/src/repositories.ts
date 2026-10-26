@@ -13,6 +13,7 @@ import type {
   Project,
   Run,
   RunDelta,
+  RunExecutionEnvelope,
   RunInputSnapshot,
   RunObservability,
   Task,
@@ -77,6 +78,7 @@ import { ProjectTemplatesRepository } from "./project-templates-repository.js";
 import { ExternalRuntimeRepository } from "./external-runtime-repository.js";
 import { AgentRuntimeBindingRepository } from "./agent-runtime-binding-repository.js";
 import { AuthorizationRepository } from "./authorization-repository.js";
+import { TaskExecutionPolicyRepository } from "./task-execution-policy-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -599,6 +601,7 @@ export interface EnqueueRunInput {
   readonly task: Task;
   readonly inputSnapshot: RunInputSnapshot;
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
+  readonly executionEnvelope?: RunExecutionEnvelope;
   readonly observability?: RunObservability;
   readonly attempt?: number;
   readonly timeoutAt?: string;
@@ -618,15 +621,19 @@ export class RunRepository {
       const result = await client.query<RunRow>(
         `INSERT INTO runs (
            id, project_id, task_id, agent_id, status, input_snapshot,
-           execution_snapshot, external_runtime_id, external_runtime_revision,
+           execution_snapshot, execution_context_type, execution_context_id,
+           execution_policy_id, execution_policy_revision,
+           execution_binding_revision, execution_runtime_revision,
+           execution_envelope_snapshot, external_runtime_id, external_runtime_revision,
            external_runtime_provider, external_runtime_protocol,
            observability, attempt, timeout_at, idempotency_key,
            workflow_instance_id, workflow_node_id, trace_id,
            trace_root_span_id, created_at, updated_at
          ) VALUES (
            $1, $2, $3, $4, 'queued', $5::jsonb,
-           $6::jsonb, $7, $8, $9, $10, $11::jsonb,
-           $12, $13, $14, $15, $16, $17, $18, NOW(), NOW()
+           $6::jsonb, $7, $8, $9, $10, $11, $12, $13::jsonb,
+           $14, $15, $16, $17, $18::jsonb,
+           $19, $20, $21, $22, $23, $24, $25, NOW(), NOW()
          )
          RETURNING *`,
         [
@@ -638,6 +645,15 @@ export class RunRepository {
           input.executionSnapshot === undefined
             ? null
             : JSON.stringify(input.executionSnapshot),
+          input.executionEnvelope?.contextType ?? null,
+          input.executionEnvelope?.contextId ?? null,
+          input.executionEnvelope?.policy.id ?? null,
+          input.executionEnvelope?.policy.revision ?? null,
+          input.executionEnvelope?.binding.revision ?? null,
+          input.executionEnvelope?.runtime.revision ?? null,
+          input.executionEnvelope === undefined
+            ? null
+            : JSON.stringify(input.executionEnvelope),
           input.executionSnapshot?.runtime.id ?? null,
           input.executionSnapshot?.runtime.revision ?? null,
           input.executionSnapshot?.runtime.provider ?? null,
@@ -1763,6 +1779,7 @@ async function appendRunEventWithClient(
 
 export class PlatformRepositories {
   readonly authorization: AuthorizationRepository;
+  readonly taskExecutionPolicies: TaskExecutionPolicyRepository;
   readonly projects: ProjectRepository;
   readonly agents: AgentRepository;
   readonly tasks: TaskRepository;
@@ -1793,6 +1810,7 @@ export class PlatformRepositories {
 
   constructor(database: Database) {
     this.authorization = new AuthorizationRepository(database);
+    this.taskExecutionPolicies = new TaskExecutionPolicyRepository(database);
     this.projects = new ProjectRepository(database, this.authorization);
     this.agents = new AgentRepository(database);
     this.tasks = new TaskRepository(database);

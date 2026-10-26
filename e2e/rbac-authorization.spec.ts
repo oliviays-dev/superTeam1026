@@ -168,6 +168,113 @@ test("multi-Principal project authorization and immediate Grant revocation", asy
       { description: "member write through project role" },
     );
     expect(memberWrite.status).toBe(200);
+    const memberMemory = await api(
+      memberPage,
+      "POST",
+      `/projects/${projectId}/memory/topics`,
+      { title: "E2E member memory" },
+    );
+    expect(memberMemory.status).toBe(201);
+    const memberMeeting = await api(memberPage, "POST", "/meetings", {
+      projectId,
+      title: "E2E member meeting",
+      agenda: "Write grant replaces the former owner-only check",
+      agentIds: [],
+    });
+    expect(memberMeeting.status).toBe(201);
+
+    const executionPolicy = {
+      schemaVersion: 1,
+      runtime: {
+        selection: "recommended",
+        allowedRuntimeIds: ["builtin:fake"],
+        requiredCapabilities: [],
+      },
+      sourcePolicy: {
+        allow: ["workspace", "task-attachments", "project-memory"],
+        deny: ["private-local-data"],
+        citation: "none",
+        requirePublishedAt: false,
+        requireAccessedAt: false,
+      },
+      toolPolicy: {
+        allow: [],
+        deny: [],
+        requireApproval: [],
+      },
+      evidence: {
+        requirePlan: true,
+        requireToolEvents: false,
+        requireCitations: false,
+        requireStructuredSubagents: false,
+      },
+      humanGates: [],
+      budget: { timeoutMs: 30_000, maxTurns: 3 },
+    };
+    const policyWrite = await api(
+      memberPage,
+      "PUT",
+      `/projects/${projectId}/execution-policy`,
+      { expectedRevision: 0, policy: executionPolicy },
+    );
+    expect(policyWrite.status).toBe(200);
+    expect(policyWrite.body).toMatchObject({
+      contextType: "project",
+      contextId: projectId,
+      revision: 1,
+    });
+    const stalePolicy = await api(
+      memberPage,
+      "PUT",
+      `/projects/${projectId}/execution-policy`,
+      { expectedRevision: 0, policy: executionPolicy },
+    );
+    expect(stalePolicy.status).toBe(409);
+    expect(stalePolicy.body).toMatchObject({
+      code: "task_execution_policy_revision_conflict",
+      details: { currentRevision: 1 },
+    });
+
+    const managerRole = await api(
+      ownerPage,
+      "PATCH",
+      `/projects/${projectId}/roles/${roleId}`,
+      { permissions: ["read", "write", "manage_members"] },
+    );
+    expect(managerRole.status).toBe(200);
+    const targetAgent = await api(ownerPage, "POST", "/agents", {
+      name: `E2E transfer target ${Date.now()}`,
+      runtimeKind: "fake",
+    });
+    expect(targetAgent.status).toBe(201);
+    const targetMember = await api(
+      ownerPage,
+      "POST",
+      `/projects/${projectId}/members`,
+      {
+        kind: "agent",
+        agentId: targetAgent.body.id,
+        responsibility: "E2E transfer target",
+        roleIds: [],
+      },
+    );
+    expect(targetMember.status).toBe(201);
+    const transferTask = await api(ownerPage, "POST", "/tasks", {
+      projectId,
+      title: "E2E member-managed transfer",
+      description: "manage_members replaces platform-admin-only transfer",
+    });
+    expect(transferTask.status).toBe(201);
+    const transferred = await api(
+      memberPage,
+      "POST",
+      `/tasks/${transferTask.body.id}/transfer`,
+      { agentId: targetAgent.body.id },
+    );
+    expect(transferred.status).toBe(200);
+    expect(transferred.body).toMatchObject({
+      task: { id: transferTask.body.id, agentId: targetAgent.body.id },
+    });
 
     const adminWrite = await api(adminPage, "PATCH", `/projects/${projectId}`, {
       description: "platform admin must not bypass projects",
@@ -250,10 +357,24 @@ test("multi-Principal project authorization and immediate Grant revocation", asy
     expect(deniedAfterRevoke.body).toMatchObject({
       details: { reason: "grant_missing" },
     });
-    await memberPage.screenshot({
-      path: `.tmp/batch14c-rbac-e2e-${Date.now()}.png`,
-      fullPage: true,
-    });
+    for (const viewport of [
+      { width: 1440, height: 900 },
+      { width: 900, height: 900 },
+      { width: 390, height: 844 },
+    ]) {
+      await memberPage.setViewportSize(viewport);
+      await expect
+        .poll(async () =>
+          memberPage.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+          ),
+        )
+        .toBe(true);
+      await memberPage.screenshot({
+        path: `.tmp/batch15a-rbac-${viewport.width}.png`,
+        fullPage: true,
+      });
+    }
   } finally {
     await Promise.all([
       ownerContext.close(),

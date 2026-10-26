@@ -10,6 +10,10 @@ import type {
   Meeting,
   MeetingAiPolicy,
 } from "@pluginmax/contracts";
+import {
+  legacyTaskExecutionPolicy,
+  taskExecutionPolicySchema,
+} from "@pluginmax/contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   Database,
@@ -52,7 +56,7 @@ integration("external runtime execution", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 24,
+      expectedMigrationVersion: 25,
     });
     app = built.app;
     await app.ready();
@@ -232,6 +236,32 @@ integration("external runtime execution", () => {
     const runtime = await createActiveRuntime("codex-jsonl");
     await bind(agent.id, runtime.id);
     const fixture = await taskFixture(agent.id);
+    const policy = taskExecutionPolicySchema.parse({
+      ...legacyTaskExecutionPolicy(),
+      runtime: {
+        selection: "recommended",
+        allowedRuntimeIds: [runtime.id],
+        requiredCapabilities: [],
+      },
+      toolPolicy: {
+        allow: [],
+        deny: [],
+        requireApproval: [],
+      },
+      budget: { timeoutMs: 60_000, maxTurns: 2 },
+    });
+    const savedPolicy = await repositories.taskExecutionPolicies.replace({
+      contextType: "task",
+      contextId: fixture.taskId,
+      projectId: fixture.projectId,
+      expectedRevision: 0,
+      policy,
+      actorId: "local-admin",
+    });
+    expect(savedPolicy).toMatchObject({
+      kind: "saved",
+      record: { revision: 1 },
+    });
 
     const dispatched = await request<{ runId: string }>(
       "POST",
@@ -247,8 +277,37 @@ integration("external runtime execution", () => {
       },
       binding: { revision: 1 },
       model: "gpt-fixture",
+      envelope: {
+        budget: { timeoutMs: 60_000, maxTurns: 2 },
+        resolved: { allowedToolCategories: [] },
+      },
+    });
+    expect(run?.executionEnvelope).toMatchObject({
+      contextType: "task",
+      policy: { revision: 1, source: "context" },
+      binding: { kind: "external", id: expect.any(String), revision: 1 },
+      runtime: {
+        id: runtime.id,
+        revision: runtime.revision,
+        capabilitySnapshotId: expect.any(String),
+      },
     });
     expect(run?.externalStartedAt).toBeNull();
+    const revisedPolicy = await repositories.taskExecutionPolicies.replace({
+      contextType: "task",
+      contextId: fixture.taskId,
+      projectId: fixture.projectId,
+      expectedRevision: 1,
+      policy: {
+        ...policy,
+        budget: { timeoutMs: 30_000, maxTurns: 1 },
+      },
+      actorId: "local-admin",
+    });
+    expect(revisedPolicy).toMatchObject({
+      kind: "saved",
+      record: { revision: 2 },
+    });
     const job = await repositories.jobs.claimNext(
       "external-task-worker",
       60,
@@ -268,6 +327,10 @@ integration("external runtime execution", () => {
       externalRuntimeVersion: "9.8.7-fixture",
     });
     expect(completed?.output).toContain("FINAL:");
+    expect(completed?.executionEnvelope).toMatchObject({
+      policy: { revision: 1 },
+      envelope: { budget: { timeoutMs: 60_000, maxTurns: 2 } },
+    });
     const events = await repositories.runs.listEvents(dispatched.body.runId);
     expect(events).toEqual(
       expect.arrayContaining([

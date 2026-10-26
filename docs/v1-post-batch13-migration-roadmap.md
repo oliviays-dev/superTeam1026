@@ -1,14 +1,14 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 14A-14D 已完成；下一正式批次为 Batch 15A
+> 状态：Batch 14A-15A 已完成；下一正式批次为 Batch 15B
 >
 > 当前基线：`8b62d6a7a5c1e56f9496fd8890af602a0a4ee19e`
 >
-> 分支：`feat/v1-batch14d-read-authorization`
+> 分支：`feat/v1-batch15a-task-execution-policy`
 >
 > 初始路线图基线：`bc7f55b651737c34ea288b8ad2adf3c51bf3a6ea`
 >
-> 最后更新：2026-10-26
+> 最后更新：2026-10-27
 
 ## 1. 文档目的
 
@@ -32,6 +32,8 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
 - Migration 23、完整 Vitest、完整 Playwright、`pnpm check` 已通过。
 - Batch 14A-14D 已完成 Principal、Bearer Session、Project RBAC、读授权闭环
   和 Project Capability；Migration 24 已落地。
+- Batch 15A 已完成版本化 TaskExecutionPolicy、统一 Preflight、Run Execution
+  Envelope 与 Worker 快照复核；Migration 25 已落地。
 
 ### 2.2 主要缺口
 
@@ -531,7 +533,7 @@ HTTP Request
 - [x] Batch 14B 认证与登录 Session
 - [x] Batch 14C RBAC 消费与审计
 - [x] Batch 14D RBAC 读授权闭环与 Project Capability
-- [ ] Batch 15A TaskExecutionPolicy 与 Envelope
+- [x] Batch 15A TaskExecutionPolicy 与 Envelope
 - [ ] Batch 15B Action Ticket 与 Execution Gate
 - [ ] Batch 16 Context 与 Scene Session
 - [ ] Batch 17A Task Execution Depth
@@ -555,16 +557,16 @@ HTTP Request
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 15A：TaskExecutionPolicy 与 Execution Envelope**。
-开始前先完成 14C Application 写门禁与 Capability 的一致性依赖检查，不新开产品
-批次。
+下一执行批次为 **Batch 15B：Action Ticket 与 Execution Gate**。
+15B 必须消费 15A 的 policy revision、Execution Envelope 和 Run 快照，不能通过
+Ticket 扩大 Principal Grant、Project permission 或 Runtime Capability。
 
 建议在独立 worktree 执行：
 
 ```text
-worktree: /Users/oliviayang/Codex/一切皆插件/.tmp/pluginmax-platform-batch15a-task-execution-policy
-branch:   feat/v1-batch15a-task-execution-policy
-base:     8b62d6a7a5c1e56f9496fd8890af602a0a4ee19e
+worktree: /Users/oliviayang/Codex/一切皆插件/.tmp/pluginmax-platform-batch15b-action-ticket-gate
+branch:   feat/v1-batch15b-action-ticket-gate
+base:     <Batch 15A local commit>
 ```
 
 ## 13. 参考文档
@@ -574,6 +576,7 @@ base:     8b62d6a7a5c1e56f9496fd8890af602a0a4ee19e
 - [v1-batch14c-rbac-authorization.md](./v1-batch14c-rbac-authorization.md)
 - [v1-batch14d-read-authorization.md](./v1-batch14d-read-authorization.md)
 - [v1-batch13-release-gate.md](./v1-batch13-release-gate.md)
+- [v1-batch15a-task-execution-policy.md](./v1-batch15a-task-execution-policy.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)

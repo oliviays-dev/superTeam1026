@@ -119,7 +119,7 @@ integration("RBAC authorization API", () => {
       fileStoreRoot: await mkdtemp(join(tmpdir(), "pluginmax-rbac-api-")),
       logger: false,
       authMode: "bearer",
-      expectedMigrationVersion: 24,
+      expectedMigrationVersion: 25,
     });
     app = built.app;
     await app.ready();
@@ -365,6 +365,112 @@ integration("RBAC authorization API", () => {
         }),
       ]),
     );
+  });
+
+  it("uses write and manage_members grants for former owner-only project paths", async () => {
+    const restoreWriter = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/projects/${projectId}/members/${memberId}`,
+      headers: auth(ownerToken),
+      payload: { roleIds: [writerRoleId] },
+    });
+    expect(restoreWriter.statusCode).toBe(200);
+
+    const memory = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/memory/topics`,
+      headers: auth(memberToken),
+      payload: { title: "Member-authored memory" },
+    });
+    expect(memory.statusCode).toBe(201);
+
+    const meeting = await app.inject({
+      method: "POST",
+      url: "/api/v1/meetings",
+      headers: auth(memberToken),
+      payload: {
+        projectId,
+        title: "Member-authored meeting",
+        agenda: "Write grant must be sufficient",
+        agentIds: [],
+      },
+    });
+    expect(meeting.statusCode).toBe(201);
+
+    const agent = await app.inject({
+      method: "POST",
+      url: "/api/v1/agents",
+      headers: auth(ownerToken),
+      payload: {
+        name: `Transfer target ${suffix}`,
+        runtimeKind: "fake",
+      },
+    });
+    expect(agent.statusCode).toBe(201);
+    const agentMember = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/members`,
+      headers: auth(ownerToken),
+      payload: {
+        kind: "agent",
+        agentId: agent.json().id,
+        responsibility: "Transfer target",
+        roleIds: [],
+      },
+    });
+    expect(agentMember.statusCode).toBe(201);
+    const task = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      headers: auth(ownerToken),
+      payload: {
+        projectId,
+        title: "Member-manager transfer",
+        description: "Manage-members transfer target",
+      },
+    });
+    expect(task.statusCode).toBe(201);
+
+    const deniedTransfer = await app.inject({
+      method: "POST",
+      url: `/api/v1/tasks/${task.json().id}/transfer`,
+      headers: auth(memberToken),
+      payload: { agentId: agent.json().id },
+    });
+    expect(deniedTransfer.statusCode).toBe(403);
+    expect(deniedTransfer.json()).toMatchObject({
+      details: { permission: "manage_members" },
+    });
+
+    const managerRole = await app.inject({
+      method: "POST",
+      url: `/api/v1/projects/${projectId}/roles`,
+      headers: auth(ownerToken),
+      payload: {
+        code: "MEMBER_MANAGER",
+        name: `Member manager ${suffix}`,
+        permissions: ["read", "write", "manage_members"],
+      },
+    });
+    expect(managerRole.statusCode).toBe(201);
+    const grantManagement = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/projects/${projectId}/members/${memberId}`,
+      headers: auth(ownerToken),
+      payload: { roleIds: [writerRoleId, managerRole.json().id] },
+    });
+    expect(grantManagement.statusCode).toBe(200);
+
+    const transferred = await app.inject({
+      method: "POST",
+      url: `/api/v1/tasks/${task.json().id}/transfer`,
+      headers: auth(memberToken),
+      payload: { agentId: agent.json().id },
+    });
+    expect(transferred.statusCode).toBe(200);
+    expect(transferred.json()).toMatchObject({
+      task: { id: task.json().id, agentId: agent.json().id },
+    });
   });
 
   it("rejects disabled accounts and archived Principals before project authorization", async () => {

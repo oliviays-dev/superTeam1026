@@ -58,6 +58,8 @@
     "test:e2e:rbac-authorization": "./scripts/rbac-authorization-e2e.sh",
     "test:integration:read-authorization": "./scripts/read-authorization-vitest.sh",
     "test:e2e:read-authorization": "./scripts/read-authorization-e2e.sh",
+    "test:integration:task-policy": "./scripts/task-execution-policy-vitest.sh",
+    "test:e2e:task-policy": "./scripts/task-execution-policy-e2e.sh",
     "test:integration:project-templates": "./scripts/project-templates-vitest.sh",
     "test:integration:external-runtime": "./scripts/external-runtime-vitest.sh",
     "test:smoke:external-runtime-postgres": "./scripts/external-runtime-postgres-smoke.sh",

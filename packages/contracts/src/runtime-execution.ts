@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { sourceClassSchema, toolCategorySchema } from "./task-execution.js";
+import {
+  resolvedTaskExecutionPolicySchema,
+  sourceClassSchema,
+  toolCategorySchema,
+} from "./task-execution.js";
 
 export const capabilityStateSchema = z.enum([
   "supported",
@@ -109,9 +113,70 @@ export const executionEnvelopeSchema = z.object({
     authMode: z.string().trim().min(1).max(120),
   }),
   unresolved: z.array(capabilityGapSchema).max(100).default([]),
+  sourcePolicy: z
+    .object({
+      allow: z.array(sourceClassSchema).max(100),
+      deny: z.array(sourceClassSchema).max(100),
+      citation: z.enum(["none", "required-for-factual-claims"]),
+      requirePublishedAt: z.boolean(),
+      requireAccessedAt: z.boolean(),
+    })
+    .optional(),
+  budget: z
+    .object({
+      timeoutMs: z.number().int().positive().max(3_600_000).optional(),
+      maxTurns: z.number().int().positive().max(1_000).optional(),
+      maxToolCalls: z.number().int().positive().max(10_000).optional(),
+      maxCost: z.number().nonnegative().optional(),
+    })
+    .optional(),
   createdAt: z.string().trim().min(1),
 });
 export type ExecutionEnvelope = z.infer<typeof executionEnvelopeSchema>;
+
+export const runExecutionEnvelopeSchema = z.object({
+  schemaVersion: z.literal(1).default(1),
+  id: z.string().trim().min(1).max(180),
+  digest: z.string().regex(/^[a-f0-9]{64}$/),
+  contextType: z.enum(["task", "workflow-task", "meeting", "direct-chat"]),
+  contextId: z.string().trim().min(1).max(180),
+  projectId: z.string().uuid().nullable(),
+  principalId: z.string().trim().min(1).max(180),
+  agentId: z.string().uuid(),
+  agentPrincipalId: z.string().trim().min(1).max(180).nullable(),
+  authorization: z.object({
+    scope: z.enum(["project", "self"]),
+    grantIds: z.array(z.string().uuid()).max(100),
+    effectivePermissions: z
+      .array(
+        z.enum([
+          "read",
+          "write",
+          "approve",
+          "manage_members",
+          "manage_roles",
+        ]),
+      )
+      .max(20),
+    membershipId: z.string().uuid().nullable(),
+    authSource: z.enum(["bearer", "local-development"]),
+  }),
+  policy: resolvedTaskExecutionPolicySchema,
+  binding: z.object({
+    kind: z.enum(["external", "builtin"]),
+    id: z.string().uuid().nullable(),
+    revision: z.number().int().nonnegative(),
+  }),
+  runtime: z.object({
+    id: z.string().trim().min(1).max(180),
+    revision: z.number().int().positive(),
+    capabilitySnapshotId: z.string().uuid().nullable(),
+    capability: runtimeCapabilityProfileSchema,
+  }),
+  envelope: executionEnvelopeSchema,
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type RunExecutionEnvelope = z.infer<typeof runExecutionEnvelopeSchema>;
 
 export const executionPlanStepSchema = z.object({
   id: z.string().trim().min(1).max(180),

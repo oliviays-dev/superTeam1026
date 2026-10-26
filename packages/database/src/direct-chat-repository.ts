@@ -10,6 +10,7 @@ import {
   type DirectChatThreadListItem,
   type DirectChatTurn,
   type ExternalRunExecutionSnapshot,
+  type RunExecutionEnvelope,
   type RunInputSnapshot,
   type SendDirectChatMessageInput,
   type TraceContext,
@@ -22,6 +23,12 @@ import {
   type AgentRow,
   type RunRow,
 } from "./rows.js";
+
+export interface PreparedDirectChatExecution {
+  readonly executionSnapshot?: ExternalRunExecutionSnapshot;
+  readonly executionEnvelope: RunExecutionEnvelope;
+  readonly timeoutAt?: string;
+}
 
 interface DirectChatThreadRow {
   id: string;
@@ -331,7 +338,7 @@ export class DirectChatRepository {
     trace: TraceContext = createRootTraceContext(),
     resolveExternalExecution?: (
       agent: Agent,
-    ) => Promise<ExternalRunExecutionSnapshot | undefined>,
+    ) => Promise<PreparedDirectChatExecution | undefined>,
   ): Promise<DirectChatSendResult> {
     return this.database.transaction(async (client) => {
       const thread = await this.lockOwnedThread(client, threadId, ownerId);
@@ -355,7 +362,8 @@ export class DirectChatRepository {
         );
       }
       assertDispatchable(agent);
-      const executionSnapshot = await resolveExternalExecution?.(agent);
+      const prepared = await resolveExternalExecution?.(agent);
+      const executionSnapshot = prepared?.executionSnapshot;
       if (
         (agent.runtimeKind === "codex-jsonl" ||
           agent.runtimeKind === "plain-text") &&
@@ -390,6 +398,14 @@ export class DirectChatRepository {
         source: message,
         trace,
         ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
+        ...(prepared === undefined
+          ? {}
+          : {
+              executionEnvelope: prepared.executionEnvelope,
+              ...(prepared.timeoutAt === undefined
+                ? {}
+                : { timeoutAt: prepared.timeoutAt }),
+            }),
       });
       await client.query(
         `UPDATE direct_chat_messages
@@ -413,7 +429,7 @@ export class DirectChatRepository {
     trace: TraceContext = createRootTraceContext(),
     resolveExternalExecution?: (
       agent: Agent,
-    ) => Promise<ExternalRunExecutionSnapshot | undefined>,
+    ) => Promise<PreparedDirectChatExecution | undefined>,
   ): Promise<DirectChatSendResult> {
     return this.database.transaction(async (client) => {
       const thread = await this.lockOwnedThread(client, threadId, ownerId);
@@ -444,7 +460,8 @@ export class DirectChatRepository {
         );
       }
       assertDispatchable(agent);
-      const executionSnapshot = await resolveExternalExecution?.(agent);
+      const prepared = await resolveExternalExecution?.(agent);
+      const executionSnapshot = prepared?.executionSnapshot;
       if (
         (agent.runtimeKind === "codex-jsonl" ||
           agent.runtimeKind === "plain-text") &&
@@ -486,6 +503,14 @@ export class DirectChatRepository {
         source: messageFromRow(source),
         trace,
         ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
+        ...(prepared === undefined
+          ? {}
+          : {
+              executionEnvelope: prepared.executionEnvelope,
+              ...(prepared.timeoutAt === undefined
+                ? {}
+                : { timeoutAt: prepared.timeoutAt }),
+            }),
       });
       return this.sendResultForSource(client, messageFromRow(source), false);
     });
@@ -793,6 +818,8 @@ export class DirectChatRepository {
       readonly source: DirectChatMessage;
       readonly trace: TraceContext;
       readonly executionSnapshot?: ExternalRunExecutionSnapshot;
+      readonly executionEnvelope?: RunExecutionEnvelope;
+      readonly timeoutAt?: string;
     },
   ): Promise<string> {
     const runId = randomUUID();
@@ -814,6 +841,10 @@ export class DirectChatRepository {
       `INSERT INTO runs (
          id, project_id, task_id, meeting_turn_id, direct_chat_turn_id,
          agent_id, status, input_snapshot, execution_snapshot,
+         execution_context_type, execution_context_id,
+         execution_policy_id, execution_policy_revision,
+         execution_binding_revision, execution_runtime_revision,
+         execution_envelope_snapshot,
          external_runtime_id, external_runtime_revision,
          external_runtime_provider, external_runtime_protocol,
          observability, attempt,
@@ -821,7 +852,8 @@ export class DirectChatRepository {
          created_at, updated_at
        ) VALUES (
          $1, NULL, NULL, NULL, $2, $3, 'queued', $4::jsonb, $5::jsonb,
-         $6, $7, $8, $9, $10::jsonb, 1, NULL, $11, $12, $13,
+         $6, $7, $8, $9, $10, $11, $12::jsonb,
+         $13, $14, $15, $16, $17::jsonb, 1, $18, $19, $20, $21,
          NOW(), NOW()
        )
        RETURNING *`,
@@ -833,6 +865,15 @@ export class DirectChatRepository {
         input.executionSnapshot === undefined
           ? null
           : JSON.stringify(input.executionSnapshot),
+        input.executionEnvelope?.contextType ?? null,
+        input.executionEnvelope?.contextId ?? null,
+        input.executionEnvelope?.policy.id ?? null,
+        input.executionEnvelope?.policy.revision ?? null,
+        input.executionEnvelope?.binding.revision ?? null,
+        input.executionEnvelope?.runtime.revision ?? null,
+        input.executionEnvelope === undefined
+          ? null
+          : JSON.stringify(input.executionEnvelope),
         input.executionSnapshot?.runtime.id ?? null,
         input.executionSnapshot?.runtime.revision ?? null,
         input.executionSnapshot?.runtime.provider ?? null,
@@ -856,6 +897,7 @@ export class DirectChatRepository {
               : "message",
           subagentVisibility: "none",
         }),
+        input.timeoutAt ?? null,
         `direct-chat:${input.turnId}`,
         input.trace.traceId,
         input.trace.spanId,

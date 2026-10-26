@@ -4,11 +4,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { InjectOptions } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Database, migrate } from "@pluginmax/database";
+import { Database, migrate, todayInShanghai } from "@pluginmax/database";
 import { buildApi } from "./app.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl === undefined ? describe.skip : describe;
+
+function tomorrowInShanghai(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(Date.now() + 86_400_000));
+}
 
 interface Project {
   readonly id: string;
@@ -69,7 +78,7 @@ integration("workbench and project reports", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 17,
+      expectedMigrationVersion: 25,
     });
     app = built.app;
     await app.ready();
@@ -266,7 +275,7 @@ integration("workbench and project reports", () => {
 
   it("generates one immutable version under concurrent refresh and keeps source refs", async () => {
     const fixture = await createReportFixture("Report concurrency");
-    const date = "2026-10-26";
+    const date = todayInShanghai();
     const results = await Promise.all(
       Array.from({ length: 6 }, () =>
         request<{
@@ -466,7 +475,7 @@ integration("workbench and project reports", () => {
     const report = await request<{ report: ProjectReport }>(
       "POST",
       `/api/v1/projects/${fixture.project.id}/reports/generate`,
-      { reportDate: "2026-10-26" },
+      { reportDate: todayInShanghai() },
     );
     expect(report.statusCode).toBe(200);
     const supply = await request(
@@ -581,7 +590,8 @@ integration("workbench and project reports", () => {
       (
         await database.query<{ count: string }>(
           `SELECT COUNT(*)::text AS count FROM workbench_briefs
-           WHERE actor_id = 'local-admin' AND brief_date = '2026-10-27'`,
+           WHERE actor_id = 'local-admin' AND brief_date = $1`,
+          [tomorrowInShanghai()],
         )
       ).rows[0]?.count ?? "0",
     );
@@ -590,7 +600,7 @@ integration("workbench and project reports", () => {
         request<{ brief: { id: string }; created: boolean }>(
           "POST",
           "/api/v1/workbench/brief/refresh",
-          { briefDate: "2026-10-27" },
+          { briefDate: tomorrowInShanghai() },
         ),
       ),
     );
@@ -601,7 +611,8 @@ integration("workbench and project reports", () => {
     expect(refreshes.filter((result) => result.body.created)).toHaveLength(1);
     const briefCount = await database.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM workbench_briefs
-       WHERE actor_id = 'local-admin' AND brief_date = '2026-10-27'`,
+       WHERE actor_id = 'local-admin' AND brief_date = $1`,
+      [tomorrowInShanghai()],
     );
     expect(Number(briefCount.rows[0]?.count)).toBe(briefCountBefore + 1);
 

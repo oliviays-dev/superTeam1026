@@ -7,6 +7,7 @@ import {
   type MeetingAiTriggerKind,
   type MeetingAiTurnSummary,
   type ExternalRunExecutionSnapshot,
+  type RunExecutionEnvelope,
   type RunInputSnapshot,
   type TriggerMeetingAiInput,
   type TriggerMeetingAiResult,
@@ -14,6 +15,12 @@ import {
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import { Database } from "./database.js";
+
+export interface PreparedMeetingAiExecution {
+  readonly executionSnapshot?: ExternalRunExecutionSnapshot;
+  readonly executionEnvelope: RunExecutionEnvelope;
+  readonly timeoutAt?: string;
+}
 
 interface MeetingAiPolicyRow {
   id: string;
@@ -421,7 +428,7 @@ export class MeetingAiRepository {
       readonly agentId: string;
       readonly turnId: string;
       readonly projectId: string;
-    }) => Promise<ExternalRunExecutionSnapshot | undefined>;
+    }) => Promise<PreparedMeetingAiExecution | undefined>;
   }): Promise<TriggerMeetingAiResult> {
     return this.database.transaction(async (client) => {
       await client.query(
@@ -746,12 +753,13 @@ export class MeetingAiRepository {
         const runtimeKind = runtime.rows[0]?.runtime_kind ?? "fake";
         inputSnapshot.runtimeKind =
           runtimeKind as RunInputSnapshot["runtimeKind"];
-        const executionSnapshot =
+        const prepared =
           await input.resolveExternalExecution?.({
             agentId: participant.agent_id,
             turnId,
             projectId: input.projectId,
           });
+        const executionSnapshot = prepared?.executionSnapshot;
         if (
           (runtimeKind === "codex-jsonl" || runtimeKind === "plain-text") &&
           executionSnapshot === undefined
@@ -764,14 +772,19 @@ export class MeetingAiRepository {
         const run = await client.query(
           `INSERT INTO runs (
              id, project_id, task_id, meeting_turn_id, agent_id, status,
-             input_snapshot, execution_snapshot, external_runtime_id,
+             input_snapshot, execution_snapshot,
+             execution_context_type, execution_context_id,
+             execution_policy_id, execution_policy_revision,
+             execution_binding_revision, execution_runtime_revision,
+             execution_envelope_snapshot, external_runtime_id,
              external_runtime_revision, external_runtime_provider,
              external_runtime_protocol, observability, attempt, timeout_at,
              idempotency_key, trace_id, trace_root_span_id,
              created_at, updated_at
            ) VALUES (
              $1, $2, NULL, $3, $4, 'queued', $5::jsonb, $6::jsonb,
-             $7, $8, $9, $10, $11::jsonb, 1, NULL, $12, $13, $14,
+             $7, $8, $9, $10, $11, $12, $13::jsonb,
+             $14, $15, $16, $17, $18::jsonb, 1, $19, $20, $21, $22,
              NOW(), NOW()
            )`,
           [
@@ -783,6 +796,15 @@ export class MeetingAiRepository {
             executionSnapshot === undefined
               ? null
               : JSON.stringify(executionSnapshot),
+            prepared?.executionEnvelope.contextType ?? null,
+            prepared?.executionEnvelope.contextId ?? null,
+            prepared?.executionEnvelope.policy.id ?? null,
+            prepared?.executionEnvelope.policy.revision ?? null,
+            prepared?.executionEnvelope.binding.revision ?? null,
+            prepared?.executionEnvelope.runtime.revision ?? null,
+            prepared?.executionEnvelope === undefined
+              ? null
+              : JSON.stringify(prepared.executionEnvelope),
             executionSnapshot?.runtime.id ?? null,
             executionSnapshot?.runtime.revision ?? null,
             executionSnapshot?.runtime.provider ?? null,
@@ -806,6 +828,7 @@ export class MeetingAiRepository {
                   : "message",
               subagentVisibility: "none",
             }),
+            prepared?.timeoutAt ?? null,
             `meeting-ai:${turnId}`,
             trace.traceId,
             trace.spanId,

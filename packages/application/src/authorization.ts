@@ -50,6 +50,7 @@ const SELF_WRITE_ROUTES = new Set([
   "POST /api/v1/direct-chats/:threadId/messages",
   "POST /api/v1/direct-chats/:threadId/turns/:turnId/retry",
   "POST /api/v1/direct-chats/:threadId/turns/:turnId/cancel",
+  "PUT /api/v1/direct-chats/:threadId/execution-policy",
   "POST /api/v1/workbench/brief/refresh",
   "POST /api/v1/workbench/brief/:briefId/read",
   "PATCH /api/v1/workbench/brief/settings",
@@ -147,6 +148,13 @@ function resourceRequirement(
     };
   }
   if (route === "/api/v1/tasks/:id/dispatch") {
+    return {
+      resourceType: "task",
+      resourceId: parameter(params, "id"),
+      permission: "write",
+    };
+  }
+  if (route === "/api/v1/tasks/:id/execution-policy") {
     return {
       resourceType: "task",
       resourceId: parameter(params, "id"),

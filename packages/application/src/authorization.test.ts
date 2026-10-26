@@ -297,4 +297,62 @@ describe("authorization route policy", () => {
       }),
     ).resolves.toEqual({ required: false });
   });
+
+  it("maps execution policy writes to project write or direct-chat self scope", async () => {
+    const calls: string[] = [];
+    const repository = {
+      projectIdForResource: async (
+        resourceType: string,
+        resourceId: string,
+      ) => {
+        calls.push(`${resourceType}:${resourceId}`);
+        return "project-policy";
+      },
+      authorizeProject: async (input: {
+        projectId: string;
+        permission: string;
+      }) => {
+        calls.push(`${input.projectId}:${input.permission}`);
+        return allowedDecision("project", input.projectId, "write");
+      },
+      audit: async (_input: AuthorizationAuditInput) => undefined,
+    } as unknown as AuthorizationRepository;
+    const service = new AuthorizationService(repository);
+
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-task-policy",
+        method: "PUT",
+        route: "/api/v1/tasks/:id/execution-policy",
+        principal,
+        params: { id: "task-policy" },
+        body: {},
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-project-policy",
+        method: "PUT",
+        route: "/api/v1/projects/:projectId/execution-policy",
+        principal,
+        params: { projectId: "project-policy" },
+        body: {},
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-direct-policy",
+        method: "PUT",
+        route: "/api/v1/direct-chats/:threadId/execution-policy",
+        principal,
+        params: { threadId: "direct-chat-policy" },
+        body: {},
+      }),
+    ).resolves.toEqual({ required: false });
+    expect(calls).toEqual([
+      "task:task-policy",
+      "project-policy:write",
+      "project-policy:write",
+    ]);
+  });
 });

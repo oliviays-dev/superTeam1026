@@ -2652,3 +2652,117 @@ CREATE INDEX IF NOT EXISTS runs_initiated_by_principal_idx
   ON runs(initiated_by_principal_id, created_at DESC)
   WHERE initiated_by_principal_id IS NOT NULL;
 `;
+
+export const TASK_EXECUTION_POLICY_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS task_execution_policies (
+  id UUID PRIMARY KEY,
+  context_type TEXT NOT NULL
+    CHECK (context_type IN ('project', 'task', 'meeting', 'direct-chat')),
+  context_id TEXT NOT NULL
+    CHECK (length(btrim(context_id)) BETWEEN 1 AND 180),
+  project_id UUID REFERENCES projects(id),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  policy JSONB NOT NULL
+    CHECK (jsonb_typeof(policy) = 'object'),
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (context_type, context_id, revision),
+  CHECK (
+    (context_type = 'project' AND project_id::text = context_id)
+    OR (context_type IN ('task', 'meeting') AND project_id IS NOT NULL)
+    OR (context_type = 'direct-chat' AND project_id IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS task_execution_policies_context_idx
+  ON task_execution_policies(context_type, context_id, revision DESC);
+
+CREATE INDEX IF NOT EXISTS task_execution_policies_project_idx
+  ON task_execution_policies(project_id, context_type, revision DESC)
+  WHERE project_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_task_execution_policy_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'task_execution_policies revisions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS task_execution_policies_immutable
+  ON task_execution_policies;
+CREATE TRIGGER task_execution_policies_immutable
+BEFORE UPDATE OR DELETE ON task_execution_policies
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_task_execution_policy_mutation();
+
+ALTER TABLE runs
+  ADD COLUMN IF NOT EXISTS execution_context_type TEXT
+    CHECK (
+      execution_context_type IS NULL
+      OR execution_context_type IN (
+        'task',
+        'workflow-task',
+        'meeting',
+        'direct-chat'
+      )
+    ),
+  ADD COLUMN IF NOT EXISTS execution_context_id TEXT
+    CHECK (
+      execution_context_id IS NULL
+      OR length(btrim(execution_context_id)) BETWEEN 1 AND 180
+    ),
+  ADD COLUMN IF NOT EXISTS execution_policy_id UUID
+    REFERENCES task_execution_policies(id),
+  ADD COLUMN IF NOT EXISTS execution_policy_revision INTEGER
+    CHECK (
+      execution_policy_revision IS NULL
+      OR execution_policy_revision >= 0
+    ),
+  ADD COLUMN IF NOT EXISTS execution_binding_revision INTEGER
+    CHECK (
+      execution_binding_revision IS NULL
+      OR execution_binding_revision >= 0
+    ),
+  ADD COLUMN IF NOT EXISTS execution_runtime_revision INTEGER
+    CHECK (
+      execution_runtime_revision IS NULL
+      OR execution_runtime_revision > 0
+    ),
+  ADD COLUMN IF NOT EXISTS execution_envelope_snapshot JSONB
+    CHECK (
+      execution_envelope_snapshot IS NULL
+      OR jsonb_typeof(execution_envelope_snapshot) = 'object'
+    );
+
+CREATE INDEX IF NOT EXISTS runs_execution_policy_idx
+  ON runs(execution_policy_id, execution_policy_revision)
+  WHERE execution_policy_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_run_execution_envelope_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.execution_context_type IS DISTINCT FROM NEW.execution_context_type
+    OR OLD.execution_context_id IS DISTINCT FROM NEW.execution_context_id
+    OR OLD.execution_policy_id IS DISTINCT FROM NEW.execution_policy_id
+    OR OLD.execution_policy_revision IS DISTINCT FROM NEW.execution_policy_revision
+    OR OLD.execution_binding_revision IS DISTINCT FROM NEW.execution_binding_revision
+    OR OLD.execution_runtime_revision IS DISTINCT FROM NEW.execution_runtime_revision
+    OR OLD.execution_envelope_snapshot IS DISTINCT FROM NEW.execution_envelope_snapshot
+  THEN
+    RAISE EXCEPTION 'run execution envelope is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS runs_execution_envelope_immutable ON runs;
+CREATE TRIGGER runs_execution_envelope_immutable
+BEFORE UPDATE ON runs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_run_execution_envelope_mutation();
+`;
