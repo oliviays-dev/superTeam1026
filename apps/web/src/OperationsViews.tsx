@@ -20,7 +20,7 @@ import {
   RefreshCw,
   Workflow,
 } from "lucide-react";
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import {
   closeMeeting,
   completeWorkflowNode,
@@ -135,7 +135,7 @@ export function WorkbenchView({
     (task) => task.status === "queued" || task.status === "in_progress",
   );
   const reviewTasks = tasks.filter((task) => task.status === "review");
-  const memory = memoryQuery.data ?? [];
+  const memory = memoryQuery.data?.items ?? [];
   const meetings = meetingsQuery.data ?? [];
   const metrics = [
     ["项目", summary?.projects, "个"],
@@ -814,8 +814,12 @@ export function MeetingsView({
   projectId,
   onProjectChange,
   onOpenTask,
+  initialMeetingId,
+  onInitialMeetingConsumed,
 }: ProjectViewProps & {
   onOpenTask: (taskId: string, projectId: string) => void;
+  initialMeetingId: string;
+  onInitialMeetingConsumed: () => void;
 }) {
   const queryClient = useQueryClient();
   const selectedProjectId = projectId || projects[0]?.id || "";
@@ -824,6 +828,11 @@ export function MeetingsView({
   const [agenda, setAgenda] = useState("");
   const [agentId, setAgentId] = useState("");
   const [message, setMessage] = useState("");
+  useEffect(() => {
+    if (initialMeetingId === "") return;
+    setMeetingId(initialMeetingId);
+    onInitialMeetingConsumed();
+  }, [initialMeetingId, onInitialMeetingConsumed]);
   const meetingsQuery = useQuery({
     queryKey: ["meetings", selectedProjectId],
     queryFn: () => listMeetings(selectedProjectId),

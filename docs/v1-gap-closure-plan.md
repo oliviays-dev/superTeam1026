@@ -47,9 +47,9 @@
 ### 2.3 Context 与 Memory
 
 - [x] 项目 Topic、Claim、Current Truth 时间线。
-- [ ] Handoff Card 和 Review 队列。
-- [ ] Agent 私有 Episode 与项目过滤。
-- [ ] 会议自动摄入；任务 Review 已自动写入 Topic/Claim/Truth。
+- [x] Handoff Card 和 Review 队列。
+- [x] Agent 私有 Episode 与项目过滤。
+- [x] 会议自动摄入；任务 Review 已自动写入 Topic/Claim/Truth。
 
 ### 2.4 工作流
 

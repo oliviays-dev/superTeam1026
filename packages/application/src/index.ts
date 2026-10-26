@@ -2,11 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   Agent,
   AgentDetail,
+  AgentEpisode,
   ApprovalSlaSweepResult,
   Artifact,
+  ConfirmHandoffCardInput,
   ConvertMeetingActionItemInput,
   CosignWorkflowApprovalInput,
   CreateAgentInput,
+  CreateAgentEpisodeInput,
+  CreateHandoffCardInput,
   CreateMeetingActionItemInput,
   CreateMeetingInput,
   CreateMemoryClaimInput,
@@ -23,6 +27,7 @@ import type {
   IdempotencyCleanupInput,
   Job,
   JobListQuery,
+  HandoffCard,
   Meeting,
   MeetingActionItem,
   MeetingActionItemConversion,
@@ -31,14 +36,19 @@ import type {
   MeetingMinutes,
   MeetingMinutesDraft,
   MeetingMinutesVersion,
+  MeetingMemoryIngestionResult,
   MeetingTraceability,
   MemoryClaim,
+  MemoryClaimTrace,
+  MemoryReviewQueue,
+  MemoryReviewResult,
   MemoryTopic,
   Project,
   ProjectMember,
   ProjectRole,
   PublishMemoryTruthInput,
   PublishMeetingMinutesInput,
+  ReviewMemoryClaimsInput,
   RunDetail,
   RunInputSnapshot,
   RetryWorkflowNodeInput,
@@ -51,6 +61,7 @@ import type {
   TransferTaskInput,
   TransferWorkflowApprovalInput,
   UpdateAgentInput,
+  UpdateHandoffCardInput,
   UpdateMemoryClaimInput,
   UpdateMeetingActionItemInput,
   UpdateMeetingMinutesDraftInput,
@@ -93,7 +104,11 @@ import {
   unresolvedTaskDependencies,
   workflowRetryDelayMs,
 } from "@pluginmax/domain";
-import type { PlatformRepositories, TaskAttachment } from "@pluginmax/database";
+import {
+  MemoryReviewConflictError,
+  type PlatformRepositories,
+  type TaskAttachment,
+} from "@pluginmax/database";
 import type { FileRef, FileStore } from "@pluginmax/files";
 
 export class ApplicationError extends Error {
@@ -1054,15 +1069,23 @@ export class PlatformApplication {
     return artifact;
   }
 
-  async listMemory(projectId: string): Promise<MemoryTopic[]> {
-    return this.repositories.memory.list(projectId);
+  async listMemory(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<{ readonly items: MemoryTopic[]; readonly canManage: boolean }> {
+    const access = await this.requireProjectAccess(projectId, actorId);
+    return {
+      items: await this.repositories.memory.list(projectId),
+      canManage: access.canManage,
+    };
   }
 
   async createMemoryTopic(
     projectId: string,
     input: CreateMemoryTopicInput,
+    actorId = "local-admin",
   ): Promise<MemoryTopic> {
-    await this.requireProject(projectId);
+    await this.requireActiveProjectOwner(projectId, actorId);
     return this.repositories.memory.createTopic(projectId, input);
   }
 
@@ -1070,8 +1093,9 @@ export class PlatformApplication {
     projectId: string,
     topicId: string,
     input: CreateMemoryClaimInput,
+    actorId = "local-admin",
   ): Promise<MemoryClaim> {
-    await this.requireProject(projectId);
+    await this.requireActiveProjectOwner(projectId, actorId);
     try {
       return await this.repositories.memory.addClaim(projectId, topicId, input);
     } catch (error) {
@@ -1094,14 +1118,25 @@ export class PlatformApplication {
     topicId: string,
     claimId: string,
     input: UpdateMemoryClaimInput,
+    actorId = "local-admin",
   ): Promise<MemoryClaim> {
-    await this.requireProject(projectId);
-    const claim = await this.repositories.memory.updateClaim(
-      projectId,
-      topicId,
-      claimId,
-      input,
-    );
+    await this.requireActiveProjectOwner(projectId, actorId);
+    let claim: MemoryClaim | undefined;
+    try {
+      claim = await this.repositories.memoryClosure.updateLegacyClaimStatus({
+        projectId,
+        topicId,
+        claimId,
+        status: input.status,
+        actorId,
+        reason: input.reason ?? "",
+        ...(input.expectedVersion === undefined
+          ? {}
+          : { expectedVersion: input.expectedVersion }),
+      });
+    } catch (error) {
+      throw this.memoryClosureError(error);
+    }
     if (claim === undefined) {
       throw new ApplicationError(
         "memory_claim_not_found",
@@ -1112,12 +1147,63 @@ export class PlatformApplication {
     return claim;
   }
 
+  async listMemoryReviews(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<MemoryReviewQueue> {
+    const access = await this.requireProjectAccess(projectId, actorId);
+    return {
+      items: await this.repositories.memoryClosure.listReviewQueue(projectId),
+      canManage: access.canManage,
+    };
+  }
+
+  async reviewMemoryClaims(
+    projectId: string,
+    input: ReviewMemoryClaimsInput,
+    actorId = "local-admin",
+  ): Promise<MemoryReviewResult> {
+    await this.requireActiveProjectOwner(projectId, actorId);
+    try {
+      return await this.repositories.memoryClosure.reviewClaims({
+        projectId,
+        actorId,
+        items: input.items,
+        decision: input.decision,
+        reason: input.reason,
+      });
+    } catch (error) {
+      throw this.memoryClosureError(error);
+    }
+  }
+
+  async getMemoryClaimTrace(
+    projectId: string,
+    claimId: string,
+    actorId = "local-admin",
+  ): Promise<MemoryClaimTrace> {
+    await this.requireProjectAccess(projectId, actorId);
+    const trace = await this.repositories.memoryClosure.claimTrace(
+      projectId,
+      claimId,
+    );
+    if (trace === undefined) {
+      throw new ApplicationError(
+        "memory_claim_not_found",
+        "Memory claim not found",
+        404,
+      );
+    }
+    return trace;
+  }
+
   async publishMemoryTruth(
     projectId: string,
     topicId: string,
     input: PublishMemoryTruthInput,
+    actorId = "local-admin",
   ): Promise<MemoryTopic> {
-    await this.requireProject(projectId);
+    await this.requireActiveProjectOwner(projectId, actorId);
     try {
       return await this.repositories.memory.publishTruth(
         projectId,
@@ -1156,6 +1242,177 @@ export class PlatformApplication {
         );
       }
       throw error;
+    }
+  }
+
+  async ingestMeetingMinutes(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingMemoryIngestionResult> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    try {
+      return await this.repositories.memoryClosure.ingestMeetingMinutes({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        actorId,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "meeting memory source not available"
+      ) {
+        throw new ApplicationError(
+          "meeting_memory_source_unavailable",
+          "The meeting minutes source is unavailable",
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async listHandoffs(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<HandoffCard[]> {
+    await this.requireProjectAccess(projectId, actorId);
+    return this.repositories.memoryClosure.listHandoffs(projectId);
+  }
+
+  async getHandoff(
+    projectId: string,
+    handoffId: string,
+    actorId = "local-admin",
+  ): Promise<HandoffCard> {
+    await this.requireProjectAccess(projectId, actorId);
+    const handoff = await this.repositories.memoryClosure.getHandoff(
+      projectId,
+      handoffId,
+    );
+    if (handoff === undefined) {
+      throw new ApplicationError(
+        "handoff_not_found",
+        "Handoff card not found",
+        404,
+      );
+    }
+    return handoff;
+  }
+
+  async createHandoff(
+    projectId: string,
+    input: CreateHandoffCardInput,
+    actorId = "local-admin",
+  ): Promise<HandoffCard> {
+    await this.requireActiveProjectOwner(projectId, actorId);
+    try {
+      return await this.repositories.memoryClosure.createHandoff({
+        projectId,
+        actorId,
+        data: input,
+      });
+    } catch (error) {
+      throw this.memoryClosureError(error);
+    }
+  }
+
+  async updateHandoff(
+    projectId: string,
+    handoffId: string,
+    input: UpdateHandoffCardInput,
+    actorId = "local-admin",
+  ): Promise<HandoffCard> {
+    await this.requireActiveProjectOwner(projectId, actorId);
+    try {
+      const handoff = await this.repositories.memoryClosure.updateHandoff({
+        projectId,
+        handoffId,
+        data: input,
+      });
+      if (handoff === undefined) {
+        throw new ApplicationError(
+          "handoff_not_found",
+          "Handoff card not found",
+          404,
+        );
+      }
+      return handoff;
+    } catch (error) {
+      throw this.memoryClosureError(error);
+    }
+  }
+
+  async confirmHandoff(
+    projectId: string,
+    handoffId: string,
+    input: ConfirmHandoffCardInput,
+    actorId = "local-admin",
+  ): Promise<HandoffCard> {
+    await this.requireActiveProjectOwner(projectId, actorId);
+    try {
+      const handoff = await this.repositories.memoryClosure.confirmHandoff({
+        projectId,
+        handoffId,
+        actorId,
+        expectedVersion: input.expectedVersion,
+      });
+      if (handoff === undefined) {
+        throw new ApplicationError(
+          "handoff_not_found",
+          "Handoff card not found",
+          404,
+        );
+      }
+      return handoff;
+    } catch (error) {
+      throw this.memoryClosureError(error);
+    }
+  }
+
+  async listAgentEpisodes(
+    projectId: string,
+    agentId: string,
+    actorId = "local-admin",
+  ): Promise<AgentEpisode[]> {
+    await this.requireProjectAccess(projectId, actorId);
+    await this.requireProjectAgent(projectId, agentId);
+    return this.repositories.memoryClosure.listEpisodes({
+      projectId,
+      agentId,
+      actorId,
+    });
+  }
+
+  async createAgentEpisode(
+    projectId: string,
+    input: CreateAgentEpisodeInput,
+    actorId = "local-admin",
+  ): Promise<AgentEpisode> {
+    const access = await this.requireProjectAccess(projectId, actorId);
+    if (access.project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Episodes cannot be written in an archived project",
+        409,
+      );
+    }
+    if (!access.canManage && actorId !== input.agentId) {
+      throw new ApplicationError(
+        "forbidden",
+        "Only the project owner or the target agent can write this episode",
+        403,
+      );
+    }
+    await this.requireProjectAgent(projectId, input.agentId);
+    try {
+      return await this.repositories.memoryClosure.createEpisode({
+        projectId,
+        actorId,
+        data: input,
+      });
+    } catch (error) {
+      throw this.memoryClosureError(error);
     }
   }
 
@@ -1255,6 +1512,126 @@ export class PlatformApplication {
       throw new ApplicationError("project_not_found", "Project not found", 404);
     }
     return project;
+  }
+
+  private async requireProjectAccess(
+    projectId: string,
+    actorId: string,
+  ): Promise<{ readonly project: Project; readonly canManage: boolean }> {
+    const project = await this.requireProject(projectId);
+    const members =
+      await this.repositories.projectMemberships.listMembers(projectId);
+    const member = members.find(
+      (candidate) =>
+        candidate.actorId === actorId && candidate.status === "active",
+    );
+    if (member === undefined) {
+      throw new ApplicationError(
+        "forbidden",
+        "Active project membership is required",
+        403,
+      );
+    }
+    return {
+      project,
+      canManage: member.kind === "human" && member.owner,
+    };
+  }
+
+  private async requireProjectAgent(
+    projectId: string,
+    agentId: string,
+  ): Promise<Agent> {
+    const agent = await this.repositories.agents.get(agentId, true);
+    if (agent === undefined || agent.status !== "active") {
+      throw new ApplicationError(
+        "agent_unavailable",
+        "The target agent is unavailable",
+        409,
+      );
+    }
+    const members =
+      await this.repositories.projectMemberships.listMembers(projectId);
+    const member = members.find(
+      (candidate) =>
+        candidate.kind === "agent" &&
+        candidate.actorId === agentId &&
+        candidate.status === "active",
+    );
+    if (member === undefined) {
+      throw new ApplicationError(
+        "project_agent_scope_mismatch",
+        "The target agent is not an active member of this project",
+        409,
+      );
+    }
+    return agent;
+  }
+
+  private memoryClosureError(error: unknown): Error {
+    if (error instanceof ApplicationError) return error;
+    if (error instanceof MemoryReviewConflictError) {
+      if (error.message === "project archived") {
+        return new ApplicationError(
+          "project_archived",
+          "The project is archived",
+          409,
+        );
+      }
+      if (error.message === "memory review scope mismatch") {
+        return new ApplicationError(
+          "memory_claim_not_found",
+          "One or more memory claims are outside this project",
+          404,
+        );
+      }
+      if (error.message === "memory review conflict") {
+        return new ApplicationError(
+          "memory_review_conflict",
+          "Memory claims changed after this review was loaded",
+          409,
+          error.details,
+        );
+      }
+      if (error.message === "handoff is confirmed") {
+        return new ApplicationError(
+          "handoff_confirmed",
+          "Confirmed handoff cards cannot be modified",
+          409,
+        );
+      }
+      if (error.message === "handoff version conflict") {
+        return new ApplicationError(
+          "handoff_version_conflict",
+          "The handoff card changed before this request completed",
+          409,
+        );
+      }
+    }
+    if (
+      error instanceof Error &&
+      error.message === "cross project source reference"
+    ) {
+      return new ApplicationError(
+        "source_project_mismatch",
+        "All source references must belong to this project",
+        409,
+      );
+    }
+    if (
+      error instanceof Error &&
+      (error.message === "handoff source not available" ||
+        error.message === "meeting memory source not available")
+    ) {
+      return new ApplicationError(
+        "source_unavailable",
+        "A source reference is unavailable",
+        409,
+      );
+    }
+    return error instanceof Error
+      ? error
+      : new Error("Memory operation failed");
   }
 
   private async requireProjectOwner(
@@ -3687,6 +4064,12 @@ export class PlatformApplication {
           409,
         );
       }
+      await this.repositories.memoryClosure.ingestMeetingMinutes({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        versionId: published.version.id,
+        actorId,
+      });
     }
     const meeting = await this.repositories.meetings.close(meetingId, summary);
     if (meeting === undefined) {
@@ -3767,6 +4150,12 @@ export class PlatformApplication {
           { currentRevision: current?.draft.revision ?? null },
         );
       }
+      await this.repositories.memoryClosure.ingestMeetingMinutes({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        versionId: published.version.id,
+        actorId,
+      });
       return published;
     } catch (error) {
       if (

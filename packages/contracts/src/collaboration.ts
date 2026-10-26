@@ -144,6 +144,29 @@ export const memoryClaimStatusSchema = z.enum([
 ]);
 export type MemoryClaimStatus = z.infer<typeof memoryClaimStatusSchema>;
 
+export const memorySourceKindSchema = z.enum([
+  "meeting",
+  "minutes-version",
+  "meeting-message",
+  "action-item",
+  "task",
+  "run",
+  "review",
+  "memory-claim",
+  "handoff",
+  "episode",
+]);
+export type MemorySourceKind = z.infer<typeof memorySourceKindSchema>;
+
+export const memorySourceRefSchema = z.object({
+  kind: memorySourceKindSchema,
+  id: z.string().trim().min(1).max(180),
+  projectId: z.string().uuid(),
+  label: z.string().trim().max(500).default(""),
+  available: z.boolean().default(true),
+});
+export type MemorySourceRef = z.infer<typeof memorySourceRefSchema>;
+
 export const memoryClaimSchema = z.object({
   id: z.string().uuid(),
   topicId: z.string().uuid(),
@@ -151,6 +174,10 @@ export const memoryClaimSchema = z.object({
   status: memoryClaimStatusSchema,
   sourceType: z.string(),
   sourceId: z.string(),
+  version: z.number().int().positive().default(1),
+  sourceRefs: z.array(memorySourceRefSchema).default([]),
+  reviewedAt: z.string().datetime({ offset: true }).nullable().default(null),
+  reviewedBy: z.string().nullable().default(null),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
@@ -185,9 +212,100 @@ export type CreateMemoryClaimInput = z.infer<
 
 export const updateMemoryClaimInputSchema = z.object({
   status: memoryClaimStatusSchema,
+  reason: z.string().trim().max(4_000).optional(),
+  expectedVersion: z.number().int().positive().optional(),
 });
 export type UpdateMemoryClaimInput = z.infer<
   typeof updateMemoryClaimInputSchema
+>;
+
+export const memoryReviewDecisionSchema = z.enum(["accept", "reject"]);
+export type MemoryReviewDecision = z.infer<typeof memoryReviewDecisionSchema>;
+
+export const memoryReviewSelectionSchema = z.object({
+  claimId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+});
+export type MemoryReviewSelection = z.infer<typeof memoryReviewSelectionSchema>;
+
+export const reviewMemoryClaimsInputSchema = z
+  .object({
+    items: z
+      .array(memoryReviewSelectionSchema)
+      .min(1)
+      .max(100)
+      .transform((items) => {
+        const unique = new Map(items.map((item) => [item.claimId, item]));
+        return [...unique.values()];
+      }),
+    decision: memoryReviewDecisionSchema,
+    reason: z.string().trim().max(4_000).default(""),
+  })
+  .superRefine((input, context) => {
+    if (input.decision === "reject" && input.reason === "") {
+      context.addIssue({
+        code: "custom",
+        path: ["reason"],
+        message: "A rejection reason is required",
+      });
+    }
+  });
+export type ReviewMemoryClaimsInput = z.infer<
+  typeof reviewMemoryClaimsInputSchema
+>;
+
+export const memoryClaimReviewSchema = z.object({
+  id: z.string().uuid(),
+  claimId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  decision: memoryReviewDecisionSchema,
+  reason: z.string(),
+  actorId: z.string(),
+  fromStatus: memoryClaimStatusSchema,
+  toStatus: memoryClaimStatusSchema,
+  claimVersion: z.number().int().positive(),
+  sourceSnapshot: z.array(memorySourceRefSchema),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type MemoryClaimReview = z.infer<typeof memoryClaimReviewSchema>;
+
+export const memoryReviewResultSchema = z.object({
+  claims: z.array(memoryClaimSchema),
+  reviews: z.array(memoryClaimReviewSchema),
+  topics: z.array(memoryTopicSchema),
+});
+export type MemoryReviewResult = z.infer<typeof memoryReviewResultSchema>;
+
+export const memoryReviewQueueItemSchema = z.object({
+  claim: memoryClaimSchema,
+  topicId: z.string().uuid(),
+  topicTitle: z.string(),
+});
+export type MemoryReviewQueueItem = z.infer<typeof memoryReviewQueueItemSchema>;
+
+export const memoryReviewQueueSchema = z.object({
+  items: z.array(memoryReviewQueueItemSchema),
+  canManage: z.boolean(),
+});
+export type MemoryReviewQueue = z.infer<typeof memoryReviewQueueSchema>;
+
+export const memoryClaimTraceSchema = z.object({
+  claim: memoryClaimSchema,
+  topic: memoryTopicSchema,
+  reviews: z.array(memoryClaimReviewSchema),
+  sources: z.array(memorySourceRefSchema),
+});
+export type MemoryClaimTrace = z.infer<typeof memoryClaimTraceSchema>;
+
+export const meetingMemoryIngestionResultSchema = z.object({
+  meetingId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  claimIds: z.array(z.string().uuid()),
+  created: z.number().int().nonnegative(),
+  reused: z.number().int().nonnegative(),
+});
+export type MeetingMemoryIngestionResult = z.infer<
+  typeof meetingMemoryIngestionResultSchema
 >;
 
 export const publishMemoryTruthInputSchema = z
@@ -212,6 +330,111 @@ export const publishMemoryTruthInputSchema = z
   });
 export type PublishMemoryTruthInput = z.infer<
   typeof publishMemoryTruthInputSchema
+>;
+
+export const handoffStatusSchema = z.enum(["draft", "confirmed"]);
+export type HandoffStatus = z.infer<typeof handoffStatusSchema>;
+
+export const handoffConfirmationSchema = z.object({
+  id: z.string().uuid(),
+  handoffId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  version: z.number().int().positive(),
+  actorId: z.string(),
+  snapshot: z.record(z.string(), z.unknown()),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type HandoffConfirmation = z.infer<typeof handoffConfirmationSchema>;
+
+export const handoffCardSchema = z.object({
+  id: z.string().uuid(),
+  projectId: z.string().uuid(),
+  title: z.string(),
+  summary: z.string(),
+  status: handoffStatusSchema,
+  version: z.number().int().positive(),
+  sourceRefs: z.array(memorySourceRefSchema),
+  createdBy: z.string(),
+  confirmedBy: z.string().nullable(),
+  confirmedAt: z.string().datetime({ offset: true }).nullable(),
+  confirmations: z.array(handoffConfirmationSchema),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type HandoffCard = z.infer<typeof handoffCardSchema>;
+
+export const createHandoffCardInputSchema = z.object({
+  title: z.string().trim().min(1).max(240),
+  summary: z.string().trim().min(1).max(20_000),
+  sourceRefs: z
+    .array(memorySourceRefSchema.omit({ available: true }))
+    .max(50)
+    .default([]),
+});
+export type CreateHandoffCardInput = z.infer<
+  typeof createHandoffCardInputSchema
+>;
+
+export const updateHandoffCardInputSchema = z.object({
+  title: z.string().trim().min(1).max(240).optional(),
+  summary: z.string().trim().min(1).max(20_000).optional(),
+  sourceRefs: z
+    .array(memorySourceRefSchema.omit({ available: true }))
+    .max(50)
+    .optional(),
+  expectedVersion: z.number().int().positive(),
+});
+export type UpdateHandoffCardInput = z.infer<
+  typeof updateHandoffCardInputSchema
+>;
+
+export const confirmHandoffCardInputSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+});
+export type ConfirmHandoffCardInput = z.infer<
+  typeof confirmHandoffCardInputSchema
+>;
+
+export const agentEpisodeVisibilitySchema = z.enum(["private", "project"]);
+export type AgentEpisodeVisibility = z.infer<
+  typeof agentEpisodeVisibilitySchema
+>;
+
+export const agentEpisodeKindSchema = z.enum([
+  "observation",
+  "decision",
+  "reflection",
+  "handoff",
+]);
+export type AgentEpisodeKind = z.infer<typeof agentEpisodeKindSchema>;
+
+export const agentEpisodeSchema = z.object({
+  id: z.string().uuid(),
+  projectId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  visibility: agentEpisodeVisibilitySchema,
+  kind: agentEpisodeKindSchema,
+  summary: z.string(),
+  content: z.string(),
+  sourceRefs: z.array(memorySourceRefSchema),
+  createdBy: z.string(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type AgentEpisode = z.infer<typeof agentEpisodeSchema>;
+
+export const createAgentEpisodeInputSchema = z.object({
+  agentId: z.string().uuid(),
+  visibility: agentEpisodeVisibilitySchema.default("private"),
+  kind: agentEpisodeKindSchema.default("observation"),
+  summary: z.string().trim().min(1).max(1_000),
+  content: z.string().trim().max(40_000).default(""),
+  sourceRefs: z
+    .array(memorySourceRefSchema.omit({ available: true }))
+    .max(50)
+    .default([]),
+});
+export type CreateAgentEpisodeInput = z.infer<
+  typeof createAgentEpisodeInputSchema
 >;
 
 export const workbenchSummarySchema = z.object({

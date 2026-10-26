@@ -1,12 +1,15 @@
 import type {
   Agent,
   AgentDetail,
+  AgentEpisode,
   ApprovalSlaSweepResult,
   Artifact,
+  ConfirmHandoffCardInput,
   ContextPack,
   ContextReceipt,
   ConvertMeetingActionItemInput,
   CreateAgentInput,
+  CreateHandoffCardInput,
   CreateMeetingActionItemInput,
   CreateMemoryClaimInput,
   CreateMemoryTopicInput,
@@ -24,6 +27,7 @@ import type {
   IdempotencyCleanupInput,
   IdempotencyCleanupResult,
   Job,
+  HandoffCard,
   Meeting,
   MeetingActionItem,
   MeetingActionItemConversion,
@@ -34,6 +38,9 @@ import type {
   MeetingMinutesVersion,
   MeetingTraceability,
   MemoryClaim,
+  MemoryClaimTrace,
+  MemoryReviewQueue,
+  MemoryReviewResult,
   MemoryTopic,
   PlatformRunEvent,
   Project,
@@ -41,6 +48,7 @@ import type {
   ProjectRole,
   PublishMemoryTruthInput,
   ReadinessResponse,
+  ReviewMemoryClaimsInput,
   RetryWorkflowNodeInput,
   Run,
   RunDelta,
@@ -52,6 +60,7 @@ import type {
   TransferWorkflowApprovalInput,
   UploadTaskAttachmentInput,
   UpdateAgentInput,
+  UpdateHandoffCardInput,
   UpdateMemoryClaimInput,
   UpdateProjectMemberInput,
   UpdateProjectInput,
@@ -74,6 +83,23 @@ interface ListResponse<T> {
   readonly items: T[];
 }
 
+export interface MemoryListResponse {
+  readonly items: MemoryTopic[];
+  readonly canManage: boolean;
+}
+
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number,
+    readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
+  }
+}
+
 interface EventPage {
   readonly runId: string;
   readonly runStatus: Run["status"];
@@ -92,9 +118,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as {
+      code?: string;
       message?: string;
+      details?: unknown;
     } | null;
-    throw new Error(body?.message ?? `Request failed: ${response.status}`);
+    throw new ApiRequestError(
+      body?.message ?? `Request failed: ${response.status}`,
+      body?.code ?? "request_failed",
+      response.status,
+      body?.details,
+    );
   }
   if (response.status === 204) return undefined as T;
   const text = await response.text();
@@ -361,10 +394,8 @@ export function artifactDownloadUrl(artifactId: string): string {
   return `${API_BASE}/artifacts/${artifactId}/download`;
 }
 
-export async function listMemory(projectId: string): Promise<MemoryTopic[]> {
-  return (
-    await request<ListResponse<MemoryTopic>>(`/projects/${projectId}/memory`)
-  ).items;
+export function listMemory(projectId: string): Promise<MemoryListResponse> {
+  return request<MemoryListResponse>(`/projects/${projectId}/memory`);
 }
 
 export function createMemoryTopic(
@@ -412,6 +443,78 @@ export function publishMemoryTruth(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export function listMemoryReviews(
+  projectId: string,
+): Promise<MemoryReviewQueue> {
+  return request(`/projects/${projectId}/memory/reviews`);
+}
+
+export function reviewMemoryClaims(
+  projectId: string,
+  input: ReviewMemoryClaimsInput,
+): Promise<MemoryReviewResult> {
+  return request(`/projects/${projectId}/memory/reviews`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getMemoryClaimTrace(
+  projectId: string,
+  claimId: string,
+): Promise<MemoryClaimTrace> {
+  return request(`/projects/${projectId}/memory/claims/${claimId}`);
+}
+
+export async function listHandoffs(projectId: string): Promise<HandoffCard[]> {
+  return (
+    await request<ListResponse<HandoffCard>>(`/projects/${projectId}/handoffs`)
+  ).items;
+}
+
+export function createHandoff(
+  projectId: string,
+  input: CreateHandoffCardInput,
+): Promise<HandoffCard> {
+  return request(`/projects/${projectId}/handoffs`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateHandoff(
+  projectId: string,
+  handoffId: string,
+  input: UpdateHandoffCardInput,
+): Promise<HandoffCard> {
+  return request(`/projects/${projectId}/handoffs/${handoffId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function confirmHandoff(
+  projectId: string,
+  handoffId: string,
+  input: ConfirmHandoffCardInput,
+): Promise<HandoffCard> {
+  return request(`/projects/${projectId}/handoffs/${handoffId}/confirm`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listAgentEpisodes(
+  projectId: string,
+  agentId: string,
+): Promise<AgentEpisode[]> {
+  return (
+    await request<ListResponse<AgentEpisode>>(
+      `/projects/${projectId}/agent-episodes?agentId=${encodeURIComponent(agentId)}`,
+    )
+  ).items;
 }
 
 export function getWorkbench(): Promise<WorkbenchSummary> {

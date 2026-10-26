@@ -25,7 +25,7 @@ integration("meeting decisions and action items", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 15,
+      expectedMigrationVersion: 16,
     });
     app = built.app;
     await app.ready();

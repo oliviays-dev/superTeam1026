@@ -42,12 +42,34 @@ describe("buildTaskContext", () => {
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
       },
+      episodes: [
+        {
+          id: "00000000-0000-4000-8000-000000000004",
+          projectId: "00000000-0000-4000-8000-000000000001",
+          agentId: "00000000-0000-4000-8000-000000000003",
+          visibility: "private",
+          kind: "reflection",
+          summary: "Supplier evidence was reviewed",
+          content: "Use the signed evidence package.",
+          sourceRefs: [],
+          createdBy: "00000000-0000-4000-8000-000000000003",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
       now: new Date("2026-01-01T00:00:00.000Z"),
     });
 
     expect(result.pack.contentHash).toHaveLength(64);
-    expect(result.pack.sources).toHaveLength(3);
+    expect(result.pack.sources).toHaveLength(4);
     expect(result.pack.renderedPrompt).toContain("Review supplier");
+    expect(result.pack.renderedPrompt).toContain(
+      "Supplier evidence was reviewed",
+    );
+    expect(result.pack.sources).toContainEqual({
+      type: "memory",
+      id: "00000000-0000-4000-8000-000000000004",
+      label: "Agent Episode: Supplier evidence was reviewed",
+    });
     expect(result.receipt.contextPackId).toBe(result.pack.id);
   });
 });

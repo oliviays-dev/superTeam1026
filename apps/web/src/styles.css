@@ -3937,6 +3937,7 @@ code {
   .app-shell,
   .app-shell[data-left-closed] {
     grid-template-columns: 64px minmax(0, 1fr);
+    transition: none;
   }
 
   .workflow-runtime-head {
@@ -4510,6 +4511,402 @@ code {
 
   .operations-risk-row time {
     grid-column: 1 / -1;
+  }
+}
+
+.memory-closure-workspace {
+  gap: 12px;
+}
+
+.memory-closure-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border: 0.5px solid var(--pm-border-l2);
+  border-radius: 8px;
+  background: var(--pm-bg-layer-1);
+  overflow-x: auto;
+}
+
+.memory-closure-tabs button {
+  flex: none;
+  height: 30px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--pm-label-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.memory-closure-tabs button.active {
+  background: color-mix(in srgb, var(--pm-accent) 15%, transparent);
+  color: var(--pm-accent);
+  font-weight: 650;
+}
+
+.memory-review-panel,
+.handoff-panel,
+.agent-episode-panel,
+.memory-topics-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.memory-closure-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.memory-closure-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.memory-closure-head strong {
+  color: var(--pm-label-primary);
+  font-size: 12px;
+}
+
+.memory-closure-head small {
+  color: var(--pm-label-tertiary);
+  font-size: 10px;
+}
+
+.memory-closure-head select {
+  max-width: 220px;
+  height: 30px;
+  border: 0.5px solid var(--pm-border-l2);
+  border-radius: 6px;
+  background: var(--pm-bg-base);
+  color: var(--pm-label-primary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.memory-readonly {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 0.5px dashed var(--pm-border-l2);
+  border-radius: 6px;
+  color: var(--pm-label-secondary);
+  font-size: 11px;
+}
+
+.memory-review-empty,
+.memory-episode-empty {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 28px 18px;
+  text-align: center;
+}
+
+.memory-review-empty svg,
+.memory-episode-empty svg {
+  color: var(--pm-label-tertiary);
+}
+
+.memory-review-empty strong,
+.memory-episode-empty strong {
+  color: var(--pm-label-primary);
+  font-size: 12px;
+}
+
+.memory-review-empty span,
+.memory-episode-empty span {
+  max-width: 520px;
+  color: var(--pm-label-tertiary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.memory-review-list,
+.handoff-list,
+.episode-list {
+  display: grid;
+  gap: 8px;
+}
+
+.memory-review-item,
+.handoff-card,
+.episode-item {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 0.5px solid var(--pm-border-l2);
+  border-radius: 7px;
+  background: var(--pm-bg-layer-1);
+}
+
+.memory-review-item > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  color: var(--pm-label-primary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.memory-review-item > label span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.memory-review-item > label b {
+  color: var(--pm-label-secondary);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.memory-review-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memory-review-meta small {
+  color: var(--pm-label-tertiary);
+  font-size: 9.5px;
+}
+
+.memory-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.memory-review-actions input {
+  flex: 1;
+  min-width: 180px;
+  height: 32px;
+  padding: 0 9px;
+  border: 0.5px solid var(--pm-border-l2);
+  border-radius: 6px;
+  background: var(--pm-bg-base);
+  color: var(--pm-label-primary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.memory-review-actions > span {
+  color: var(--pm-label-tertiary);
+  font-size: 10px;
+}
+
+.memory-source-links {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.memory-source-links > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--pm-label-tertiary);
+  font-size: 9.5px;
+}
+
+.memory-source-links button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 24px;
+  padding: 0 7px;
+  border: 0.5px solid var(--pm-border-l2);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--pm-label-secondary);
+  font: inherit;
+  font-size: 9.5px;
+  cursor: pointer;
+}
+
+.memory-source-links button:hover {
+  background: var(--pm-bg-layer-2);
+  color: var(--pm-label-primary);
+}
+
+.memory-source-note {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-source-unavailable {
+  color: var(--pm-danger) !important;
+}
+
+.handoff-create {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 0.5px solid var(--pm-border-l2);
+  border-radius: 7px;
+  background: var(--pm-bg-layer-1);
+}
+
+.handoff-create > input,
+.handoff-create > textarea,
+.handoff-source-form select {
+  width: 100%;
+  min-width: 0;
+  border: 0.5px solid var(--pm-border-l2);
+  border-radius: 6px;
+  background: var(--pm-bg-base);
+  color: var(--pm-label-primary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.handoff-create > input,
+.handoff-source-form select {
+  height: 32px;
+  padding: 0 9px;
+}
+
+.handoff-create > textarea {
+  min-height: 76px;
+  padding: 8px 9px;
+  resize: vertical;
+}
+
+.handoff-source-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.handoff-card > header,
+.episode-item > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.handoff-card > header > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.handoff-card > header strong,
+.episode-item > header strong {
+  min-width: 0;
+  color: var(--pm-label-primary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.handoff-card > header small,
+.episode-item > header small {
+  margin-left: auto;
+  flex: none;
+  color: var(--pm-label-tertiary);
+  font-size: 9.5px;
+}
+
+.handoff-card > p,
+.episode-item > p {
+  margin: 0;
+  color: var(--pm-label-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.handoff-card > footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.handoff-card > footer.handoff-confirmed {
+  justify-content: flex-start;
+  gap: 4px;
+  color: var(--pm-label-tertiary);
+  font-size: 9.5px;
+}
+
+.pm-pill.private {
+  color: var(--pm-label-secondary);
+  background: var(--pm-bg-layer-2);
+}
+
+.pm-pill.project {
+  color: var(--pm-accent);
+  background: color-mix(in srgb, var(--pm-accent) 15%, transparent);
+}
+
+@media (max-width: 900px) {
+  .handoff-source-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .handoff-source-form .pm-btn {
+    justify-self: start;
+  }
+}
+
+@media (max-width: 640px) {
+  .memory-closure-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .memory-closure-head select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .memory-review-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .memory-review-actions input {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .memory-review-actions .pm-btn {
+    width: 100%;
+  }
+
+  .handoff-card > header,
+  .episode-item > header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .handoff-card > header small,
+  .episode-item > header small {
+    width: 100%;
+    margin-left: 0;
   }
 }
 

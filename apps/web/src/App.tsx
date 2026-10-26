@@ -64,11 +64,13 @@ export function App() {
   });
   const [projectId, setProjectId] = useState("");
   const [taskId, setTaskId] = useState("");
+  const [meetingId, setMeetingId] = useState("");
   const [view, setView] = useState<AppView>("workbench");
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [leftOpen, setLeftOpen] = useState(() => window.innerWidth >= 760);
   const selectedProjectId = projectId || projectsQuery.data?.[0]?.id || "";
   const consumeInitialTask = useCallback(() => setTaskId(""), []);
+  const consumeInitialMeeting = useCallback(() => setMeetingId(""), []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -88,6 +90,11 @@ export function App() {
     setProjectId(nextProjectId);
     setTaskId(nextTaskId);
     setView("tasks");
+  };
+  const openMeeting = (nextMeetingId: string, nextProjectId: string) => {
+    setProjectId(nextProjectId);
+    setMeetingId(nextMeetingId);
+    setView("meetings");
   };
 
   return (
@@ -228,8 +235,10 @@ export function App() {
             onProjectChange={(nextProjectId) => {
               setProjectId(nextProjectId);
               setTaskId("");
+              setMeetingId("");
             }}
             onOpenTask={openTask}
+            onOpenMeeting={openMeeting}
           />
         )}
         {view === "tasks" && (
@@ -264,7 +273,10 @@ export function App() {
             onProjectChange={(nextProjectId) => {
               setProjectId(nextProjectId);
               setTaskId("");
+              setMeetingId("");
             }}
+            initialMeetingId={meetingId}
+            onInitialMeetingConsumed={consumeInitialMeeting}
             onOpenTask={openTask}
           />
         )}

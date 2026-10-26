@@ -60,6 +60,7 @@ import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.j
 import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
 import { RuntimeTraceRepository } from "./runtime-trace-repository.js";
 import { MeetingDecisionsRepository } from "./meeting-decisions-repository.js";
+import { MemoryClosureRepository } from "./memory-closure-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -1574,6 +1575,7 @@ export class PlatformRepositories {
   readonly projectMemberships: ProjectMembershipRepository;
   readonly artifacts: ArtifactRepository;
   readonly memory: MemoryRepository;
+  readonly memoryClosure: MemoryClosureRepository;
   readonly reviews: ReviewRepository;
   readonly workflows: WorkflowRepository;
   readonly workflowRuntime: WorkflowRuntimeRepository;
@@ -1596,6 +1598,7 @@ export class PlatformRepositories {
     this.projectMemberships = new ProjectMembershipRepository(database);
     this.artifacts = new ArtifactRepository(database);
     this.memory = new MemoryRepository(database);
+    this.memoryClosure = new MemoryClosureRepository(database, this.memory);
     this.reviews = new ReviewRepository(database);
     this.workflows = new WorkflowRepository(database);
     this.workflowRuntime = new WorkflowRuntimeRepository(database);

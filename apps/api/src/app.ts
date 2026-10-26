@@ -4,7 +4,10 @@ import {
   agentStatusInputSchema,
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
+  confirmHandoffCardInputSchema,
   createAgentInputSchema,
+  createAgentEpisodeInputSchema,
+  createHandoffCardInputSchema,
   createMeetingActionItemInputSchema,
   createMemoryClaimInputSchema,
   createMemoryTopicInputSchema,
@@ -25,6 +28,7 @@ import {
   jobRecoveryInputSchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
+  reviewMemoryClaimsInputSchema,
   taskReviewInputSchema,
   traceIdSchema,
   transferTaskInputSchema,
@@ -32,6 +36,7 @@ import {
   startWorkflowInputSchema,
   uploadTaskAttachmentInputSchema,
   updateAgentInputSchema,
+  updateHandoffCardInputSchema,
   updateMeetingActionItemInputSchema,
   updateMeetingMinutesDraftInputSchema,
   updateMemoryClaimInputSchema,
@@ -104,6 +109,15 @@ const memoryTopicParamsSchema = z.object({
 });
 const memoryClaimParamsSchema = memoryTopicParamsSchema.extend({
   claimId: z.string().uuid(),
+});
+const projectClaimParamsSchema = projectParamsSchema.extend({
+  claimId: z.string().uuid(),
+});
+const projectHandoffParamsSchema = projectParamsSchema.extend({
+  handoffId: z.string().uuid(),
+});
+const episodeQuerySchema = z.object({
+  agentId: z.string().uuid(),
 });
 const meetingMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
@@ -187,7 +201,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 15;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 16;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -820,7 +834,8 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/projects/:projectId/memory", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);
-    return reply.send({ items: await application.listMemory(projectId) });
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.listMemory(projectId, actorId));
   });
 
   app.post(
@@ -828,9 +843,10 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { projectId } = projectParamsSchema.parse(request.params);
       const input = createMemoryTopicInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
       return reply
         .status(201)
-        .send(await application.createMemoryTopic(projectId, input));
+        .send(await application.createMemoryTopic(projectId, input, actorId));
     },
   );
 
@@ -841,9 +857,12 @@ export function buildApi(options: BuildApiOptions): {
         request.params,
       );
       const input = createMemoryClaimInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
       return reply
         .status(201)
-        .send(await application.addMemoryClaim(projectId, topicId, input));
+        .send(
+          await application.addMemoryClaim(projectId, topicId, input, actorId),
+        );
     },
   );
 
@@ -854,8 +873,15 @@ export function buildApi(options: BuildApiOptions): {
         request.params,
       );
       const input = updateMemoryClaimInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
       return reply.send(
-        await application.updateMemoryClaim(projectId, topicId, claimId, input),
+        await application.updateMemoryClaim(
+          projectId,
+          topicId,
+          claimId,
+          input,
+          actorId,
+        ),
       );
     },
   );
@@ -867,9 +893,135 @@ export function buildApi(options: BuildApiOptions): {
         request.params,
       );
       const input = publishMemoryTruthInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
       return reply
         .status(201)
-        .send(await application.publishMemoryTruth(projectId, topicId, input));
+        .send(
+          await application.publishMemoryTruth(
+            projectId,
+            topicId,
+            input,
+            actorId,
+          ),
+        );
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/memory/reviews",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.listMemoryReviews(projectId, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/memory/reviews",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = reviewMemoryClaimsInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.reviewMemoryClaims(projectId, input, actorId),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/memory/claims/:claimId",
+    async (request, reply) => {
+      const { projectId, claimId } = projectClaimParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.getMemoryClaimTrace(projectId, claimId, actorId),
+      );
+    },
+  );
+
+  app.get("/api/v1/projects/:projectId/handoffs", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listHandoffs(projectId, actorId),
+    });
+  });
+
+  app.post("/api/v1/projects/:projectId/handoffs", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const input = createHandoffCardInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply
+      .status(201)
+      .send(await application.createHandoff(projectId, input, actorId));
+  });
+
+  app.get(
+    "/api/v1/projects/:projectId/handoffs/:handoffId",
+    async (request, reply) => {
+      const { projectId, handoffId } = projectHandoffParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.getHandoff(projectId, handoffId, actorId),
+      );
+    },
+  );
+
+  app.patch(
+    "/api/v1/projects/:projectId/handoffs/:handoffId",
+    async (request, reply) => {
+      const { projectId, handoffId } = projectHandoffParamsSchema.parse(
+        request.params,
+      );
+      const input = updateHandoffCardInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.updateHandoff(projectId, handoffId, input, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/handoffs/:handoffId/confirm",
+    async (request, reply) => {
+      const { projectId, handoffId } = projectHandoffParamsSchema.parse(
+        request.params,
+      );
+      const input = confirmHandoffCardInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.confirmHandoff(projectId, handoffId, input, actorId),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/agent-episodes",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const { agentId } = episodeQuerySchema.parse(request.query);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.listAgentEpisodes(projectId, agentId, actorId),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/agent-episodes",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = createAgentEpisodeInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply
+        .status(201)
+        .send(await application.createAgentEpisode(projectId, input, actorId));
     },
   );
 
@@ -1245,6 +1397,17 @@ export function buildApi(options: BuildApiOptions): {
       const actorId = requestActorId(request.headers);
       return reply.send(
         await application.publishMeetingMinutes(meetingId, input, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/memory/ingest",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.ingestMeetingMinutes(meetingId, actorId),
       );
     },
   );

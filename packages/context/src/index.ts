@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   Agent,
+  AgentEpisode,
   ContextPack,
   ContextReceipt,
   ContextSource,
@@ -13,6 +14,7 @@ export interface BuildTaskContextInput {
   readonly project: Project;
   readonly task: Task;
   readonly agent: Agent;
+  readonly episodes?: readonly AgentEpisode[];
   readonly now?: Date;
 }
 
@@ -42,6 +44,11 @@ export function buildTaskContext(input: BuildTaskContextInput): {
       id: `${input.task.id}:acceptance:${index + 1}`,
       label: item,
     })),
+    ...(input.episodes ?? []).map((episode) => ({
+      type: "memory" as const,
+      id: episode.id,
+      label: `Agent Episode: ${episode.summary}`,
+    })),
   ];
   const renderedPrompt = [
     "# Agent identity",
@@ -63,6 +70,17 @@ export function buildTaskContext(input: BuildTaskContextInput): {
       : input.task.acceptance.map(
           (item, index) => `${String(index + 1)}. ${item}`,
         )),
+    ...((input.episodes ?? []).length === 0
+      ? []
+      : [
+          "",
+          "# Agent episodes",
+          "These episodes are scoped to this project and agent.",
+          ...(input.episodes ?? []).map(
+            (episode) =>
+              `- [${episode.kind}] ${episode.summary}${episode.content === "" ? "" : `: ${episode.content}`}`,
+          ),
+        ]),
     "",
     "# Output requirements",
     "Return a concise final result with evidence and clearly identify any unresolved risk.",

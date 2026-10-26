@@ -1,6 +1,5 @@
 import type {
   Agent,
-  MemoryClaim,
   MemoryTopic,
   Project,
   ProjectRole,
@@ -15,8 +14,6 @@ import {
   ArrowRight,
   Bot,
   Check,
-  CircleCheck,
-  CircleX,
   Edit3,
   FileText,
   History,
@@ -52,10 +49,14 @@ import {
   taskAttachmentDownloadUrl,
   updateProject,
   updateTask,
-  updateMemoryClaim,
   uploadTaskAttachment,
 } from "./api.js";
 import { ProjectMembershipPanel } from "./ProjectMembershipPanel.js";
+import {
+  AgentEpisodePanel,
+  HandoffPanel,
+  MemoryReviewQueuePanel,
+} from "./MemoryClosurePanels.js";
 import { RunView } from "./RunView.js";
 
 interface SharedViewProps {
@@ -287,8 +288,10 @@ export function ProjectsView({
   projectId,
   onProjectChange,
   onOpenTask,
+  onOpenMeeting,
 }: SharedViewProps & {
   onOpenTask: (taskId: string, projectId: string) => void;
+  onOpenMeeting: (meetingId: string, projectId: string) => void;
 }) {
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"tasks" | "memory" | "members" | "overview">(
@@ -308,7 +311,7 @@ export function ProjectsView({
   });
   const project = projects.find((item) => item.id === selectedProjectId);
   const tasks = tasksQuery.data ?? [];
-  const memory = memoryQuery.data ?? [];
+  const memory = memoryQuery.data?.items ?? [];
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     if (query === "") return projects;
@@ -532,7 +535,15 @@ export function ProjectsView({
                 />
               )}
               {tab === "memory" && (
-                <ProjectMemoryPanel projectId={project.id} memory={memory} />
+                <ProjectMemoryPanel
+                  projectId={project.id}
+                  memory={memory}
+                  canManage={memoryQuery.data?.canManage ?? false}
+                  tasks={tasks}
+                  agents={agents}
+                  onOpenTask={onOpenTask}
+                  onOpenMeeting={onOpenMeeting}
+                />
               )}
               {tab === "members" && (
                 <ProjectMembershipPanel
@@ -597,9 +608,112 @@ function ProjectTaskList({
 function ProjectMemoryPanel({
   projectId,
   memory,
+  canManage,
+  tasks,
+  agents,
+  onOpenTask,
+  onOpenMeeting,
 }: {
   projectId: string;
   memory: MemoryTopic[];
+  canManage: boolean;
+  tasks: Task[];
+  agents: Agent[];
+  onOpenTask: (taskId: string, projectId: string) => void;
+  onOpenMeeting: (meetingId: string, projectId: string) => void;
+}) {
+  const [section, setSection] = useState<
+    "reviews" | "handoffs" | "episodes" | "topics"
+  >("reviews");
+  return (
+    <div className="project-memory-panel memory-closure-workspace">
+      <div
+        className="memory-closure-tabs"
+        role="tablist"
+        aria-label="Context 与 Memory"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "reviews"}
+          className={section === "reviews" ? "active" : undefined}
+          onClick={() => setSection("reviews")}
+        >
+          Review 队列
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "handoffs"}
+          className={section === "handoffs" ? "active" : undefined}
+          onClick={() => setSection("handoffs")}
+        >
+          Handoff
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "episodes"}
+          className={section === "episodes" ? "active" : undefined}
+          onClick={() => setSection("episodes")}
+        >
+          Agent Episode
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "topics"}
+          className={section === "topics" ? "active" : undefined}
+          onClick={() => setSection("topics")}
+        >
+          Topic 与 Truth
+        </button>
+      </div>
+      {section === "reviews" && (
+        <MemoryReviewQueuePanel
+          projectId={projectId}
+          canManage={canManage}
+          onOpenTask={onOpenTask}
+          onOpenMeeting={onOpenMeeting}
+        />
+      )}
+      {section === "handoffs" && (
+        <HandoffPanel
+          projectId={projectId}
+          canManage={canManage}
+          tasks={tasks}
+          memory={memory}
+          onOpenTask={onOpenTask}
+          onOpenMeeting={onOpenMeeting}
+        />
+      )}
+      {section === "episodes" && (
+        <AgentEpisodePanel
+          projectId={projectId}
+          agents={agents}
+          onOpenTask={onOpenTask}
+          onOpenMeeting={onOpenMeeting}
+        />
+      )}
+      {section === "topics" && (
+        <MemoryTopicsPanel
+          projectId={projectId}
+          memory={memory}
+          canManage={canManage}
+        />
+      )}
+    </div>
+  );
+}
+
+function MemoryTopicsPanel({
+  projectId,
+  memory,
+  canManage,
+}: {
+  projectId: string;
+  memory: MemoryTopic[];
+  canManage: boolean;
 }) {
   const queryClient = useQueryClient();
   const [topicTitle, setTopicTitle] = useState("");
@@ -628,17 +742,6 @@ function ProjectMemoryPanel({
       void invalidate();
     },
   });
-  const updateClaimMutation = useMutation({
-    mutationFn: (input: {
-      topicId: string;
-      claim: MemoryClaim;
-      status: MemoryClaim["status"];
-    }) =>
-      updateMemoryClaim(projectId, input.topicId, input.claim.id, {
-        status: input.status,
-      }),
-    onSuccess: () => void invalidate(),
-  });
   const publishMutation = useMutation({
     mutationFn: (topicId: string) =>
       publishMemoryTruth(projectId, topicId, {
@@ -653,7 +756,12 @@ function ProjectMemoryPanel({
   });
 
   return (
-    <div className="project-memory-panel">
+    <div className="memory-topics-panel">
+      {!canManage && (
+        <div className="memory-readonly">
+          当前账号以只读方式查看项目记忆；Review 和 Truth 由项目负责人管理。
+        </div>
+      )}
       <form
         className="memory-topic-create"
         onSubmit={(event) => {
@@ -671,11 +779,16 @@ function ProjectMemoryPanel({
           value={topicTitle}
           onChange={(event) => setTopicTitle(event.target.value)}
           placeholder="新增主题，例如：供应商交付风险"
+          disabled={!canManage}
         />
         <button
           className="pm-btn primary"
           type="submit"
-          disabled={topicTitle.trim() === "" || createTopicMutation.isPending}
+          disabled={
+            !canManage ||
+            topicTitle.trim() === "" ||
+            createTopicMutation.isPending
+          }
         >
           <Plus size={13} />
           新建主题
@@ -716,7 +829,7 @@ function ProjectMemoryPanel({
                         <input
                           type="checkbox"
                           checked={checked}
-                          disabled={claim.status === "rejected"}
+                          disabled={!canManage || claim.status === "rejected"}
                           onChange={(event) =>
                             setSelectedClaims((current) => ({
                               ...current,
@@ -736,34 +849,6 @@ function ProjectMemoryPanel({
                               ? "已确认"
                               : "已拒绝"}
                         </span>
-                        <button
-                          type="button"
-                          title="确认 Claim"
-                          aria-label="确认 Claim"
-                          onClick={() =>
-                            updateClaimMutation.mutate({
-                              topicId: topic.id,
-                              claim,
-                              status: "confirmed",
-                            })
-                          }
-                        >
-                          <CircleCheck size={13} />
-                        </button>
-                        <button
-                          type="button"
-                          title="拒绝 Claim"
-                          aria-label="拒绝 Claim"
-                          onClick={() =>
-                            updateClaimMutation.mutate({
-                              topicId: topic.id,
-                              claim,
-                              status: "rejected",
-                            })
-                          }
-                        >
-                          <CircleX size={13} />
-                        </button>
                       </div>
                     </div>
                   );
@@ -793,11 +878,13 @@ function ProjectMemoryPanel({
                     }))
                   }
                   placeholder="记录一条可追溯的 Claim"
+                  disabled={!canManage}
                 />
                 <button
                   className="pm-btn secondary"
                   type="submit"
                   disabled={
+                    !canManage ||
                     (claimDrafts[topic.id] ?? "").trim() === "" ||
                     createClaimMutation.isPending
                   }
@@ -807,7 +894,11 @@ function ProjectMemoryPanel({
                 <button
                   className="pm-btn primary"
                   type="button"
-                  disabled={selected.length === 0 || publishMutation.isPending}
+                  disabled={
+                    !canManage ||
+                    selected.length === 0 ||
+                    publishMutation.isPending
+                  }
                   onClick={() => publishMutation.mutate(topic.id)}
                 >
                   发布 Truth

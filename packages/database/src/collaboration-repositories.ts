@@ -11,6 +11,7 @@ import type {
   MemoryClaim,
   MemoryTopic,
   MemoryTruth,
+  MemorySourceRef,
   PublishMemoryTruthInput,
   TaskReviewInput,
   UpdateMemoryClaimInput,
@@ -97,6 +98,10 @@ interface MemoryClaimRow {
   status: MemoryClaim["status"];
   source_type: string;
   source_id: string;
+  version: number;
+  source_refs: MemorySourceRef[];
+  reviewed_by: string | null;
+  reviewed_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -375,6 +380,10 @@ function memoryClaimFromRow(row: MemoryClaimRow): MemoryClaim {
     status: row.status,
     sourceType: row.source_type,
     sourceId: row.source_id,
+    version: row.version,
+    sourceRefs: row.source_refs,
+    reviewedAt: row.reviewed_at?.toISOString() ?? null,
+    reviewedBy: row.reviewed_by,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };

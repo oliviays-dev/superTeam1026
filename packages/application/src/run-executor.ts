@@ -156,7 +156,18 @@ export class RunExecutor {
       }
       throw error;
     }
-    const context = buildTaskContext({ runId, project, task, agent });
+    const episodes =
+      await this.repositories.memoryClosure.listEpisodesForContext(
+        project.id,
+        agent.id,
+      );
+    const context = buildTaskContext({
+      runId,
+      project,
+      task,
+      agent,
+      episodes,
+    });
     await this.repositories.contexts.save(context.pack, context.receipt);
     const workspacePath = resolve(this.options.workspaceRoot, run.projectId);
     await mkdir(workspacePath, { recursive: true });

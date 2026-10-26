@@ -1238,3 +1238,145 @@ WHERE meeting.summary <> ''
     WHERE version.meeting_id = meeting.id
   );
 `;
+
+export const MEMORY_CLOSURE_SCHEMA_SQL = `
+ALTER TABLE memory_topics
+  ADD COLUMN IF NOT EXISTS origin_type TEXT,
+  ADD COLUMN IF NOT EXISTS origin_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_topics_origin_idx
+  ON memory_topics(project_id, origin_type, origin_id)
+  WHERE origin_type IS NOT NULL AND origin_id IS NOT NULL;
+
+ALTER TABLE memory_claims
+  ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS dedupe_key TEXT,
+  ADD COLUMN IF NOT EXISTS source_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS reviewed_by TEXT,
+  ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_claims_dedupe_idx
+  ON memory_claims(project_id, dedupe_key)
+  WHERE dedupe_key IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS memory_claims_project_status_idx
+  ON memory_claims(project_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS memory_claim_reviews (
+  id UUID PRIMARY KEY,
+  claim_id UUID NOT NULL REFERENCES memory_claims(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  decision TEXT NOT NULL CHECK (decision IN ('accept', 'reject')),
+  reason TEXT NOT NULL DEFAULT '',
+  actor_id TEXT NOT NULL,
+  from_status TEXT NOT NULL,
+  to_status TEXT NOT NULL,
+  claim_version INTEGER NOT NULL CHECK (claim_version > 0),
+  source_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS memory_claim_reviews_claim_idx
+  ON memory_claim_reviews(claim_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_memory_review_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'memory review records are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS memory_claim_reviews_immutable
+  ON memory_claim_reviews;
+
+CREATE TRIGGER memory_claim_reviews_immutable
+BEFORE UPDATE OR DELETE ON memory_claim_reviews
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_memory_review_mutation();
+
+CREATE TABLE IF NOT EXISTS handoff_cards (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'confirmed')),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  source_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_by TEXT NOT NULL,
+  confirmed_by TEXT,
+  confirmed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS handoff_cards_project_idx
+  ON handoff_cards(project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS handoff_confirmations (
+  id UUID PRIMARY KEY,
+  handoff_id UUID NOT NULL REFERENCES handoff_cards(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL CHECK (version > 0),
+  actor_id TEXT NOT NULL,
+  snapshot JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (handoff_id, version)
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_handoff_confirmation_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'handoff confirmations are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS handoff_confirmations_immutable
+  ON handoff_confirmations;
+
+CREATE TRIGGER handoff_confirmations_immutable
+BEFORE UPDATE OR DELETE ON handoff_confirmations
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_handoff_confirmation_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_confirmed_handoff_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.status = 'confirmed' THEN
+    RAISE EXCEPTION 'confirmed handoff cards are immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS handoff_cards_confirmed_immutable
+  ON handoff_cards;
+
+CREATE TRIGGER handoff_cards_confirmed_immutable
+BEFORE UPDATE ON handoff_cards
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_confirmed_handoff_update();
+
+CREATE TABLE IF NOT EXISTS agent_episodes (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  visibility TEXT NOT NULL CHECK (visibility IN ('private', 'project')),
+  kind TEXT NOT NULL
+    CHECK (kind IN ('observation', 'decision', 'reflection', 'handoff')),
+  summary TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  source_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS agent_episodes_scope_idx
+  ON agent_episodes(project_id, agent_id, visibility, created_at DESC);
+`;

@@ -14,6 +14,10 @@ export {
   type CreateMeetingActionItemRepositoryInput,
 } from "./meeting-decisions-repository.js";
 export {
+  MemoryClosureRepository,
+  MemoryReviewConflictError,
+} from "./memory-closure-repository.js";
+export {
   TaskCollaborationRepository,
   type TaskActivity,
   type TaskAttachment,
