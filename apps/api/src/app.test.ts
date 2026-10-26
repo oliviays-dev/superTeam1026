@@ -27,7 +27,7 @@ integration("runtime operations API contract", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 23,
+      expectedMigrationVersion: 24,
       workerHeartbeatStaleAfterSeconds: 30,
     });
     app = built.app;
@@ -214,8 +214,8 @@ integration("runtime operations API contract", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       metrics: {
-        expectedMigrationVersion: 23,
-        migrationVersion: 23,
+        expectedMigrationVersion: 24,
+        migrationVersion: 24,
         activeWorkers: 1,
         deadLetterCount: expect.any(Number),
       },
@@ -386,9 +386,7 @@ integration("runtime operations API contract", () => {
         url: `/api/v1/tasks/${externalTask.taskId}/dispatch`,
       });
       expect(externalResponse.statusCode).toBe(409);
-      expect(externalResponse.json().code).toBe(
-        "runtime_binding_missing",
-      );
+      expect(externalResponse.json().code).toBe("runtime_binding_missing");
     }
   });
 

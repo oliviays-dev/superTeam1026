@@ -25,6 +25,8 @@ The initial implementation provides:
 - Graph workflow runtime with conditional branches, approvals, controlled loops,
   subworkflows, timeout recovery, idempotent commands, pause/resume and audit.
 - Workbench metrics, workflow definitions/instances, and meeting rooms.
+- External Agent Runtime registry, Adapter execution, Agent binding, Preflight,
+  cancellation, audit, and observability.
 
 ## Requirements
 
@@ -111,3 +113,9 @@ Recovery, idempotency and approval governance are documented in
 
 批次 9 的源码/PostgreSQL 备份恢复、W3C Run 追踪和生产负向验收见
 [v1-batch9-production-readiness.md](./docs/v1-batch9-production-readiness.md).
+
+Batch 13 外部 Runtime 集成见
+[v1-batch13-external-agent-runtime-integration.md](./docs/v1-batch13-external-agent-runtime-integration.md)。
+
+Batch 14A 的 Identity/Principal/RBAC 清点、规范模型与迁移方案见
+[v1-batch14a-identity-principal-rbac-audit.md](./docs/v1-batch14a-identity-principal-rbac-audit.md)。

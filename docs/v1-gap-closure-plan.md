@@ -95,6 +95,20 @@
 
 ## 3. 批次执行记录
 
+Batch 14A 已完成 Identity / Principal / RBAC 清点与基础设计：
+
+- 完成 Agent、Project Member、Owner、Run Actor、审批人、会议参与者和审计字段审计。
+- 完成 20 项旧能力到 V1 Principal 能力的映射，状态统计为
+  `canonical 8 / compat-read 5 / deferred 5 / non-target 2`。
+- 新增 Principal/Account/Credential/Bearer Session/WorkspaceMember/
+  ExternalIdentityLink/Alias/RoleGrant 契约。
+- Migration 24 仅增加 Identity/Principal/RBAC 空表与 nullable 关联列，不执行
+  backfill，不修改 API/UI。
+- 完成认证边界、旧数据 dry-run、兼容读取和回滚方案。
+
+详细报告见
+[v1-batch14a-identity-principal-rbac-audit.md](./v1-batch14a-identity-principal-rbac-audit.md)。
+
 批次 3A 已交付：项目成员与项目角色。
 
 验收：

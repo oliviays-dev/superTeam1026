@@ -10,3 +10,4 @@ export * from "./project-templates.js";
 export * from "./direct-chat.js";
 export * from "./external-runtime.js";
 export * from "./agent-runtime-binding.js";
+export * from "./identity.js";

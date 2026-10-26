@@ -266,7 +266,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 23;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 24;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();

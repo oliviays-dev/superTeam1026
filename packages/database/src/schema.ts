@@ -2312,3 +2312,343 @@ CREATE INDEX IF NOT EXISTS runs_external_runtime_idx
   ON runs(external_runtime_id, external_runtime_revision)
   WHERE external_runtime_id IS NOT NULL;
 `;
+
+export const IDENTITY_PRINCIPAL_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS principals (
+  id TEXT PRIMARY KEY
+    CHECK (
+      length(id) BETWEEN 1 AND 180
+      AND id ~ '^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$'
+    ),
+  kind TEXT NOT NULL CHECK (kind IN ('human', 'ai')),
+  display_name TEXT NOT NULL
+    CHECK (length(btrim(display_name)) BETWEEN 1 AND 160),
+  status TEXT NOT NULL
+    CHECK (status IN ('active', 'suspended', 'archived')),
+  status_authority TEXT NOT NULL
+    CHECK (status_authority IN (
+      'account',
+      'ai-companion',
+      'hrm',
+      'legacy',
+      'system'
+    )),
+  source TEXT NOT NULL
+    CHECK (source IN (
+      'local',
+      'account',
+      'ai-companion',
+      'agent',
+      'hrm',
+      'system'
+    )),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS principals_kind_status_idx
+  ON principals(kind, status, display_name);
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id TEXT PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 180),
+  principal_id TEXT NOT NULL UNIQUE REFERENCES principals(id),
+  login_id TEXT NOT NULL CHECK (length(btrim(login_id)) BETWEEN 1 AND 180),
+  status TEXT NOT NULL
+    CHECK (status IN ('active', 'pending', 'disabled')),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_login_id_unique_idx
+  ON accounts(lower(login_id));
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_human_account_principal()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  principal_kind TEXT;
+BEGIN
+  SELECT kind INTO principal_kind
+  FROM principals
+  WHERE id = NEW.principal_id;
+
+  IF principal_kind IS DISTINCT FROM 'human' THEN
+    RAISE EXCEPTION 'accounts require a human principal';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS accounts_human_principal_only ON accounts;
+CREATE TRIGGER accounts_human_principal_only
+BEFORE INSERT OR UPDATE OF principal_id ON accounts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_human_account_principal();
+
+CREATE TABLE IF NOT EXISTS account_credentials (
+  id UUID PRIMARY KEY,
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  credential_type TEXT NOT NULL
+    CHECK (credential_type IN ('password', 'sso')),
+  secret_scheme TEXT,
+  secret_hash TEXT,
+  status TEXT NOT NULL
+    CHECK (status IN ('pending', 'active', 'disabled', 'revoked')),
+  expires_at TIMESTAMPTZ,
+  last_authenticated_at TIMESTAMPTZ,
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    credential_type <> 'password'
+    OR (secret_scheme IS NOT NULL AND secret_hash IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS account_credentials_active_type_idx
+  ON account_credentials(account_id, credential_type)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS account_credentials_account_idx
+  ON account_credentials(account_id, status);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id UUID PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE CHECK (token_hash ~ '^[a-f0-9]{64}$'),
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  status TEXT NOT NULL
+    CHECK (status IN ('active', 'expired', 'revoked')),
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ,
+  last_seen_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    (status = 'revoked' AND revoked_at IS NOT NULL)
+    OR (status <> 'revoked' AND revoked_at IS NULL)
+  )
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_session_principal_matches_account()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  account_principal_id TEXT;
+BEGIN
+  SELECT principal_id INTO account_principal_id
+  FROM accounts
+  WHERE id = NEW.account_id;
+
+  IF account_principal_id IS DISTINCT FROM NEW.principal_id THEN
+    RAISE EXCEPTION 'session principal must match account principal';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS auth_sessions_principal_matches_account
+  ON auth_sessions;
+CREATE TRIGGER auth_sessions_principal_matches_account
+BEFORE INSERT OR UPDATE OF account_id, principal_id ON auth_sessions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_session_principal_matches_account();
+
+CREATE INDEX IF NOT EXISTS auth_sessions_principal_active_idx
+  ON auth_sessions(principal_id, expires_at DESC)
+  WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS workspace_members (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL CHECK (length(workspace_id) BETWEEN 1 AND 180),
+  principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'inactive')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (workspace_id, principal_id),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS workspace_members_principal_idx
+  ON workspace_members(principal_id, status);
+
+CREATE TABLE IF NOT EXISTS external_identity_links (
+  id UUID PRIMARY KEY,
+  principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  provider TEXT NOT NULL CHECK (length(btrim(provider)) BETWEEN 1 AND 80),
+  external_subject_id TEXT NOT NULL
+    CHECK (length(btrim(external_subject_id)) BETWEEN 1 AND 240),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'retired')),
+  sync_version TEXT NOT NULL
+    CHECK (length(btrim(sync_version)) BETWEEN 1 AND 120),
+  synced_at TIMESTAMPTZ NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (provider, external_subject_id),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS external_identity_links_principal_idx
+  ON external_identity_links(principal_id, status);
+
+CREATE TABLE IF NOT EXISTS principal_aliases (
+  id UUID PRIMARY KEY,
+  principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  alias_type TEXT NOT NULL
+    CHECK (alias_type IN (
+      'auth-user',
+      'employee',
+      'teammate',
+      'agent',
+      'runtime-profile',
+      'legacy-actor',
+      'external'
+    )),
+  alias_value TEXT NOT NULL
+    CHECK (length(btrim(alias_value)) BETWEEN 1 AND 240),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'retired')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (alias_type, alias_value),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS principal_aliases_principal_idx
+  ON principal_aliases(principal_id, status);
+
+CREATE TABLE IF NOT EXISTS role_grants (
+  id UUID PRIMARY KEY,
+  principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE CASCADE,
+  scope_type TEXT NOT NULL
+    CHECK (scope_type IN ('platform', 'workspace', 'project')),
+  scope_id TEXT NOT NULL CHECK (length(scope_id) BETWEEN 1 AND 180),
+  role_key TEXT NOT NULL
+    CHECK (
+      length(role_key) BETWEEN 1 AND 180
+      AND role_key ~ '^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$'
+    ),
+  permissions JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(permissions) = 'array'),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'revoked', 'expired')),
+  source_kind TEXT NOT NULL
+    CHECK (source_kind IN (
+      'manual',
+      'platform-role',
+      'workspace-role',
+      'project-role',
+      'employee-role',
+      'template'
+    )),
+  source_ref TEXT CHECK (
+    source_ref IS NULL OR length(btrim(source_ref)) BETWEEN 1 AND 240
+  ),
+  granted_by_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL,
+  revoked_by_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL,
+  granted_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (scope_type <> 'platform' OR scope_id = 'platform'),
+  CHECK (expires_at IS NULL OR expires_at > granted_at),
+  CHECK (
+    (status = 'revoked' AND revoked_at IS NOT NULL)
+    OR (status <> 'revoked' AND revoked_at IS NULL)
+  ),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS role_grants_active_scope_role_idx
+  ON role_grants(principal_id, scope_type, scope_id, role_key)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS role_grants_scope_idx
+  ON role_grants(scope_type, scope_id, status, role_key);
+
+CREATE INDEX IF NOT EXISTS role_grants_principal_idx
+  ON role_grants(principal_id, status, scope_type);
+
+CREATE TABLE IF NOT EXISTS identity_audit_events (
+  id UUID PRIMARY KEY,
+  action TEXT NOT NULL
+    CHECK (length(btrim(action)) BETWEEN 1 AND 160),
+  decision TEXT NOT NULL CHECK (decision IN ('allowed', 'denied')),
+  actor_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL,
+  subject_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL,
+  account_id TEXT REFERENCES accounts(id) ON DELETE SET NULL,
+  session_id UUID REFERENCES auth_sessions(id) ON DELETE SET NULL,
+  grant_id UUID REFERENCES role_grants(id) ON DELETE SET NULL,
+  reason TEXT NOT NULL DEFAULT ''
+    CHECK (length(reason) <= 1000),
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(metadata) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS identity_audit_actor_idx
+  ON identity_audit_events(actor_principal_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS identity_audit_subject_idx
+  ON identity_audit_events(subject_principal_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_identity_audit_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'identity_audit_events is append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS identity_audit_events_append_only
+  ON identity_audit_events;
+CREATE TRIGGER identity_audit_events_append_only
+BEFORE UPDATE OR DELETE ON identity_audit_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_identity_audit_mutation();
+
+ALTER TABLE agents
+  ADD COLUMN IF NOT EXISTS principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS agents_principal_idx
+  ON agents(principal_id)
+  WHERE principal_id IS NOT NULL;
+
+ALTER TABLE project_members
+  ADD COLUMN IF NOT EXISTS principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS project_members_principal_idx
+  ON project_members(principal_id, status)
+  WHERE principal_id IS NOT NULL;
+
+ALTER TABLE runs
+  ADD COLUMN IF NOT EXISTS agent_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS initiated_by_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS runs_agent_principal_idx
+  ON runs(agent_principal_id, created_at DESC)
+  WHERE agent_principal_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS runs_initiated_by_principal_idx
+  ON runs(initiated_by_principal_id, created_at DESC)
+  WHERE initiated_by_principal_id IS NOT NULL;
+`;

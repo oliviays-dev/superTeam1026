@@ -116,7 +116,7 @@ integration("agent runtime binding repository", () => {
     return enabled.kind === "updated" ? enabled.runtime : runtime;
   }
 
-  it("applies migration 23 without changing migration 21/22 data", async () => {
+  it("applies current migrations without changing migration 21/22 data", async () => {
     const schema = `batch13c_${randomUUID().replaceAll("-", "")}`;
     await database.query(`CREATE SCHEMA ${schema}`);
     const separator = databaseUrl!.includes("?") ? "&" : "?";
@@ -135,7 +135,9 @@ integration("agent runtime binding repository", () => {
         "SELECT to_regclass('agent_runtime_bindings')::text AS name",
       );
       expect(bindingTable.rows[0]?.name).toBe("agent_runtime_bindings");
-      const executionColumnBefore = await isolated.query<{ name: string | null }>(
+      const executionColumnBefore = await isolated.query<{
+        name: string | null;
+      }>(
         `SELECT column_name AS name
          FROM information_schema.columns
          WHERE table_schema = $1
@@ -165,7 +167,7 @@ integration("agent runtime binding repository", () => {
       const after = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(after.rows[0]?.version).toBe(23);
+      expect(after.rows[0]?.version).toBe(24);
       const tableAfter = await isolated.query<{ name: string | null }>(
         "SELECT to_regclass('agent_runtime_bindings')::text AS name",
       );

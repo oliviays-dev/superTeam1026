@@ -335,8 +335,10 @@ V1 暂不实现登录。开发环境提供固定 Local Actor，但该 Actor 必�
 
 ### 6.2 首批 API
 
-> **实现状态**：`/api/v1/runtimes` 相关路由当前尚未注册，属于 Batch 13 规划；
-> 不能把本节的 API 目标清单视为已交付能力。
+> **实现状态（Batch 13 Phase 6 已完成）**：`/api/v1/runtimes` 管理、探测、
+> Agent Binding/Preflight、Run 观测和取消已注册。本 API 清单中的其余能力按各自
+> 批次状态为准；外部 Runtime 的 Provider Session resume、危险 sandbox 和任意 shell
+> 仍不在 V1 范围内。
 
 ```text
 GET    /api/v1/projects
@@ -401,9 +403,10 @@ HTTP Route 不直接调用 `AgentRuntimeAdapter`。任务派发通过 Applicatio
 
 ### 7.2 首批表
 
-> **实现状态**：`runtime` 与 `runtime_capability_snapshot` 当前尚未落表，属于
-> Batch 13 的 Migration 21 规划；现有 V1 只使用 Agent 的 `runtime_kind` 和
-> Runtime Worker/Effect 运行表。
+> **实现状态（Batch 13 Phase 6 已完成）**：`external_runtimes`、Probe、
+> Capability Snapshot、治理事件、Agent Runtime Binding、Probe Job 和 Run 外部
+> 执行字段已通过 Migration 21–23 落表。Batch 14A 的 Migration 24 仅增加
+> Principal/RBAC 空表和 nullable 关联列，不改变 Runtime 执行语义。
 
 ```text
 workspace
@@ -655,10 +658,10 @@ dsh --profile sdk
 
 ### 9.4 外部 Runtime
 
-> **实现状态（Batch 12B 基线）**：以下内容是 V1 目标设计，不是已交付能力。
-> 当前 `RunExecutor` 只实现 `fake` 与 `dsh-sdk`；`codex-jsonl` 和 `plain-text`
-> 只是契约/UI 占位，派发会被拒绝。外部 Runtime 的注册、绑定、Preflight、进程
-> Adapter、取消和 Worker 执行链路属于 Batch 13。
+> **实现状态（Batch 13 Phase 6 已完成）**：`RunExecutor` 已支持 `fake`、
+> `dsh-sdk`、`codex-jsonl` 和 `plain-text`。外部 Runtime 的注册、绑定、
+> Preflight、进程 Adapter、取消、超时和 Worker 执行链路均已交付；第一版仍不
+> 自动 resume Provider Session，也不开放危险 sandbox。
 
 V1 保留：
 

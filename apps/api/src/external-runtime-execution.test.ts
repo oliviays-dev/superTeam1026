@@ -52,7 +52,7 @@ integration("external runtime execution", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 23,
+      expectedMigrationVersion: 24,
     });
     app = built.app;
     await app.ready();
