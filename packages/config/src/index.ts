@@ -28,7 +28,18 @@ export interface PlatformConfig {
   readonly runtimeProbePollIntervalMs: number;
   readonly runtimeProbeTimeoutMs: number;
   readonly runtimeProbeLeaseSeconds: number;
+  readonly authMode: "bearer" | "local-development";
+  readonly authSessionTtlSeconds: number;
   readonly localActorId: string;
+  readonly bootstrapAdmin:
+    | {
+        readonly principalId: string;
+        readonly accountId: string;
+        readonly loginId: string;
+        readonly displayName: string;
+        readonly password: string;
+      }
+    | undefined;
   readonly agentWorkspaceRoot: string;
   readonly dshBin: string | undefined;
   readonly dshProfile: string;
@@ -76,6 +87,21 @@ export function loadConfig(
   const logLevel = env.LOG_LEVEL ?? "info";
   if (!["debug", "info", "warn", "error"].includes(logLevel)) {
     throw new Error("LOG_LEVEL must be debug, info, warn, or error");
+  }
+  const authMode =
+    env.AUTH_MODE ?? (env.NODE_ENV === "test" ? "local-development" : "bearer");
+  if (authMode !== "bearer" && authMode !== "local-development") {
+    throw new Error("AUTH_MODE must be bearer or local-development");
+  }
+  const bootstrapLoginId = env.BOOTSTRAP_ADMIN_LOGIN_ID?.trim();
+  const bootstrapPassword = env.BOOTSTRAP_ADMIN_PASSWORD;
+  if (
+    (bootstrapLoginId === undefined || bootstrapLoginId === "") !==
+    (bootstrapPassword === undefined || bootstrapPassword === "")
+  ) {
+    throw new Error(
+      "BOOTSTRAP_ADMIN_LOGIN_ID and BOOTSTRAP_ADMIN_PASSWORD must be configured together",
+    );
   }
 
   return {
@@ -200,7 +226,27 @@ export function loadConfig(
       30,
       "RUNTIME_PROBE_LEASE_SECONDS",
     ),
+    authMode,
+    authSessionTtlSeconds: integer(
+      env.AUTH_SESSION_TTL_SECONDS,
+      604_800,
+      "AUTH_SESSION_TTL_SECONDS",
+    ),
     localActorId: env.LOCAL_ACTOR_ID ?? "local-admin",
+    bootstrapAdmin:
+      bootstrapLoginId === undefined ||
+      bootstrapLoginId === "" ||
+      bootstrapPassword === undefined ||
+      bootstrapPassword === ""
+        ? undefined
+        : {
+            principalId:
+              env.BOOTSTRAP_ADMIN_PRINCIPAL_ID ?? "principal-human-admin",
+            accountId: env.BOOTSTRAP_ADMIN_ACCOUNT_ID ?? "account-admin",
+            loginId: bootstrapLoginId,
+            displayName: env.BOOTSTRAP_ADMIN_DISPLAY_NAME ?? "Platform Admin",
+            password: bootstrapPassword,
+          },
     agentWorkspaceRoot: resolve(
       root,
       env.AGENT_WORKSPACE_ROOT ?? ".tmp/agent-workspaces",

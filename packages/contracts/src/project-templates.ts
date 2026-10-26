@@ -338,6 +338,9 @@ export type ProjectTemplateMaterialization = z.infer<
 
 export const viewerCapabilitiesSchema = z.object({
   actorId: z.string(),
+  principalId: z.string().optional(),
+  displayName: z.string().optional(),
+  authSource: z.enum(["bearer", "local-development"]).optional(),
   platformAdministrator: z.boolean(),
   canManageProjectTemplates: z.boolean(),
 });

@@ -335,3 +335,48 @@ export function evaluateHumanSessionAccess(
 export function principalKindCanOwnAccount(kind: PrincipalKind): boolean {
   return kind === "human";
 }
+
+export const loginInputSchema = z.object({
+  loginId: z.string().trim().min(1).max(180),
+  password: z.string().min(1).max(256),
+});
+export type LoginInput = z.infer<typeof loginInputSchema>;
+
+export const authenticatedPrincipalSchema = z.object({
+  principalId: principalIdSchema,
+  accountId: z.string().trim().min(1).max(180),
+  sessionId: z.string().uuid(),
+  loginId: z.string().trim().min(1).max(180),
+  displayName: z.string().trim().min(1).max(160),
+  kind: z.literal("human"),
+  platformAdministrator: z.boolean(),
+  expiresAt: timestampSchema,
+});
+export type AuthenticatedPrincipal = z.infer<
+  typeof authenticatedPrincipalSchema
+>;
+
+export const loginResultSchema = authenticatedPrincipalSchema.extend({
+  token: z.string().min(32).max(512),
+});
+export type LoginResult = z.infer<typeof loginResultSchema>;
+
+export const changePasswordInputSchema = z.object({
+  currentPassword: z.string().min(1).max(256),
+  newPassword: z.string().min(8).max(256),
+});
+export type ChangePasswordInput = z.infer<typeof changePasswordInputSchema>;
+
+export const accountStatusInputSchema = z.object({
+  status: z.enum(["active", "disabled"]),
+});
+export type AccountStatusInput = z.infer<typeof accountStatusInputSchema>;
+
+export const accountStatusResultSchema = z.object({
+  accountId: z.string().trim().min(1).max(180),
+  principalId: principalIdSchema,
+  accountStatus: accountStatusSchema,
+  principalStatus: principalStatusSchema,
+  sessionsRevoked: z.number().int().nonnegative(),
+});
+export type AccountStatusResult = z.infer<typeof accountStatusResultSchema>;

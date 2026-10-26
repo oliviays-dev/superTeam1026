@@ -7,6 +7,7 @@ import type {
   AgentRuntimePreflightResult,
   ApprovalSlaSweepResult,
   Artifact,
+  AuthenticatedPrincipal,
   ConfirmHandoffCardInput,
   ContextPack,
   ContextReceipt,
@@ -46,6 +47,8 @@ import type {
   IdempotencyCleanupInput,
   IdempotencyCleanupResult,
   Job,
+  LoginInput,
+  LoginResult,
   HandoffCard,
   Meeting,
   MeetingActionItem,
@@ -121,6 +124,7 @@ import type {
 } from "@pluginmax/contracts";
 
 const API_BASE = "/api/v1";
+const AUTH_TOKEN_KEY = "pluginmax.auth.token";
 
 interface ListResponse<T> {
   readonly items: T[];
@@ -143,6 +147,21 @@ export class ApiRequestError extends Error {
   }
 }
 
+export function authToken(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  return window.sessionStorage.getItem(AUTH_TOKEN_KEY) ?? undefined;
+}
+
+export function storeAuthToken(token: string): void {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+export function clearAuthToken(): void {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+}
+
 interface EventPage {
   readonly runId: string;
   readonly runStatus: Run["status"];
@@ -152,6 +171,10 @@ interface EventPage {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
+  const token = authToken();
+  if (token !== undefined && !headers.has("authorization")) {
+    headers.set("authorization", `Bearer ${token}`);
+  }
   if (init?.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
@@ -165,6 +188,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       message?: string;
       details?: unknown;
     } | null;
+    if (response.status === 401 && path !== "/auth/login") {
+      clearAuthToken();
+    }
     throw new ApiRequestError(
       body?.message ?? `Request failed: ${response.status}`,
       body?.code ?? "request_failed",
@@ -175,6 +201,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (response.status === 204) return undefined as T;
   const text = await response.text();
   return (text === "" ? undefined : JSON.parse(text)) as T;
+}
+
+export async function login(input: LoginInput): Promise<LoginResult> {
+  const result = await request<LoginResult>("/auth/login", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  storeAuthToken(result.token);
+  return result;
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await request<void>("/auth/logout", { method: "POST" });
+  } finally {
+    clearAuthToken();
+  }
+}
+
+export async function currentPrincipal(): Promise<AuthenticatedPrincipal> {
+  return request<AuthenticatedPrincipal>("/auth/me");
 }
 
 export async function listProjects(): Promise<Project[]> {

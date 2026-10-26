@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  accountStatusInputSchema,
+  authenticatedPrincipalSchema,
+  changePasswordInputSchema,
   evaluateHumanSessionAccess,
+  loginInputSchema,
+  loginResultSchema,
   parsePrincipalReference,
   principalKindCanOwnAccount,
   principalReference,
@@ -96,5 +101,45 @@ describe("identity principal contracts", () => {
         sourceKind: "project-role",
       }).success,
     ).toBe(true);
+  });
+
+  it("validates login, session, password change, and account status payloads", () => {
+    expect(
+      loginInputSchema.parse({ loginId: " admin ", password: "secret" }),
+    ).toEqual({ loginId: "admin", password: "secret" });
+    expect(
+      loginResultSchema.parse({
+        principalId: "principal-human-admin",
+        accountId: "account-admin",
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        loginId: "admin",
+        displayName: "Admin",
+        kind: "human",
+        platformAdministrator: true,
+        expiresAt: "2026-11-26T00:00:00.000Z",
+        token: "x".repeat(32),
+      }),
+    ).toMatchObject({ kind: "human", platformAdministrator: true });
+    expect(
+      authenticatedPrincipalSchema.safeParse({
+        principalId: "principal-ai-agent",
+        accountId: "account-ai",
+        sessionId: "00000000-0000-4000-8000-000000000001",
+        loginId: "ai",
+        displayName: "AI",
+        kind: "ai",
+        platformAdministrator: false,
+        expiresAt: "2026-11-26T00:00:00.000Z",
+      }).success,
+    ).toBe(false);
+    expect(
+      changePasswordInputSchema.safeParse({
+        currentPassword: "old-secret",
+        newPassword: "short",
+      }).success,
+    ).toBe(false);
+    expect(accountStatusInputSchema.parse({ status: "disabled" })).toEqual({
+      status: "disabled",
+    });
   });
 });

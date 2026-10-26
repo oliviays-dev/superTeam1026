@@ -114,3 +114,10 @@ export {
   readLegacyPrincipalSnapshot,
   type LegacyPrincipalSnapshot,
 } from "./legacy-principal-snapshot.js";
+export {
+  IdentityRepository,
+  IdentityRepositoryError,
+  hashIdentityPassword,
+  verifyIdentityPassword,
+  type IdentityRepositoryOptions,
+} from "./identity-repository.js";

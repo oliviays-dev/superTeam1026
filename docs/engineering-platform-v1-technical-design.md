@@ -1090,8 +1090,21 @@ FILE_STORE_ROOT=./data/files
 DSH_BIN=...
 DSH_PROFILE=sdk
 WORKER_CONCURRENCY=2
+AUTH_MODE=local-development
 LOCAL_ACTOR_ID=local-admin
 ```
+
+`local-development` 只用于本机和测试，允许显式
+`x-pluginmax-actor`。Bearer 模式还必须提供一次性管理员引导：
+
+```text
+AUTH_MODE=bearer
+AUTH_SESSION_TTL_SECONDS=604800
+BOOTSTRAP_ADMIN_LOGIN_ID=admin
+BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-strong-password
+```
+
+引导密码只在首次创建 Credential 时使用，数据库只保存 scrypt Hash。
 
 ### 17.2 单机部署
 
@@ -1106,7 +1119,8 @@ local file volume
 dsh runtime
 ```
 
-API 默认只监听本机。若未来需要远程访问，必须先完成认证与网络安全设计。
+API 默认只监听本机。Bearer Session、账号停用、Session 撤销和服务端 Principal
+解析已接入；远程开放前仍需完成 Rate Limit、TLS 和部署级密钥轮换评审。
 
 ## 18. 新项目创建与工程隔离
 

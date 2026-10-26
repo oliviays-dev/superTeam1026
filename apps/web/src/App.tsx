@@ -1,10 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Bot,
   FolderKanban,
   LayoutDashboard,
   ListTodo,
+  LoaderCircle,
+  LogOut,
   MessagesSquare,
   Moon,
   PanelLeftClose,
@@ -24,8 +26,15 @@ import {
 import { ProjectsView, TasksView } from "./WorkspaceViews.js";
 import { ProjectTemplatesView } from "./ProjectTemplatesView.js";
 import { RuntimesView } from "./RuntimesView.js";
-import { getViewerCapabilities, listAllAgents, listProjects } from "./api.js";
+import {
+  ApiRequestError,
+  getViewerCapabilities,
+  listAllAgents,
+  listProjects,
+  logout,
+} from "./api.js";
 import type { WorkbenchSourceRef } from "@pluginmax/contracts";
+import { LoginView } from "./LoginView.js";
 
 type AppView =
   | "workbench"
@@ -61,17 +70,22 @@ function initialTheme(): Theme {
 }
 
 export function App() {
+  const queryClient = useQueryClient();
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const viewerQuery = useQuery({
+    queryKey: ["viewer", sessionVersion],
+    queryFn: getViewerCapabilities,
+    retry: false,
+  });
   const projectsQuery = useQuery({
-    queryKey: ["projects"],
+    queryKey: ["projects", sessionVersion],
     queryFn: listProjects,
+    enabled: viewerQuery.isSuccess,
   });
   const agentsQuery = useQuery({
-    queryKey: ["agents", "all"],
+    queryKey: ["agents", "all", sessionVersion],
     queryFn: listAllAgents,
-  });
-  const viewerQuery = useQuery({
-    queryKey: ["viewer"],
-    queryFn: getViewerCapabilities,
+    enabled: viewerQuery.isSuccess,
   });
   const [projectId, setProjectId] = useState("");
   const [taskId, setTaskId] = useState("");
@@ -90,6 +104,17 @@ export function App() {
   const consumeInitialTask = useCallback(() => setTaskId(""), []);
   const consumeInitialMeeting = useCallback(() => setMeetingId(""), []);
 
+  const handleLoggedIn = () => {
+    setSessionVersion((current) => current + 1);
+    void queryClient.invalidateQueries();
+  };
+
+  const handleLogout = async () => {
+    await logout();
+    queryClient.clear();
+    setSessionVersion((current) => current + 1);
+  };
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
@@ -103,6 +128,33 @@ export function App() {
     window.addEventListener("resize", syncSidebar);
     return () => window.removeEventListener("resize", syncSidebar);
   }, []);
+
+  if (viewerQuery.isPending) {
+    return (
+      <main className="auth-screen auth-loading">
+        <LoaderCircle className="auth-spinner" size={24} />
+        <span>正在验证会话</span>
+      </main>
+    );
+  }
+
+  if (viewerQuery.isError) {
+    if (
+      viewerQuery.error instanceof ApiRequestError &&
+      viewerQuery.error.status === 401
+    ) {
+      return <LoginView onLoggedIn={handleLoggedIn} />;
+    }
+    return (
+      <main className="auth-screen auth-loading">
+        <strong>无法验证当前会话</strong>
+        <span>{viewerQuery.error.message}</span>
+        <button type="button" onClick={() => void viewerQuery.refetch()}>
+          重试
+        </button>
+      </main>
+    );
+  }
 
   const openTask = (nextTaskId: string, nextProjectId: string) => {
     if (view !== "tasks") {
@@ -279,12 +331,38 @@ export function App() {
         </section>
 
         <footer className="sidebar-foot">
-          <button className="account-row" type="button" title="本地工作区账号">
-            <span className="account-avatar">LA</span>
-            <span className="account-copy">
-              <strong>Local Admin</strong>
-              <small>本地工作区</small>
+          <button
+            className="account-row"
+            type="button"
+            title={
+              viewerQuery.data.authSource === "local-development"
+                ? "本地开发会话"
+                : "退出登录"
+            }
+            onClick={
+              viewerQuery.data.authSource === "local-development"
+                ? undefined
+                : () => void handleLogout()
+            }
+          >
+            <span className="account-avatar">
+              {(viewerQuery.data.displayName ?? viewerQuery.data.actorId)
+                .slice(0, 2)
+                .toUpperCase()}
             </span>
+            <span className="account-copy">
+              <strong>
+                {viewerQuery.data.displayName ?? viewerQuery.data.actorId}
+              </strong>
+              <small>
+                {viewerQuery.data.platformAdministrator
+                  ? "平台管理员"
+                  : "平台成员"}
+              </small>
+            </span>
+            {viewerQuery.data.authSource === "local-development" ? null : (
+              <LogOut size={14} />
+            )}
           </button>
           <button
             className="theme-toggle"

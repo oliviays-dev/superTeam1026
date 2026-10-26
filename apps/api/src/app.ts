@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ApiError,
+  type AuthenticatedPrincipal,
   agentRuntimePreflightInputSchema,
   agentStatusInputSchema,
+  accountStatusInputSchema,
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
   confirmHandoffCardInputSchema,
@@ -28,6 +30,7 @@ import {
   createTaskMessageInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
+  changePasswordInputSchema,
   completeWorkflowNodeInputSchema,
   convertMeetingActionItemInputSchema,
   cosignWorkflowApprovalInputSchema,
@@ -39,6 +42,7 @@ import {
   jobRecoveryInputSchema,
   markReportReadInputSchema,
   meetingAiPolicyLifecycleInputSchema,
+  loginInputSchema,
   projectReportQuerySchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
@@ -85,7 +89,12 @@ import {
   PlatformApplication,
   renderRuntimePrometheusMetrics,
 } from "@pluginmax/application";
-import { Database, PlatformRepositories } from "@pluginmax/database";
+import {
+  Database,
+  IdentityRepository,
+  IdentityRepositoryError,
+  PlatformRepositories,
+} from "@pluginmax/database";
 import { LocalFileStore, type FileRef } from "@pluginmax/files";
 import Fastify, {
   type FastifyInstance,
@@ -99,6 +108,9 @@ export interface BuildApiOptions {
   readonly databaseUrl: string;
   readonly fileStoreRoot: string;
   readonly localActorId?: string;
+  readonly authMode?: "bearer" | "local-development";
+  readonly authSessionTtlSeconds?: number;
+  readonly identityRepository?: IdentityRepository;
   readonly expectedMigrationVersion?: number;
   readonly workerHeartbeatStaleAfterSeconds?: number;
   readonly logger?: FastifyServerOptions["logger"];
@@ -222,12 +234,60 @@ function apiError(
   };
 }
 
+const AUTHENTICATED_ACTOR_HEADER = "x-pluginmax-authenticated-actor";
+const AUTHENTICATED_NAME_HEADER = "x-pluginmax-authenticated-name";
+const AUTHENTICATED_ADMIN_HEADER = "x-pluginmax-authenticated-admin";
+
+function headerValue(
+  headers: Record<string, unknown>,
+  name: string,
+): string | undefined {
+  const value = headers[name];
+  const first = Array.isArray(value) ? value[0] : value;
+  return typeof first === "string" ? first : undefined;
+}
+
+function requestBearerToken(
+  headers: Record<string, unknown>,
+): string | undefined {
+  const authorization = headerValue(headers, "authorization");
+  if (authorization === undefined || !authorization.startsWith("Bearer ")) {
+    return undefined;
+  }
+  const token = authorization.slice("Bearer ".length).trim();
+  return token === "" ? undefined : token;
+}
+
 function requestActorId(headers: Record<string, unknown>): string {
-  const value = headers["x-pluginmax-actor"];
-  const actor = Array.isArray(value) ? value[0] : value;
-  return typeof actor === "string" && /^[a-zA-Z0-9_.:-]{1,180}$/.test(actor)
-    ? actor
-    : "local-admin";
+  const actor = headerValue(headers, AUTHENTICATED_ACTOR_HEADER);
+  if (actor === undefined || !/^[a-zA-Z0-9_.:-]{1,180}$/.test(actor)) {
+    throw new ApplicationError(
+      "unauthorized",
+      "Authentication is required",
+      401,
+    );
+  }
+  return actor;
+}
+
+function requestActorName(
+  headers: Record<string, unknown>,
+  actorId: string,
+): string {
+  return headerValue(headers, AUTHENTICATED_NAME_HEADER) ?? actorId;
+}
+
+function requestIsAdministrator(headers: Record<string, unknown>): boolean {
+  return headerValue(headers, AUTHENTICATED_ADMIN_HEADER) === "1";
+}
+
+function publicApiPath(path: string): boolean {
+  return (
+    path === "/api/v1/health" ||
+    path === "/api/v1/ready" ||
+    path === "/api/v1/metrics" ||
+    path === "/api/v1/auth/login"
+  );
 }
 
 function requestIdempotencyKey(
@@ -266,6 +326,12 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
+  const authMode =
+    options.authMode ??
+    (process.env.NODE_ENV === "test" ? "local-development" : "bearer");
+  const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
+  const identity =
+    options.identityRepository ?? new IdentityRepository(database);
   const expectedMigrationVersion = options.expectedMigrationVersion ?? 24;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
@@ -276,6 +342,10 @@ export function buildApi(options: BuildApiOptions): {
     bodyLimit: 32 * 1024 * 1024,
   });
   const requestTraces = new WeakMap<FastifyRequest, TraceContext>();
+  const requestPrincipals = new WeakMap<
+    FastifyRequest,
+    AuthenticatedPrincipal
+  >();
 
   app.addHook("onRequest", async (request, reply) => {
     const header = request.headers.traceparent;
@@ -288,6 +358,64 @@ export function buildApi(options: BuildApiOptions): {
     if (incoming !== undefined && parsed === undefined) {
       reply.header("x-pluginmax-trace-invalid", "1");
     }
+  });
+  app.addHook("onRequest", async (request, reply) => {
+    delete request.headers[AUTHENTICATED_ACTOR_HEADER];
+    delete request.headers[AUTHENTICATED_NAME_HEADER];
+    delete request.headers[AUTHENTICATED_ADMIN_HEADER];
+    if (publicApiPath(request.url.split("?")[0] ?? request.url)) {
+      return;
+    }
+    if (authMode === "local-development") {
+      const candidate = headerValue(request.headers, "x-pluginmax-actor");
+      const actorId = candidate ?? localActorId;
+      if (!/^[a-zA-Z0-9_.:-]{1,180}$/.test(actorId)) {
+        return reply
+          .status(401)
+          .send(
+            apiError(
+              String(request.id),
+              "unauthorized",
+              "Authentication is required",
+            ),
+          );
+      }
+      request.headers[AUTHENTICATED_ACTOR_HEADER] = actorId;
+      request.headers[AUTHENTICATED_NAME_HEADER] =
+        actorId === localActorId ? "Local Admin" : actorId;
+      request.headers[AUTHENTICATED_ADMIN_HEADER] =
+        actorId === localActorId ? "1" : "0";
+      return;
+    }
+    const token = requestBearerToken(request.headers);
+    if (token === undefined) {
+      return reply
+        .status(401)
+        .send(
+          apiError(
+            String(request.id),
+            "unauthorized",
+            "Authentication is required",
+          ),
+        );
+    }
+    const principal = await identity.resolveSession(token);
+    if (principal === undefined) {
+      return reply
+        .status(401)
+        .send(
+          apiError(
+            String(request.id),
+            "unauthorized",
+            "Authentication is required",
+          ),
+        );
+    }
+    request.headers[AUTHENTICATED_ACTOR_HEADER] = principal.principalId;
+    request.headers[AUTHENTICATED_NAME_HEADER] = principal.displayName;
+    request.headers[AUTHENTICATED_ADMIN_HEADER] =
+      principal.platformAdministrator ? "1" : "0";
+    requestPrincipals.set(request, principal);
   });
   app.addHook("onResponse", async (request, reply) => {
     request.log.info(
@@ -393,8 +521,8 @@ export function buildApi(options: BuildApiOptions): {
     }
   }
 
-  function assertAdministrator(actorId: string): void {
-    if (actorId !== localActorId) {
+  function assertAdministrator(headers: Record<string, unknown>): void {
+    if (!requestIsAdministrator(headers)) {
       throw new ApplicationError(
         "forbidden",
         "Platform administrator permission is required",
@@ -408,6 +536,11 @@ export function buildApi(options: BuildApiOptions): {
       return reply
         .status(400)
         .send(apiError(String(request.id), "invalid_input", error.message));
+    }
+    if (error instanceof IdentityRepositoryError) {
+      return reply
+        .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
     }
     if (error instanceof ApplicationError) {
       return reply
@@ -453,14 +586,96 @@ export function buildApi(options: BuildApiOptions): {
     });
   });
 
+  app.post("/api/v1/auth/login", async (request, reply) => {
+    const input = loginInputSchema.parse(request.body);
+    return reply.send(
+      await identity.login({
+        ...input,
+        ttlSeconds: authSessionTtlSeconds,
+      }),
+    );
+  });
+
+  app.get("/api/v1/auth/me", async (request, reply) => {
+    const principal = requestPrincipals.get(request);
+    if (principal !== undefined) {
+      return reply.send(principal);
+    }
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      principalId: `local:${actorId}`,
+      accountId: null,
+      sessionId: null,
+      loginId: actorId,
+      displayName: requestActorName(request.headers, actorId),
+      kind: "human",
+      platformAdministrator: requestIsAdministrator(request.headers),
+      expiresAt: null,
+      authSource: "local-development",
+    });
+  });
+
+  app.post("/api/v1/auth/logout", async (request, reply) => {
+    if (authMode === "bearer") {
+      const token = requestBearerToken(request.headers);
+      if (token === undefined) {
+        throw new ApplicationError(
+          "unauthorized",
+          "Authentication is required",
+          401,
+        );
+      }
+      await identity.logout(token);
+    }
+    return reply.status(204).send();
+  });
+
+  app.post("/api/v1/auth/change-password", async (request, reply) => {
+    if (authMode !== "bearer") {
+      throw new ApplicationError(
+        "authentication_mode_unsupported",
+        "Password changes require bearer authentication",
+        400,
+      );
+    }
+    const token = requestBearerToken(request.headers);
+    if (token === undefined) {
+      throw new ApplicationError(
+        "unauthorized",
+        "Authentication is required",
+        401,
+      );
+    }
+    const input = changePasswordInputSchema.parse(request.body);
+    await identity.changePassword(token, input);
+    return reply.status(204).send();
+  });
+
   app.get("/api/v1/viewer", async (request, reply) => {
     const actorId = requestActorId(request.headers);
-    const platformAdministrator = actorId === localActorId;
+    const platformAdministrator = requestIsAdministrator(request.headers);
     return reply.send({
       actorId,
+      principalId: actorId,
+      displayName: requestActorName(request.headers, actorId),
+      authSource: authMode,
       platformAdministrator,
       canManageProjectTemplates: platformAdministrator,
     });
+  });
+
+  app.post("/api/v1/accounts/:accountId/status", async (request, reply) => {
+    assertAdministrator(request.headers);
+    const { accountId } = z
+      .object({
+        accountId: z.string().trim().min(1).max(180),
+      })
+      .parse(request.params);
+    const input = accountStatusInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await identity.setAccountStatus(actorId, accountId, input),
+    );
   });
 
   app.get("/api/v1/ready", async (_request, reply) => {
@@ -543,7 +758,7 @@ export function buildApi(options: BuildApiOptions): {
     const { jobId } = jobParamsSchema.parse(request.params);
     const input = jobRecoveryInputSchema.parse(request.body);
     const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     return reply.send(
       await application.recoverDeadLetterJob(jobId, input.reason, actorId),
     );
@@ -551,7 +766,7 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/operations/approval-sla/sweep", async (request, reply) => {
     const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     const input = approvalSlaSweepInputSchema.parse(request.body ?? {});
     return reply.send(
       await application.sweepApprovalSla(actorId, input.batchSize, {
@@ -562,8 +777,7 @@ export function buildApi(options: BuildApiOptions): {
   });
 
   app.post("/api/v1/operations/idempotency/cleanup", async (request, reply) => {
-    const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     const input = idempotencyCleanupInputSchema.parse(request.body ?? {});
     return reply.send(
       await application.cleanupIdempotencyReceipts(input, {
@@ -580,8 +794,8 @@ export function buildApi(options: BuildApiOptions): {
   app.post("/api/v1/projects", async (request, reply) => {
     const input = createProjectInputSchema.parse(request.body);
     const actorId = requestActorId(request.headers);
-    const administrator = actorId === localActorId;
-    const actorName = actorId === localActorId ? "Local Admin" : actorId;
+    const administrator = requestIsAdministrator(request.headers);
+    const actorName = requestActorName(request.headers, actorId);
     if (input.templateId !== undefined) {
       const idempotencyKey =
         requestIdempotencyKey(request.headers) ?? input.materializationKey;
@@ -615,7 +829,7 @@ export function buildApi(options: BuildApiOptions): {
   app.get("/api/v1/project-templates", async (request, reply) => {
     const query = templateListQuerySchema.parse(request.query);
     const actorId = requestActorId(request.headers);
-    const administrator = actorId === localActorId;
+    const administrator = requestIsAdministrator(request.headers);
     return reply.send({
       items: await application.listProjectTemplates(
         actorId,
@@ -627,7 +841,7 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/project-templates", async (request, reply) => {
     const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     const input = createProjectTemplateInputSchema.parse(request.body);
     return reply
       .status(201)
@@ -641,7 +855,7 @@ export function buildApi(options: BuildApiOptions): {
       await application.getProjectTemplate(
         templateId,
         actorId,
-        actorId === localActorId,
+        requestIsAdministrator(request.headers),
       ),
     );
   });
@@ -649,7 +863,7 @@ export function buildApi(options: BuildApiOptions): {
   app.patch("/api/v1/project-templates/:templateId", async (request, reply) => {
     const { templateId } = projectTemplateParamsSchema.parse(request.params);
     const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     const input = updateProjectTemplateInputSchema.parse(request.body);
     return reply.send(
       await application.updateProjectTemplate(templateId, input, actorId),
@@ -661,7 +875,7 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { templateId } = projectTemplateParamsSchema.parse(request.params);
       const actorId = requestActorId(request.headers);
-      assertAdministrator(actorId);
+      assertAdministrator(request.headers);
       const input = copyProjectTemplateInputSchema.parse(request.body);
       return reply
         .status(201)
@@ -676,7 +890,7 @@ export function buildApi(options: BuildApiOptions): {
     async (request, reply) => {
       const { templateId } = projectTemplateParamsSchema.parse(request.params);
       const actorId = requestActorId(request.headers);
-      assertAdministrator(actorId);
+      assertAdministrator(request.headers);
       const input = archiveProjectTemplateInputSchema.parse(request.body);
       return reply.send(
         await application.archiveProjectTemplate(templateId, input, actorId),
@@ -688,8 +902,7 @@ export function buildApi(options: BuildApiOptions): {
     "/api/v1/project-templates/:templateId/history",
     async (request, reply) => {
       const { templateId } = projectTemplateParamsSchema.parse(request.params);
-      const actorId = requestActorId(request.headers);
-      assertAdministrator(actorId);
+      assertAdministrator(request.headers);
       return reply.send({
         items: await application.listProjectTemplateHistory(templateId),
       });
@@ -698,8 +911,7 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/template-roles", async (request, reply) => {
     const query = templateListQuerySchema.parse(request.query);
-    const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     return reply.send({
       items: await application.listTemplateRoles(
         query.includeArchived ?? false,
@@ -708,32 +920,28 @@ export function buildApi(options: BuildApiOptions): {
   });
 
   app.post("/api/v1/template-roles", async (request, reply) => {
-    const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     const input = createTemplateRoleInputSchema.parse(request.body);
     return reply.status(201).send(await application.createTemplateRole(input));
   });
 
   app.patch("/api/v1/template-roles/:roleId", async (request, reply) => {
     const { roleId } = templateRoleParamsSchema.parse(request.params);
-    const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     const input = updateTemplateRoleInputSchema.parse(request.body);
     return reply.send(await application.updateTemplateRole(roleId, input));
   });
 
   app.delete("/api/v1/template-roles/:roleId", async (request, reply) => {
     const { roleId } = templateRoleParamsSchema.parse(request.params);
-    const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     await application.deleteTemplateRole(roleId);
     return reply.status(204).send();
   });
 
   app.get("/api/v1/workflow-templates", async (request, reply) => {
     const query = templateListQuerySchema.parse(request.query);
-    const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     return reply.send({
       items: await application.listWorkflowTemplates(
         query.includeArchived ?? false,
@@ -742,8 +950,7 @@ export function buildApi(options: BuildApiOptions): {
   });
 
   app.post("/api/v1/workflow-templates", async (request, reply) => {
-    const actorId = requestActorId(request.headers);
-    assertAdministrator(actorId);
+    assertAdministrator(request.headers);
     const input = createWorkflowTemplateInputSchema.parse(request.body);
     return reply
       .status(201)
@@ -756,8 +963,7 @@ export function buildApi(options: BuildApiOptions): {
       const { workflowTemplateId } = workflowTemplateParamsSchema.parse(
         request.params,
       );
-      const actorId = requestActorId(request.headers);
-      assertAdministrator(actorId);
+      assertAdministrator(request.headers);
       const input = updateWorkflowTemplateInputSchema.parse(request.body);
       return reply.send(
         await application.updateWorkflowTemplate(workflowTemplateId, input),
@@ -967,7 +1173,7 @@ export function buildApi(options: BuildApiOptions): {
       await application.getAgentRuntimeBinding(
         agentId,
         actorId,
-        actorId === localActorId,
+        requestIsAdministrator(request.headers),
       ),
     );
   });
@@ -989,7 +1195,7 @@ export function buildApi(options: BuildApiOptions): {
           agentId,
           input,
           actorId,
-          actorId === localActorId,
+          requestIsAdministrator(request.headers),
         ),
     });
   });
@@ -1013,7 +1219,7 @@ export function buildApi(options: BuildApiOptions): {
             agentId,
             input,
             actorId,
-            actorId === localActorId,
+            requestIsAdministrator(request.headers),
           ),
       });
     },
@@ -1030,7 +1236,7 @@ export function buildApi(options: BuildApiOptions): {
           agentId,
           input,
           actorId,
-          actorId === localActorId,
+          requestIsAdministrator(request.headers),
         ),
       );
     },
@@ -1042,7 +1248,7 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send({
       items: await application.listExternalRuntimes(
         actorId,
-        actorId === localActorId,
+        requestIsAdministrator(request.headers),
         query.includeArchived,
       ),
     });
@@ -1063,7 +1269,7 @@ export function buildApi(options: BuildApiOptions): {
         application.createExternalRuntime(
           input,
           actorId,
-          actorId === localActorId,
+          requestIsAdministrator(request.headers),
         ),
     });
   });
@@ -1075,7 +1281,7 @@ export function buildApi(options: BuildApiOptions): {
       await application.getExternalRuntime(
         runtimeId,
         actorId,
-        actorId === localActorId,
+        requestIsAdministrator(request.headers),
       ),
     );
   });
@@ -1097,7 +1303,7 @@ export function buildApi(options: BuildApiOptions): {
           runtimeId,
           input,
           actorId,
-          actorId === localActorId,
+          requestIsAdministrator(request.headers),
         ),
     });
   });
@@ -1119,7 +1325,7 @@ export function buildApi(options: BuildApiOptions): {
           runtimeId,
           input.expectedRevision,
           actorId,
-          actorId === localActorId,
+          requestIsAdministrator(request.headers),
         ),
     });
   });
@@ -1158,7 +1364,7 @@ export function buildApi(options: BuildApiOptions): {
               nextStatus,
               input.expectedRevision,
               actorId,
-              actorId === localActorId,
+              requestIsAdministrator(request.headers),
             ),
         });
       },
@@ -1172,7 +1378,7 @@ export function buildApi(options: BuildApiOptions): {
       items: await application.listExternalRuntimeEvents(
         runtimeId,
         actorId,
-        actorId === localActorId,
+        requestIsAdministrator(request.headers),
       ),
     });
   });
@@ -1186,7 +1392,7 @@ export function buildApi(options: BuildApiOptions): {
         items: await application.listExternalRuntimeCapabilities(
           runtimeId,
           actorId,
-          actorId === localActorId,
+          requestIsAdministrator(request.headers),
         ),
       });
     },
@@ -1228,7 +1434,7 @@ export function buildApi(options: BuildApiOptions): {
           id,
           requestTraces.get(request) ?? createRootTraceContext(),
           actorId,
-          actorId === localActorId,
+          requestIsAdministrator(request.headers),
         ),
       );
   });
@@ -1237,7 +1443,7 @@ export function buildApi(options: BuildApiOptions): {
     const { id } = idParamsSchema.parse(request.params);
     const input = transferTaskInputSchema.parse(request.body);
     const actorId = requestActorId(request.headers);
-    if (actorId !== localActorId) {
+    if (!requestIsAdministrator(request.headers)) {
       throw new ApplicationError(
         "forbidden",
         "Only the local administrator can transfer tasks",

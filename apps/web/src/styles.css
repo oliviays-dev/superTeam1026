@@ -74,6 +74,126 @@ body {
   background: var(--pm-bg-base);
 }
 
+.auth-screen {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--pm-bg-base);
+}
+
+.auth-panel {
+  width: min(380px, 100%);
+  display: grid;
+  gap: 16px;
+  padding: 28px;
+  border: 1px solid var(--pm-border-l3);
+  border-radius: 8px;
+  background: var(--pm-bg-layer-1);
+  box-shadow: var(--pm-shadow);
+}
+
+.auth-panel header {
+  display: grid;
+  gap: 5px;
+}
+
+.auth-panel header span {
+  color: var(--pm-accent);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.auth-panel h1 {
+  margin: 0;
+  color: var(--pm-label-primary);
+  font-size: 22px;
+  line-height: 1.25;
+}
+
+.auth-mark {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--pm-accent) 36%, transparent);
+  border-radius: 8px;
+  color: var(--pm-accent);
+  background: color-mix(in srgb, var(--pm-accent) 10%, transparent);
+}
+
+.auth-panel label {
+  display: grid;
+  gap: 6px;
+  color: var(--pm-label-secondary);
+  font-size: 11.5px;
+}
+
+.auth-panel input {
+  height: 38px;
+  font-size: 13px;
+}
+
+.auth-submit,
+.auth-loading button {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--pm-button-primary);
+  border-radius: 6px;
+  color: var(--pm-label-foreground);
+  background: var(--pm-button-primary);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.auth-submit:hover:not(:disabled),
+.auth-loading button:hover {
+  border-color: var(--pm-button-primary-hover);
+  background: var(--pm-button-primary-hover);
+}
+
+.auth-error {
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--pm-danger) 36%, transparent);
+  border-radius: 6px;
+  color: var(--pm-danger);
+  background: color-mix(in srgb, var(--pm-danger) 8%, transparent);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.auth-loading {
+  align-content: center;
+  gap: 10px;
+  color: var(--pm-label-secondary);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.auth-loading button {
+  width: 100px;
+  margin: 2px auto 0;
+}
+
+.auth-spinner {
+  justify-self: center;
+  color: var(--pm-accent);
+  animation: auth-spin 900ms linear infinite;
+}
+
+@keyframes auth-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 button,
 input,
 textarea,

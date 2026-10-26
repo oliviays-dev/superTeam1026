@@ -1,15 +1,23 @@
 import { loadConfig, loadLocalEnv } from "@pluginmax/config";
+import { IdentityRepository } from "@pluginmax/database";
 import { buildApi } from "./app.js";
 
 loadLocalEnv();
 const config = loadConfig();
-const { app } = buildApi({
+const { app, database } = buildApi({
   databaseUrl: config.databaseUrl,
   fileStoreRoot: config.fileStoreRoot,
   localActorId: config.localActorId,
+  authMode: config.authMode,
+  authSessionTtlSeconds: config.authSessionTtlSeconds,
   workerHeartbeatStaleAfterSeconds: config.workerHeartbeatStaleAfterSeconds,
   logger: { level: config.logLevel },
 });
+if (config.bootstrapAdmin !== undefined) {
+  await new IdentityRepository(database).bootstrapAdministrator(
+    config.bootstrapAdmin,
+  );
+}
 
 const close = async (signal: string) => {
   app.log.info({ signal }, "shutting down");
