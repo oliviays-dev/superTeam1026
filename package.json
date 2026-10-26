@@ -36,6 +36,8 @@
     "test:smoke:runtime-postgres": "./scripts/runtime-postgres-smoke.sh",
     "test:smoke:maintenance-postgres": "./scripts/maintenance-effects-postgres-smoke.sh",
     "test:smoke:production-postgres": "./scripts/production-readiness-postgres-smoke.sh",
+    "test:smoke:meeting-decisions": "./scripts/meeting-decisions-smoke.sh",
+    "test:smoke:meeting-decisions-postgres": "./scripts/meeting-decisions-postgres-smoke.sh",
     "test:smoke:backup": "./scripts/backup.sh",
     "test:smoke:backup-restore": "./scripts/backup-restore-smoke.sh",
     "test:smoke:dsh-real": "./scripts/real-dsh-smoke.sh",

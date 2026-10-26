@@ -265,6 +265,7 @@ export function App() {
               setProjectId(nextProjectId);
               setTaskId("");
             }}
+            onOpenTask={openTask}
           />
         )}
         {view === "agents" && <AgentsView />}

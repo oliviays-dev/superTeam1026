@@ -10,6 +10,10 @@ export {
 } from "./collaboration-repositories.js";
 export { migrate } from "./migrate.js";
 export {
+  MeetingDecisionsRepository,
+  type CreateMeetingActionItemRepositoryInput,
+} from "./meeting-decisions-repository.js";
+export {
   TaskCollaborationRepository,
   type TaskActivity,
   type TaskAttachment,

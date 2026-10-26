@@ -725,6 +725,218 @@ export const meetingDetailSchema = z.object({
 });
 export type MeetingDetail = z.infer<typeof meetingDetailSchema>;
 
+const meetingSourceMessageIdsSchema = z
+  .array(z.string().uuid())
+  .max(500)
+  .default([])
+  .transform((ids) => [...new Set(ids)]);
+
+const meetingDecisionsSchema = z
+  .array(z.string().trim().min(1).max(2_000))
+  .max(100)
+  .default([]);
+
+export const meetingMinutesDraftSchema = z.object({
+  meetingId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  content: z.string(),
+  decisions: meetingDecisionsSchema,
+  sourceMessageIds: meetingSourceMessageIdsSchema,
+  revision: z.number().int().nonnegative(),
+  updatedBy: z.string(),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type MeetingMinutesDraft = z.infer<typeof meetingMinutesDraftSchema>;
+
+export const meetingMinutesVersionSchema = z.object({
+  id: z.string().uuid(),
+  meetingId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  version: z.number().int().positive(),
+  content: z.string(),
+  decisions: meetingDecisionsSchema,
+  sourceMessageIds: meetingSourceMessageIdsSchema,
+  publishedBy: z.string(),
+  publishedAt: z.string().datetime({ offset: true }),
+});
+export type MeetingMinutesVersion = z.infer<typeof meetingMinutesVersionSchema>;
+
+export const meetingMinutesSchema = z.object({
+  draft: meetingMinutesDraftSchema,
+  versions: z.array(meetingMinutesVersionSchema),
+});
+export type MeetingMinutes = z.infer<typeof meetingMinutesSchema>;
+
+export const updateMeetingMinutesDraftInputSchema = z.object({
+  content: z.string().max(40_000).default(""),
+  decisions: meetingDecisionsSchema,
+  sourceMessageIds: meetingSourceMessageIdsSchema,
+  expectedRevision: z.number().int().nonnegative(),
+});
+export type UpdateMeetingMinutesDraftInput = z.infer<
+  typeof updateMeetingMinutesDraftInputSchema
+>;
+
+export const publishMeetingMinutesInputSchema = z.object({
+  expectedRevision: z.number().int().nonnegative(),
+});
+export type PublishMeetingMinutesInput = z.infer<
+  typeof publishMeetingMinutesInputSchema
+>;
+
+export const meetingActionItemStatusSchema = z.enum([
+  "open",
+  "in_progress",
+  "done",
+  "cancelled",
+]);
+export type MeetingActionItemStatus = z.infer<
+  typeof meetingActionItemStatusSchema
+>;
+
+export const meetingActionItemPrioritySchema = z.enum([
+  "low",
+  "medium",
+  "high",
+  "urgent",
+]);
+export type MeetingActionItemPriority = z.infer<
+  typeof meetingActionItemPrioritySchema
+>;
+
+export const meetingActionItemSourceTypeSchema = z.enum([
+  "manual",
+  "message",
+  "minutes_version",
+]);
+export type MeetingActionItemSourceType = z.infer<
+  typeof meetingActionItemSourceTypeSchema
+>;
+
+export const meetingActionItemSchema = z.object({
+  id: z.string().uuid(),
+  meetingId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  title: z.string(),
+  description: z.string(),
+  ownerKind: z.enum(["human", "agent"]),
+  ownerActorId: z.string(),
+  ownerName: z.string(),
+  dueAt: z.string().datetime({ offset: true }).nullable(),
+  priority: meetingActionItemPrioritySchema,
+  sourceType: meetingActionItemSourceTypeSchema,
+  sourceId: z.string(),
+  sourceVersionId: z.string().uuid().nullable(),
+  sourceMessageIds: meetingSourceMessageIdsSchema,
+  status: meetingActionItemStatusSchema,
+  dedupeKey: z.string(),
+  taskId: z.string().uuid().nullable(),
+  taskStatus: taskStatusSchema.nullable(),
+  assigneeAgentId: z.string().uuid().nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type MeetingActionItem = z.infer<typeof meetingActionItemSchema>;
+
+export const createMeetingActionItemInputSchema = z.object({
+  title: z.string().trim().min(1).max(240),
+  description: z.string().trim().max(20_000).default(""),
+  ownerActorId: z
+    .string()
+    .trim()
+    .regex(/^[a-zA-Z0-9_.:-]{1,180}$/),
+  dueAt: z.string().datetime({ offset: true }).optional(),
+  priority: meetingActionItemPrioritySchema.default("medium"),
+  sourceType: meetingActionItemSourceTypeSchema.default("manual"),
+  sourceId: z.string().trim().min(1).max(180).optional(),
+  sourceVersionId: z.string().uuid().optional(),
+  sourceMessageIds: meetingSourceMessageIdsSchema,
+  dedupeKey: z
+    .string()
+    .trim()
+    .min(1)
+    .max(200)
+    .regex(/^[a-zA-Z0-9_.:-]+$/)
+    .optional(),
+});
+export type CreateMeetingActionItemInput = z.infer<
+  typeof createMeetingActionItemInputSchema
+>;
+
+export const updateMeetingActionItemInputSchema = z.object({
+  status: meetingActionItemStatusSchema,
+});
+export type UpdateMeetingActionItemInput = z.infer<
+  typeof updateMeetingActionItemInputSchema
+>;
+
+export const convertMeetingActionItemInputSchema = z.object({
+  assigneeAgentId: z.string().uuid().optional(),
+  dispatch: z.boolean().default(false),
+});
+export type ConvertMeetingActionItemInput = z.infer<
+  typeof convertMeetingActionItemInputSchema
+>;
+
+export const meetingActionItemConversionSchema = z.object({
+  actionItem: meetingActionItemSchema,
+  task: z.object({
+    id: z.string().uuid(),
+    title: z.string(),
+    status: taskStatusSchema,
+    agentId: z.string().uuid(),
+  }),
+  runId: z.string().uuid().nullable(),
+  reused: z.boolean(),
+});
+export type MeetingActionItemConversion = z.infer<
+  typeof meetingActionItemConversionSchema
+>;
+
+export const meetingTraceabilitySchema = z.object({
+  meetingId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  minutesVersions: z.array(
+    z.object({
+      id: z.string().uuid(),
+      version: z.number().int().positive(),
+      publishedAt: z.string().datetime({ offset: true }),
+    }),
+  ),
+  actionItems: z.array(
+    meetingActionItemSchema.extend({
+      runs: z.array(
+        z.object({
+          id: z.string().uuid(),
+          status: z.string(),
+          output: z.string().nullable(),
+          startedAt: z.string().datetime({ offset: true }).nullable(),
+          endedAt: z.string().datetime({ offset: true }).nullable(),
+        }),
+      ),
+      reviews: z.array(
+        z.object({
+          decision: z.enum(["approve", "return"]),
+          note: z.string(),
+          actorId: z.string(),
+          createdAt: z.string().datetime({ offset: true }),
+        }),
+      ),
+      memories: z.array(
+        z.object({
+          id: z.string().uuid(),
+          topicId: z.string().uuid(),
+          content: z.string(),
+          sourceType: z.string(),
+          sourceId: z.string(),
+          createdAt: z.string().datetime({ offset: true }),
+        }),
+      ),
+    }),
+  ),
+});
+export type MeetingTraceability = z.infer<typeof meetingTraceabilitySchema>;
+
 export const createMeetingInputSchema = z.object({
   projectId: z.string().uuid(),
   title: z.string().trim().min(1).max(160),

@@ -49,6 +49,7 @@ import {
   transferWorkflowApproval,
   validateWorkflowMarkdown,
 } from "./api.js";
+import { MeetingDecisionsPanel } from "./MeetingDecisionsPanel.js";
 import { WorkflowRuntimePanel } from "./WorkflowRuntimePanel.js";
 
 interface ProjectViewProps {
@@ -812,7 +813,10 @@ export function MeetingsView({
   agents,
   projectId,
   onProjectChange,
-}: ProjectViewProps) {
+  onOpenTask,
+}: ProjectViewProps & {
+  onOpenTask: (taskId: string, projectId: string) => void;
+}) {
   const queryClient = useQueryClient();
   const selectedProjectId = projectId || projects[0]?.id || "";
   const [meetingId, setMeetingId] = useState("");
@@ -830,6 +834,11 @@ export function MeetingsView({
     queryFn: () => getMeeting(meetingId),
     enabled: meetingId !== "",
     refetchInterval: 2_000,
+  });
+  const membersQuery = useQuery({
+    queryKey: ["project-members", selectedProjectId],
+    queryFn: () => listProjectMembers(selectedProjectId),
+    enabled: selectedProjectId !== "",
   });
   const createMutation = useMutation({
     mutationFn: () =>
@@ -1043,6 +1052,12 @@ export function MeetingsView({
                   </button>
                 </form>
               )}
+              <MeetingDecisionsPanel
+                meeting={detail}
+                members={membersQuery.data ?? []}
+                agents={agents}
+                onOpenTask={onOpenTask}
+              />
             </>
           )}
         </section>

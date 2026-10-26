@@ -5,7 +5,9 @@ import type {
   Artifact,
   ContextPack,
   ContextReceipt,
+  ConvertMeetingActionItemInput,
   CreateAgentInput,
+  CreateMeetingActionItemInput,
   CreateMemoryClaimInput,
   CreateMemoryTopicInput,
   CreateProjectMemberInput,
@@ -23,8 +25,14 @@ import type {
   IdempotencyCleanupResult,
   Job,
   Meeting,
+  MeetingActionItem,
+  MeetingActionItemConversion,
   MeetingDetail,
   MeetingMessage,
+  MeetingMinutes,
+  MeetingMinutesDraft,
+  MeetingMinutesVersion,
+  MeetingTraceability,
   MemoryClaim,
   MemoryTopic,
   PlatformRunEvent,
@@ -681,6 +689,89 @@ export function closeMeeting(
     method: "POST",
     body: JSON.stringify({ summary }),
   });
+}
+
+export function getMeetingMinutes(meetingId: string): Promise<MeetingMinutes> {
+  return request(`/meetings/${meetingId}/minutes`);
+}
+
+export function saveMeetingMinutesDraft(
+  meetingId: string,
+  input: {
+    content: string;
+    decisions: string[];
+    sourceMessageIds: string[];
+    expectedRevision: number;
+  },
+): Promise<MeetingMinutesDraft> {
+  return request(`/meetings/${meetingId}/minutes/draft`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function publishMeetingMinutes(
+  meetingId: string,
+  expectedRevision: number,
+): Promise<{
+  minutes: MeetingMinutes;
+  version: MeetingMinutesVersion;
+}> {
+  return request(`/meetings/${meetingId}/minutes/publish`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+export async function listMeetingActionItems(
+  meetingId: string,
+): Promise<MeetingActionItem[]> {
+  return (
+    await request<{ items: MeetingActionItem[] }>(
+      `/meetings/${meetingId}/action-items`,
+    )
+  ).items;
+}
+
+export function createMeetingActionItem(
+  meetingId: string,
+  input: CreateMeetingActionItemInput,
+): Promise<MeetingActionItem> {
+  return request(`/meetings/${meetingId}/action-items`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateMeetingActionItem(
+  meetingId: string,
+  actionItemId: string,
+  status: MeetingActionItem["status"],
+): Promise<MeetingActionItem> {
+  return request(`/meetings/${meetingId}/action-items/${actionItemId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export function convertMeetingActionItem(
+  meetingId: string,
+  actionItemId: string,
+  input: ConvertMeetingActionItemInput,
+): Promise<MeetingActionItemConversion> {
+  return request(
+    `/meetings/${meetingId}/action-items/${actionItemId}/convert`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function getMeetingTraceability(
+  meetingId: string,
+): Promise<MeetingTraceability> {
+  return request(`/meetings/${meetingId}/traceability`);
 }
 
 export function subscribeToRun(

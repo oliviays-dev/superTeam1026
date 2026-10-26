@@ -59,6 +59,7 @@ import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
 import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.js";
 import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
 import { RuntimeTraceRepository } from "./runtime-trace-repository.js";
+import { MeetingDecisionsRepository } from "./meeting-decisions-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -1578,6 +1579,7 @@ export class PlatformRepositories {
   readonly workflowRuntime: WorkflowRuntimeRepository;
   readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
+  readonly meetingDecisions: MeetingDecisionsRepository;
   readonly workbench: WorkbenchRepository;
   readonly runtimeReliability: RuntimeReliabilityRepository;
   readonly runtimeEffects: RuntimeEffectRepository;
@@ -1599,6 +1601,7 @@ export class PlatformRepositories {
     this.workflowRuntime = new WorkflowRuntimeRepository(database);
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
+    this.meetingDecisions = new MeetingDecisionsRepository(database);
     this.workbench = new WorkbenchRepository(database);
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
     this.runtimeEffects = new RuntimeEffectRepository(database);

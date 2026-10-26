@@ -647,6 +647,7 @@ export class MeetingRepository {
     input: CreateMeetingInput,
     agents: readonly { id: string; name: string }[],
   ): Promise<Meeting> {
+    const meetingId = randomUUID();
     const participants = [
       { id: "local-admin", name: "Local Admin", kind: "human" as const },
       ...agents
@@ -657,21 +658,33 @@ export class MeetingRepository {
           kind: "agent" as const,
         })),
     ];
-    const result = await this.database.query<MeetingRow>(
-      `INSERT INTO meetings (
-         id, project_id, title, agenda, status, participants,
-         summary, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, 'open', $5::jsonb, '', NOW(), NOW())
-       RETURNING *`,
-      [
-        randomUUID(),
-        input.projectId,
-        input.title,
-        input.agenda,
-        JSON.stringify(participants),
-      ],
-    );
-    return meetingFromRow(result.rows[0]!);
+    return this.database.transaction(async (client) => {
+      const result = await client.query<MeetingRow>(
+        `INSERT INTO meetings (
+           id, project_id, title, agenda, status, participants,
+           summary, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, 'open', $5::jsonb, '', NOW(), NOW())
+         RETURNING *`,
+        [
+          meetingId,
+          input.projectId,
+          input.title,
+          input.agenda,
+          JSON.stringify(participants),
+        ],
+      );
+      await client.query(
+        `INSERT INTO meeting_minutes_drafts (
+           id, meeting_id, project_id, content, decisions, source_message_ids,
+           revision, updated_by, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, '', '[]'::jsonb, '{}'::uuid[], 0,
+           'local-admin', NOW(), NOW()
+         )`,
+        [randomUUID(), meetingId, input.projectId],
+      );
+      return meetingFromRow(result.rows[0]!);
+    });
   }
 
   async detail(id: string): Promise<MeetingDetail | undefined> {

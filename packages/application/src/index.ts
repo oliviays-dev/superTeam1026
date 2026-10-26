@@ -1,11 +1,13 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   Agent,
   AgentDetail,
   ApprovalSlaSweepResult,
   Artifact,
+  ConvertMeetingActionItemInput,
   CosignWorkflowApprovalInput,
   CreateAgentInput,
+  CreateMeetingActionItemInput,
   CreateMeetingInput,
   CreateMemoryClaimInput,
   CreateMemoryTopicInput,
@@ -22,14 +24,21 @@ import type {
   Job,
   JobListQuery,
   Meeting,
+  MeetingActionItem,
+  MeetingActionItemConversion,
   MeetingDetail,
   MeetingMessage,
+  MeetingMinutes,
+  MeetingMinutesDraft,
+  MeetingMinutesVersion,
+  MeetingTraceability,
   MemoryClaim,
   MemoryTopic,
   Project,
   ProjectMember,
   ProjectRole,
   PublishMemoryTruthInput,
+  PublishMeetingMinutesInput,
   RunDetail,
   RunInputSnapshot,
   RetryWorkflowNodeInput,
@@ -43,6 +52,8 @@ import type {
   TransferWorkflowApprovalInput,
   UpdateAgentInput,
   UpdateMemoryClaimInput,
+  UpdateMeetingActionItemInput,
+  UpdateMeetingMinutesDraftInput,
   UpdateProjectMemberInput,
   UpdateProjectInput,
   UpdateProjectRoleInput,
@@ -1006,6 +1017,7 @@ export class PlatformApplication {
     });
     if (input.decision === "return") {
       await this.repositories.tasks.setStatus(taskId, "queued");
+      await this.repositories.meetingDecisions.syncTaskStatus(taskId, "queued");
       return this.getTask(taskId);
     }
     if (latestRun === undefined || latestRun.output === null) {
@@ -1016,6 +1028,7 @@ export class PlatformApplication {
       );
     }
     await this.repositories.tasks.setStatus(taskId, "done");
+    await this.repositories.meetingDecisions.syncTaskStatus(taskId, "done");
     await this.repositories.memory.publishTask({
       projectId: task.projectId,
       taskId: task.id,
@@ -1244,14 +1257,17 @@ export class PlatformApplication {
     return project;
   }
 
-  private async requireProjectOwner(projectId: string): Promise<void> {
+  private async requireProjectOwner(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<void> {
     await this.requireProject(projectId);
     const members =
       await this.repositories.projectMemberships.listMembers(projectId);
     const owner = members.some(
       (member) =>
         member.kind === "human" &&
-        member.actorId === "local-admin" &&
+        member.actorId === actorId &&
         member.owner &&
         member.status === "active",
     );
@@ -1262,6 +1278,22 @@ export class PlatformApplication {
         403,
       );
     }
+  }
+
+  private async requireActiveProjectOwner(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<Project> {
+    const project = await this.requireProject(projectId);
+    if (project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "The project is archived",
+        409,
+      );
+    }
+    await this.requireProjectOwner(projectId, actorId);
+    return project;
   }
 
   async listWorkflows(projectId: string): Promise<WorkflowDefinition[]> {
@@ -3564,46 +3596,484 @@ export class PlatformApplication {
     return keys;
   }
 
-  async listMeetings(projectId: string): Promise<Meeting[]> {
+  async listMeetings(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<Meeting[]> {
+    await this.requireProjectOwner(projectId, actorId);
     return this.repositories.meetings.list(projectId);
   }
 
-  async createMeeting(input: CreateMeetingInput): Promise<Meeting> {
+  async createMeeting(
+    input: CreateMeetingInput,
+    actorId = "local-admin",
+  ): Promise<Meeting> {
+    await this.requireActiveProjectOwner(input.projectId, actorId);
     const agents = await this.repositories.agents.list();
     return this.repositories.meetings.create(input, agents);
   }
 
-  async getMeeting(id: string): Promise<MeetingDetail> {
+  async getMeeting(
+    id: string,
+    actorId = "local-admin",
+  ): Promise<MeetingDetail> {
     const detail = await this.repositories.meetings.detail(id);
     if (detail === undefined) {
       throw new ApplicationError("meeting_not_found", "Meeting not found", 404);
     }
+    await this.requireProjectOwner(detail.meeting.projectId, actorId);
     return detail;
   }
 
   async postMeetingMessage(
     meetingId: string,
     content: string,
+    actorId = "local-admin",
   ): Promise<MeetingMessage> {
-    const detail = await this.getMeeting(meetingId);
+    const detail = await this.getMeeting(meetingId, actorId);
     if (detail.meeting.status === "closed") {
       throw new ApplicationError("meeting_closed", "Meeting is closed", 409);
     }
     return this.repositories.meetings.postMessage(
       meetingId,
       "human",
-      "local-admin",
+      actorId,
       "Local Admin",
       content,
     );
   }
 
-  async closeMeeting(meetingId: string, summary: string): Promise<Meeting> {
+  async closeMeeting(
+    meetingId: string,
+    summary: string,
+    actorId = "local-admin",
+  ): Promise<Meeting> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    if (detail.meeting.status === "closed") {
+      throw new ApplicationError(
+        "meeting_closed",
+        "Meeting is already closed",
+        409,
+      );
+    }
+    if (summary.trim() !== "") {
+      const minutes = await this.getMeetingMinutes(meetingId, actorId);
+      const saved = await this.repositories.meetingDecisions.saveDraft({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        content: summary.trim(),
+        decisions: minutes.draft.decisions,
+        sourceMessageIds: minutes.draft.sourceMessageIds,
+        expectedRevision: minutes.draft.revision,
+        actorId,
+      });
+      if (saved === undefined) {
+        throw new ApplicationError(
+          "meeting_minutes_revision_conflict",
+          "Meeting minutes changed concurrently while closing the meeting",
+          409,
+        );
+      }
+      const published = await this.repositories.meetingDecisions.publish({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        expectedRevision: saved.revision,
+        actorId,
+      });
+      if (published === undefined) {
+        throw new ApplicationError(
+          "meeting_minutes_revision_conflict",
+          "Meeting minutes changed concurrently while closing the meeting",
+          409,
+        );
+      }
+    }
     const meeting = await this.repositories.meetings.close(meetingId, summary);
     if (meeting === undefined) {
       throw new ApplicationError("meeting_not_found", "Meeting not found", 404);
     }
     return meeting;
+  }
+
+  async getMeetingMinutes(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingMinutes> {
+    await this.getMeeting(meetingId, actorId);
+    const minutes =
+      await this.repositories.meetingDecisions.getMinutes(meetingId);
+    if (minutes === undefined) {
+      throw new ApplicationError(
+        "meeting_minutes_not_found",
+        "Meeting minutes draft was not initialized",
+        404,
+      );
+    }
+    return minutes;
+  }
+
+  async saveMeetingMinutesDraft(
+    meetingId: string,
+    input: UpdateMeetingMinutesDraftInput,
+    actorId = "local-admin",
+  ): Promise<MeetingMinutesDraft> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingSourceMessages(detail, input.sourceMessageIds);
+    const saved = await this.repositories.meetingDecisions.saveDraft({
+      meetingId,
+      projectId: detail.meeting.projectId,
+      content: input.content,
+      decisions: input.decisions,
+      sourceMessageIds: input.sourceMessageIds,
+      expectedRevision: input.expectedRevision,
+      actorId,
+    });
+    if (saved === undefined) {
+      const current =
+        await this.repositories.meetingDecisions.getMinutes(meetingId);
+      throw new ApplicationError(
+        "meeting_minutes_revision_conflict",
+        "Meeting minutes were revised by another request",
+        409,
+        { currentRevision: current?.draft.revision ?? null },
+      );
+    }
+    return saved;
+  }
+
+  async publishMeetingMinutes(
+    meetingId: string,
+    input: PublishMeetingMinutesInput,
+    actorId = "local-admin",
+  ): Promise<{
+    readonly minutes: MeetingMinutes;
+    readonly version: MeetingMinutesVersion;
+  }> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    try {
+      const published = await this.repositories.meetingDecisions.publish({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        expectedRevision: input.expectedRevision,
+        actorId,
+      });
+      if (published === undefined) {
+        const current =
+          await this.repositories.meetingDecisions.getMinutes(meetingId);
+        throw new ApplicationError(
+          "meeting_minutes_revision_conflict",
+          "Meeting minutes were revised by another request",
+          409,
+          { currentRevision: current?.draft.revision ?? null },
+        );
+      }
+      return published;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "meeting minutes content is empty"
+      ) {
+        throw new ApplicationError(
+          "meeting_minutes_empty",
+          "Meeting minutes content is required before publishing",
+          400,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async listMeetingActionItems(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingActionItem[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingDecisions.listActionItems(meetingId);
+  }
+
+  async createMeetingActionItem(
+    meetingId: string,
+    input: CreateMeetingActionItemInput,
+    actorId = "local-admin",
+  ): Promise<MeetingActionItem> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    this.assertMeetingSourceMessages(detail, input.sourceMessageIds);
+    const members = await this.repositories.projectMemberships.listMembers(
+      detail.meeting.projectId,
+    );
+    const owner = members.find(
+      (member) =>
+        member.actorId === input.ownerActorId && member.status === "active",
+    );
+    if (
+      owner === undefined ||
+      (owner.kind !== "human" && owner.kind !== "agent")
+    ) {
+      throw new ApplicationError(
+        "action_item_owner_not_member",
+        "The action item owner must be an active project member",
+        409,
+      );
+    }
+    const versions =
+      await this.repositories.meetingDecisions.listMinutesVersions(meetingId);
+    let sourceVersionId = input.sourceVersionId ?? null;
+    let sourceId = input.sourceId ?? actorId;
+    if (input.sourceType === "minutes_version") {
+      const version =
+        (sourceVersionId === null
+          ? versions[0]
+          : versions.find((candidate) => candidate.id === sourceVersionId)) ??
+        undefined;
+      if (version === undefined) {
+        throw new ApplicationError(
+          "meeting_minutes_version_not_found",
+          "The source minutes version is not published for this meeting",
+          409,
+        );
+      }
+      sourceVersionId = version.id;
+      sourceId = version.id;
+    } else if (input.sourceType === "message") {
+      const message = detail.messages.find(
+        (candidate) => candidate.id === input.sourceId,
+      );
+      if (message === undefined) {
+        throw new ApplicationError(
+          "meeting_source_message_not_found",
+          "The source message does not belong to this meeting",
+          409,
+        );
+      }
+      sourceId = message.id;
+    } else {
+      sourceVersionId = null;
+    }
+    const dedupeKey =
+      input.dedupeKey ??
+      `auto-${createHash("sha256")
+        .update(
+          [
+            input.title.trim().toLocaleLowerCase(),
+            owner.actorId,
+            input.dueAt ?? "",
+          ].join("\u0000"),
+        )
+        .digest("hex")
+        .slice(0, 32)}`;
+    try {
+      return await this.repositories.meetingDecisions.createActionItem({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        title: input.title,
+        description: input.description,
+        ownerKind: owner.kind,
+        ownerActorId: owner.actorId,
+        ownerName: owner.name,
+        dueAt: input.dueAt ?? null,
+        priority: input.priority,
+        sourceType: input.sourceType,
+        sourceId,
+        sourceVersionId,
+        sourceMessageIds: input.sourceMessageIds,
+        dedupeKey,
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        const items =
+          await this.repositories.meetingDecisions.listActionItems(meetingId);
+        const existing = items.find(
+          (item) =>
+            item.dedupeKey.toLocaleLowerCase() ===
+            dedupeKey.toLocaleLowerCase(),
+        );
+        throw new ApplicationError(
+          "action_item_duplicate",
+          "An action item with this dedupe key already exists",
+          409,
+          { existingActionItemId: existing?.id ?? null },
+        );
+      }
+      throw error;
+    }
+  }
+
+  async updateMeetingActionItem(
+    meetingId: string,
+    actionItemId: string,
+    input: UpdateMeetingActionItemInput,
+    actorId = "local-admin",
+  ): Promise<MeetingActionItem> {
+    await this.getMeeting(meetingId, actorId);
+    const item = await this.repositories.meetingDecisions.getActionItem(
+      meetingId,
+      actionItemId,
+    );
+    if (item === undefined) {
+      throw new ApplicationError(
+        "action_item_not_found",
+        "Meeting action item not found",
+        404,
+      );
+    }
+    if (item.taskId !== null) {
+      throw new ApplicationError(
+        "action_item_managed_by_task",
+        "Converted action item status follows its task",
+        409,
+      );
+    }
+    const updated =
+      await this.repositories.meetingDecisions.updateActionItemStatus(
+        meetingId,
+        actionItemId,
+        input.status,
+      );
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "action_item_not_found",
+        "Meeting action item not found",
+        404,
+      );
+    }
+    return updated;
+  }
+
+  async convertMeetingActionItem(
+    meetingId: string,
+    actionItemId: string,
+    input: ConvertMeetingActionItemInput,
+    actorId = "local-admin",
+  ): Promise<MeetingActionItemConversion> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    const project = await this.requireActiveProjectOwner(
+      detail.meeting.projectId,
+      actorId,
+    );
+    const item = await this.repositories.meetingDecisions.getActionItem(
+      meetingId,
+      actionItemId,
+    );
+    if (item === undefined) {
+      throw new ApplicationError(
+        "action_item_not_found",
+        "Meeting action item not found",
+        404,
+      );
+    }
+    const members = await this.repositories.projectMemberships.listMembers(
+      project.id,
+    );
+    const requestedAgentId =
+      input.assigneeAgentId ??
+      (item.ownerKind === "agent" ? item.ownerActorId : undefined);
+    if (requestedAgentId === undefined) {
+      throw new ApplicationError(
+        "action_item_assignee_required",
+        "Select an active AI project member for the converted task",
+        400,
+      );
+    }
+    const member = members.find(
+      (candidate) =>
+        candidate.kind === "agent" &&
+        candidate.actorId === requestedAgentId &&
+        candidate.status === "active",
+    );
+    if (member === undefined) {
+      throw new ApplicationError(
+        "action_item_assignee_not_member",
+        "The task assignee must be an active AI project member",
+        409,
+      );
+    }
+    const agent = await this.repositories.agents.get(member.actorId, true);
+    if (agent === undefined) {
+      throw new ApplicationError(
+        "agent_not_found",
+        "Task assignee agent was not found",
+        404,
+      );
+    }
+    requireExecutableRuntime(agent);
+    let converted: { readonly taskId: string; readonly reused: boolean };
+    try {
+      converted = await this.repositories.meetingDecisions.convertActionItem({
+        meetingId,
+        actionItemId,
+        projectId: project.id,
+        assigneeAgentId: member.actorId,
+        actorId,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "cancelled action item cannot be converted"
+      ) {
+        throw new ApplicationError(
+          "action_item_cancelled",
+          "A cancelled action item cannot be converted",
+          409,
+        );
+      }
+      if (error instanceof Error && error.message === "project archived") {
+        throw new ApplicationError(
+          "project_archived",
+          "Action items cannot be converted in an archived project",
+          409,
+        );
+      }
+      throw error;
+    }
+    const task = await this.getTask(converted.taskId);
+    let runId: string | null = null;
+    if (input.dispatch && task.status === "queued") {
+      runId = (await this.dispatchTask(task.id)).runId;
+    } else if (task.status === "in_progress" || task.status === "review") {
+      const runs = await this.repositories.runs.listByTask(task.id);
+      runId = runs[0]?.id ?? null;
+    }
+    const updatedItem = await this.repositories.meetingDecisions.getActionItem(
+      meetingId,
+      actionItemId,
+    );
+    if (updatedItem === undefined) {
+      throw new Error("converted action item is missing");
+    }
+    return {
+      actionItem: updatedItem,
+      task: {
+        id: task.id,
+        title: task.title,
+        status: (await this.getTask(task.id)).status,
+        agentId: task.agentId,
+      },
+      runId,
+      reused: converted.reused,
+    };
+  }
+
+  async getMeetingTraceability(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingTraceability> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingDecisions.traceability(meetingId);
+  }
+
+  private assertMeetingSourceMessages(
+    detail: MeetingDetail,
+    sourceMessageIds: readonly string[],
+  ): void {
+    const existing = new Set(detail.messages.map((message) => message.id));
+    if (sourceMessageIds.some((id) => !existing.has(id))) {
+      throw new ApplicationError(
+        "meeting_source_message_not_found",
+        "All source messages must belong to this meeting",
+        409,
+      );
+    }
   }
 }
 

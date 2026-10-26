@@ -1112,3 +1112,129 @@ ALTER TABLE task_events
     'transfer'
   ));
 `;
+
+export const MEETING_DECISIONS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS meeting_minutes_drafts (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL UNIQUE REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  content TEXT NOT NULL DEFAULT '',
+  decisions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  source_message_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  updated_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meeting_minutes_versions (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL CHECK (version > 0),
+  content TEXT NOT NULL,
+  decisions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  source_message_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+  published_by TEXT NOT NULL,
+  published_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (meeting_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS meeting_minutes_versions_meeting_idx
+  ON meeting_minutes_versions(meeting_id, version DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_minutes_version_update()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'meeting minutes versions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_minutes_versions_immutable
+  ON meeting_minutes_versions;
+
+CREATE TRIGGER meeting_minutes_versions_immutable
+BEFORE UPDATE ON meeting_minutes_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_minutes_version_update();
+
+CREATE TABLE IF NOT EXISTS meeting_action_items (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  owner_kind TEXT NOT NULL CHECK (owner_kind IN ('human', 'agent')),
+  owner_actor_id TEXT NOT NULL,
+  owner_name TEXT NOT NULL,
+  due_at TIMESTAMPTZ,
+  priority TEXT NOT NULL DEFAULT 'medium'
+    CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
+  source_type TEXT NOT NULL
+    CHECK (source_type IN ('manual', 'message', 'minutes_version')),
+  source_id TEXT NOT NULL,
+  source_version_id UUID
+    REFERENCES meeting_minutes_versions(id) ON DELETE SET NULL,
+  source_message_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'in_progress', 'done', 'cancelled')),
+  dedupe_key TEXT NOT NULL,
+  task_id UUID UNIQUE REFERENCES tasks(id) ON DELETE SET NULL,
+  converted_by TEXT,
+  converted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS meeting_action_items_dedupe_idx
+  ON meeting_action_items(meeting_id, lower(dedupe_key));
+
+CREATE INDEX IF NOT EXISTS meeting_action_items_meeting_idx
+  ON meeting_action_items(meeting_id, status, created_at);
+
+CREATE INDEX IF NOT EXISTS meeting_action_items_task_idx
+  ON meeting_action_items(task_id)
+  WHERE task_id IS NOT NULL;
+
+INSERT INTO meeting_minutes_drafts (
+  id, meeting_id, project_id, content, decisions, source_message_ids,
+  revision, updated_by, created_at, updated_at
+)
+SELECT
+  gen_random_uuid(),
+  meeting.id,
+  meeting.project_id,
+  meeting.summary,
+  '[]'::jsonb,
+  '{}'::uuid[],
+  CASE WHEN meeting.summary = '' THEN 0 ELSE 1 END,
+  'local-admin',
+  meeting.created_at,
+  meeting.updated_at
+FROM meetings AS meeting
+ON CONFLICT (meeting_id) DO NOTHING;
+
+INSERT INTO meeting_minutes_versions (
+  id, meeting_id, project_id, version, content, decisions,
+  source_message_ids, published_by, published_at
+)
+SELECT
+  gen_random_uuid(),
+  meeting.id,
+  meeting.project_id,
+  1,
+  meeting.summary,
+  '[]'::jsonb,
+  '{}'::uuid[],
+  'local-admin',
+  meeting.updated_at
+FROM meetings AS meeting
+WHERE meeting.summary <> ''
+  AND NOT EXISTS (
+    SELECT 1
+    FROM meeting_minutes_versions AS version
+    WHERE version.meeting_id = meeting.id
+  );
+`;
