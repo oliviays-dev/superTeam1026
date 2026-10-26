@@ -15,6 +15,11 @@ import {
   createProjectMemberInputSchema,
   createProjectInputSchema,
   createProjectRoleInputSchema,
+  createProjectTemplateInputSchema,
+  createTemplateRoleInputSchema,
+  createWorkflowTemplateInputSchema,
+  copyProjectTemplateInputSchema,
+  archiveProjectTemplateInputSchema,
   createSupplyExceptionInputSchema,
   createSupplierRiskInputSchema,
   createTaskMessageInputSchema,
@@ -50,6 +55,9 @@ import {
   updateProjectMemberInputSchema,
   updateProjectInputSchema,
   updateProjectRoleInputSchema,
+  updateProjectTemplateInputSchema,
+  updateTemplateRoleInputSchema,
+  updateWorkflowTemplateInputSchema,
   updateTaskInputSchema,
   updateWorkbenchBriefSettingsInputSchema,
   transferWorkflowApprovalInputSchema,
@@ -116,6 +124,21 @@ const projectMemberParamsSchema = z.object({
 const projectRoleParamsSchema = z.object({
   projectId: z.string().uuid(),
   roleId: z.string().uuid(),
+});
+const projectTemplateParamsSchema = z.object({
+  templateId: z.string().uuid(),
+});
+const templateRoleParamsSchema = z.object({
+  roleId: z.string().uuid(),
+});
+const workflowTemplateParamsSchema = z.object({
+  workflowTemplateId: z.string().uuid(),
+});
+const templateListQuerySchema = z.object({
+  includeArchived: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
 });
 const memoryTopicParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -215,7 +238,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 17;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 18;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -402,6 +425,16 @@ export function buildApi(options: BuildApiOptions): {
     });
   });
 
+  app.get("/api/v1/viewer", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const platformAdministrator = actorId === localActorId;
+    return reply.send({
+      actorId,
+      platformAdministrator,
+      canManageProjectTemplates: platformAdministrator,
+    });
+  });
+
   app.get("/api/v1/ready", async (_request, reply) => {
     let databaseReady = false;
     let databaseDetail = "database reachable";
@@ -518,8 +551,191 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/projects", async (request, reply) => {
     const input = createProjectInputSchema.parse(request.body);
-    return reply.status(201).send(await application.createProject(input));
+    const actorId = requestActorId(request.headers);
+    const administrator = actorId === localActorId;
+    const actorName = actorId === localActorId ? "Local Admin" : actorId;
+    if (input.templateId !== undefined) {
+      const idempotencyKey =
+        requestIdempotencyKey(request.headers) ?? input.materializationKey;
+      if (idempotencyKey === undefined) {
+        throw new ApplicationError(
+          "materialization_key_required",
+          "Idempotency-Key or materializationKey is required when creating a project from a template",
+          400,
+        );
+      }
+      return reply.status(201).send(
+        await application.createProjectFromTemplate({
+          project: input,
+          actorId,
+          actorName,
+          administrator,
+          idempotencyKey,
+          requestHash: requestHash({
+            operation: "project.template.materialize",
+            actorId,
+            payload: input,
+          }),
+        }),
+      );
+    }
+    return reply
+      .status(201)
+      .send(await application.createProject(input, actorId, actorName));
   });
+
+  app.get("/api/v1/project-templates", async (request, reply) => {
+    const query = templateListQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    const administrator = actorId === localActorId;
+    return reply.send({
+      items: await application.listProjectTemplates(
+        actorId,
+        administrator,
+        administrator && (query.includeArchived ?? false),
+      ),
+    });
+  });
+
+  app.post("/api/v1/project-templates", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    const input = createProjectTemplateInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.createProjectTemplate(input, actorId));
+  });
+
+  app.get("/api/v1/project-templates/:templateId", async (request, reply) => {
+    const { templateId } = projectTemplateParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.getProjectTemplate(
+        templateId,
+        actorId,
+        actorId === localActorId,
+      ),
+    );
+  });
+
+  app.patch("/api/v1/project-templates/:templateId", async (request, reply) => {
+    const { templateId } = projectTemplateParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    const input = updateProjectTemplateInputSchema.parse(request.body);
+    return reply.send(
+      await application.updateProjectTemplate(templateId, input, actorId),
+    );
+  });
+
+  app.post(
+    "/api/v1/project-templates/:templateId/copy",
+    async (request, reply) => {
+      const { templateId } = projectTemplateParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      assertAdministrator(actorId);
+      const input = copyProjectTemplateInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await application.copyProjectTemplate(templateId, input, actorId),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/project-templates/:templateId/archive",
+    async (request, reply) => {
+      const { templateId } = projectTemplateParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      assertAdministrator(actorId);
+      const input = archiveProjectTemplateInputSchema.parse(request.body);
+      return reply.send(
+        await application.archiveProjectTemplate(templateId, input, actorId),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/project-templates/:templateId/history",
+    async (request, reply) => {
+      const { templateId } = projectTemplateParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      assertAdministrator(actorId);
+      return reply.send({
+        items: await application.listProjectTemplateHistory(templateId),
+      });
+    },
+  );
+
+  app.get("/api/v1/template-roles", async (request, reply) => {
+    const query = templateListQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    return reply.send({
+      items: await application.listTemplateRoles(
+        query.includeArchived ?? false,
+      ),
+    });
+  });
+
+  app.post("/api/v1/template-roles", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    const input = createTemplateRoleInputSchema.parse(request.body);
+    return reply.status(201).send(await application.createTemplateRole(input));
+  });
+
+  app.patch("/api/v1/template-roles/:roleId", async (request, reply) => {
+    const { roleId } = templateRoleParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    const input = updateTemplateRoleInputSchema.parse(request.body);
+    return reply.send(await application.updateTemplateRole(roleId, input));
+  });
+
+  app.delete("/api/v1/template-roles/:roleId", async (request, reply) => {
+    const { roleId } = templateRoleParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    await application.deleteTemplateRole(roleId);
+    return reply.status(204).send();
+  });
+
+  app.get("/api/v1/workflow-templates", async (request, reply) => {
+    const query = templateListQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    return reply.send({
+      items: await application.listWorkflowTemplates(
+        query.includeArchived ?? false,
+      ),
+    });
+  });
+
+  app.post("/api/v1/workflow-templates", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    assertAdministrator(actorId);
+    const input = createWorkflowTemplateInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.createWorkflowTemplate(input));
+  });
+
+  app.patch(
+    "/api/v1/workflow-templates/:workflowTemplateId",
+    async (request, reply) => {
+      const { workflowTemplateId } = workflowTemplateParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      assertAdministrator(actorId);
+      const input = updateWorkflowTemplateInputSchema.parse(request.body);
+      return reply.send(
+        await application.updateWorkflowTemplate(workflowTemplateId, input),
+      );
+    },
+  );
 
   app.get("/api/v1/projects/:projectId", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);

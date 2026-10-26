@@ -10,6 +10,8 @@ export const projectSchema = z.object({
   code: z.string().trim().min(1).max(40),
   description: z.string().max(2_000).default(""),
   status: projectStatusSchema.default("active"),
+  sourceTemplateId: z.string().uuid().nullable().default(null),
+  sourceTemplateRevision: z.number().int().positive().nullable().default(null),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
@@ -25,6 +27,14 @@ export const createProjectInputSchema = z.object({
     .regex(/^[A-Z][A-Z0-9-]*$/)
     .optional(),
   description: z.string().trim().max(2_000).default(""),
+  templateId: z.string().uuid().optional(),
+  materializationKey: z
+    .string()
+    .trim()
+    .min(8)
+    .max(200)
+    .regex(/^[a-zA-Z0-9_.:-]+$/)
+    .optional(),
 });
 export type CreateProjectInput = z.infer<typeof createProjectInputSchema>;
 

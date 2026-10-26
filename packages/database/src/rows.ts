@@ -15,6 +15,8 @@ export interface ProjectRow {
   code: string;
   description: string;
   status: Project["status"];
+  source_template_id: string | null;
+  source_template_revision: number | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -122,6 +124,8 @@ export function projectFromRow(row: ProjectRow): Project {
     code: row.code,
     description: row.description,
     status: row.status,
+    sourceTemplateId: row.source_template_id,
+    sourceTemplateRevision: row.source_template_revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };

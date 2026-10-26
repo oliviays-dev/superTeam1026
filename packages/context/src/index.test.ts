@@ -11,6 +11,8 @@ describe("buildTaskContext", () => {
         code: "SUPPLY-0001",
         description: "Supply chain project",
         status: "active",
+        sourceTemplateId: null,
+        sourceTemplateRevision: null,
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-01T00:00:00.000Z",
       },

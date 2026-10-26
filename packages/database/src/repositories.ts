@@ -62,6 +62,7 @@ import { RuntimeTraceRepository } from "./runtime-trace-repository.js";
 import { MeetingDecisionsRepository } from "./meeting-decisions-repository.js";
 import { MemoryClosureRepository } from "./memory-closure-repository.js";
 import { WorkbenchReportsRepository } from "./workbench-reports-repository.js";
+import { ProjectTemplatesRepository } from "./project-templates-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -82,7 +83,11 @@ export class ProjectRepository {
     return row === undefined ? undefined : projectFromRow(row);
   }
 
-  async create(input: CreateProjectInput): Promise<Project> {
+  async create(
+    input: CreateProjectInput,
+    actorId = "local-admin",
+    actorName = "Local Admin",
+  ): Promise<Project> {
     const id = randomUUID();
     const code =
       input.code ?? `PRJ-${Date.now().toString(36).toUpperCase().slice(-6)}`;
@@ -99,17 +104,22 @@ export class ProjectRepository {
       const responsibility = "负责项目目标、范围、成员和最终验收。";
       await client.query(
         `INSERT INTO project_roles (
-           id, project_id, name, description, created_at, updated_at
-         ) VALUES ($1, $2, '项目负责人', $3, NOW(), NOW())`,
+           id, project_id, code, name, category, description, permissions,
+           created_at, updated_at
+         ) VALUES (
+           $1, $2, 'PROJECT_OWNER', '项目负责人', 'management', $3,
+           '["read","write","approve","manage_members","manage_roles"]'::jsonb,
+           NOW(), NOW()
+         )`,
         [roleId, id, responsibility],
       );
       await client.query(
         `INSERT INTO project_members (
            id, project_id, kind, actor_id, name, responsibility,
            status, is_owner, created_at, updated_at
-         ) VALUES ($1, $2, 'human', 'local-admin', 'Local Admin', $3,
+         ) VALUES ($1, $2, 'human', $4, $5, $3,
                    'active', TRUE, NOW(), NOW())`,
-        [memberId, id, responsibility],
+        [memberId, id, responsibility, actorId, actorName],
       );
       await client.query(
         `INSERT INTO project_member_roles (project_member_id, role_id)
@@ -1574,6 +1584,7 @@ export class PlatformRepositories {
   readonly jobs: JobRepository;
   readonly contexts: ContextRepository;
   readonly projectMemberships: ProjectMembershipRepository;
+  readonly projectTemplates: ProjectTemplatesRepository;
   readonly artifacts: ArtifactRepository;
   readonly memory: MemoryRepository;
   readonly memoryClosure: MemoryClosureRepository;
@@ -1598,6 +1609,7 @@ export class PlatformRepositories {
     this.jobs = new JobRepository(database);
     this.contexts = new ContextRepository(database);
     this.projectMemberships = new ProjectMembershipRepository(database);
+    this.projectTemplates = new ProjectTemplatesRepository(database);
     this.artifacts = new ArtifactRepository(database);
     this.memory = new MemoryRepository(database);
     this.memoryClosure = new MemoryClosureRepository(database, this.memory);

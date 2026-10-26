@@ -4,22 +4,43 @@ import {
   taskStatusSchema,
   type Agent,
 } from "./platform.js";
+import {
+  templateRoleCategorySchema,
+  templateRolePermissionSchema,
+} from "./project-templates.js";
 
 export const projectRoleSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
+  code: z.string().trim().max(80).default(""),
   name: z.string().trim().min(1).max(80),
+  category: templateRoleCategorySchema.default("execution"),
   description: z.string().trim().max(1_000),
+  permissions: z.array(templateRolePermissionSchema).max(5).default(["read"]),
+  libraryRoleId: z.string().uuid().nullable().default(null),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type ProjectRole = z.infer<typeof projectRoleSchema>;
 
 export const createProjectRoleInputSchema = z.object({
+  code: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .regex(/^[A-Z][A-Z0-9_]*$/)
+    .optional(),
   name: z.string().trim().min(1).max(80),
+  category: templateRoleCategorySchema.default("execution"),
   description: z.string().trim().max(1_000).default(""),
+  permissions: z
+    .array(templateRolePermissionSchema)
+    .min(1)
+    .max(5)
+    .default(["read"]),
 });
-export type CreateProjectRoleInput = z.infer<
+export type CreateProjectRoleInput = z.input<
   typeof createProjectRoleInputSchema
 >;
 
@@ -574,6 +595,8 @@ export const workflowDefinitionSchema = z.object({
   sourceMarkdown: z.string(),
   graph: workflowGraphSchema.nullable(),
   status: z.enum(["active", "archived"]),
+  sourceTemplateId: z.string().uuid().nullable().default(null),
+  sourceTemplateVersion: z.number().int().positive().nullable().default(null),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });

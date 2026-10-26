@@ -41,8 +41,12 @@ describe("project code", () => {
 const projectRole: ProjectRole = {
   id: "00000000-0000-4000-8000-000000000101",
   projectId: "00000000-0000-4000-8000-000000000001",
+  code: "DEVELOPER",
   name: "Developer",
+  category: "execution",
   description: "",
+  permissions: ["read"],
+  libraryRoleId: null,
   createdAt: "2026-10-25T08:00:00.000Z",
   updatedAt: "2026-10-25T08:00:00.000Z",
 };

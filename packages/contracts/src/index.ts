@@ -6,3 +6,4 @@ export * from "./runtime-reliability.js";
 export * from "./trace.js";
 export * from "./trace-projection.js";
 export * from "./workbench-reports.js";
+export * from "./project-templates.js";

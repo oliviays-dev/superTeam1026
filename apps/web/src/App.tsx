@@ -21,7 +21,8 @@ import {
   WorkflowsView,
 } from "./OperationsViews.js";
 import { ProjectsView, TasksView } from "./WorkspaceViews.js";
-import { listAllAgents, listProjects } from "./api.js";
+import { ProjectTemplatesView } from "./ProjectTemplatesView.js";
+import { getViewerCapabilities, listAllAgents, listProjects } from "./api.js";
 import type { WorkbenchSourceRef } from "@pluginmax/contracts";
 
 type AppView =
@@ -31,7 +32,8 @@ type AppView =
   | "workflows"
   | "meetings"
   | "agents"
-  | "operations";
+  | "operations"
+  | "project-templates";
 
 type Theme = "dark" | "light";
 
@@ -62,6 +64,10 @@ export function App() {
   const agentsQuery = useQuery({
     queryKey: ["agents", "all"],
     queryFn: listAllAgents,
+  });
+  const viewerQuery = useQuery({
+    queryKey: ["viewer"],
+    queryFn: getViewerCapabilities,
   });
   const [projectId, setProjectId] = useState("");
   const [taskId, setTaskId] = useState("");
@@ -328,11 +334,18 @@ export function App() {
             onOpenTask={openTask}
             onOpenMeeting={openMeeting}
             onOpenSource={openSource}
+            canManageTemplates={
+              viewerQuery.data?.canManageProjectTemplates ?? false
+            }
+            onOpenTemplates={() => setView("project-templates")}
             {...(projectReportId === undefined
               ? {}
               : { initialReportId: projectReportId })}
             initialTab={projectTab}
           />
+        )}
+        {view === "project-templates" && (
+          <ProjectTemplatesView onBack={() => setView("projects")} />
         )}
         {view === "tasks" && (
           <TasksView

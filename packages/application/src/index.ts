@@ -48,6 +48,8 @@ import type {
   Project,
   ProjectMember,
   ProjectRole,
+  ProjectTemplate,
+  ProjectTemplateRevisionSummary,
   ProjectReportDetail,
   ProjectReportGenerationResult,
   ProjectReportQuery,
@@ -55,6 +57,16 @@ import type {
   PublishMemoryTruthInput,
   PublishMeetingMinutesInput,
   ReviewMemoryClaimsInput,
+  CreateProjectTemplateInput,
+  CreateTemplateRoleInput,
+  CreateWorkflowTemplateInput,
+  CopyProjectTemplateInput,
+  ArchiveProjectTemplateInput,
+  TemplateRole,
+  UpdateProjectTemplateInput,
+  UpdateTemplateRoleInput,
+  UpdateWorkflowTemplateInput,
+  WorkflowTemplate,
   RunDetail,
   RunInputSnapshot,
   RetryWorkflowNodeInput,
@@ -121,6 +133,7 @@ import {
 } from "@pluginmax/domain";
 import {
   MemoryReviewConflictError,
+  ProjectTemplateRepositoryError,
   type PlatformRepositories,
   type TaskAttachment,
   todayInShanghai,
@@ -180,8 +193,242 @@ export class PlatformApplication {
     return this.repositories.projects.list();
   }
 
-  createProject(input: CreateProjectInput): Promise<Project> {
-    return this.repositories.projects.create(input);
+  createProject(
+    input: CreateProjectInput,
+    actorId = "local-admin",
+    actorName = "Local Admin",
+  ): Promise<Project> {
+    return this.repositories.projects.create(input, actorId, actorName);
+  }
+
+  async createProjectFromTemplate(input: {
+    readonly project: CreateProjectInput;
+    readonly actorId: string;
+    readonly actorName: string;
+    readonly administrator: boolean;
+    readonly idempotencyKey: string;
+    readonly requestHash: string;
+  }): Promise<Project> {
+    try {
+      const materialized =
+        await this.repositories.projectTemplates.materializeProjectTemplate({
+          templateId: input.project.templateId!,
+          projectName: input.project.name,
+          projectCode: input.project.code,
+          projectDescription: input.project.description,
+          actorId: input.actorId,
+          actorName: input.actorName,
+          administrator: input.administrator,
+          idempotencyKey: input.idempotencyKey,
+          requestHash: input.requestHash,
+        });
+      return materialized.project;
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async listProjectTemplates(
+    actorId: string,
+    administrator: boolean,
+    includeArchived = false,
+  ): Promise<ProjectTemplate[]> {
+    try {
+      return await this.repositories.projectTemplates.listProjectTemplates({
+        actorId,
+        administrator,
+        includeArchived,
+      });
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async getProjectTemplate(
+    templateId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ProjectTemplate> {
+    try {
+      const template =
+        await this.repositories.projectTemplates.getProjectTemplate(templateId);
+      if (template === undefined) {
+        throw new ApplicationError(
+          "template_not_found",
+          "Project template not found",
+          404,
+        );
+      }
+      if (
+        !administrator &&
+        (template.status !== "active" ||
+          (template.accessPolicy === "selected-members" &&
+            !template.allowedActorIds.includes(actorId)))
+      ) {
+        throw new ApplicationError(
+          "template_forbidden",
+          "The actor is not allowed to use this project template",
+          403,
+        );
+      }
+      return template;
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async createProjectTemplate(
+    input: CreateProjectTemplateInput,
+    actorId: string,
+  ): Promise<ProjectTemplate> {
+    try {
+      return await this.repositories.projectTemplates.createProjectTemplate(
+        input,
+        actorId,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async updateProjectTemplate(
+    templateId: string,
+    input: UpdateProjectTemplateInput,
+    actorId: string,
+  ): Promise<ProjectTemplate> {
+    try {
+      return await this.repositories.projectTemplates.updateProjectTemplate(
+        templateId,
+        input,
+        actorId,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async copyProjectTemplate(
+    templateId: string,
+    input: CopyProjectTemplateInput,
+    actorId: string,
+  ): Promise<ProjectTemplate> {
+    try {
+      return await this.repositories.projectTemplates.copyProjectTemplate(
+        templateId,
+        input,
+        actorId,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async archiveProjectTemplate(
+    templateId: string,
+    input: ArchiveProjectTemplateInput,
+    actorId: string,
+  ): Promise<ProjectTemplate> {
+    try {
+      return await this.repositories.projectTemplates.archiveProjectTemplate(
+        templateId,
+        input,
+        actorId,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async listProjectTemplateHistory(
+    templateId: string,
+  ): Promise<ProjectTemplateRevisionSummary[]> {
+    try {
+      return await this.repositories.projectTemplates.listProjectTemplateHistory(
+        templateId,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async listTemplateRoles(includeArchived = false): Promise<TemplateRole[]> {
+    try {
+      return await this.repositories.projectTemplates.listTemplateRoles(
+        includeArchived,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async createTemplateRole(
+    input: CreateTemplateRoleInput,
+  ): Promise<TemplateRole> {
+    try {
+      return await this.repositories.projectTemplates.createTemplateRole(input);
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async updateTemplateRole(
+    roleId: string,
+    input: UpdateTemplateRoleInput,
+  ): Promise<TemplateRole> {
+    try {
+      return await this.repositories.projectTemplates.updateTemplateRole(
+        roleId,
+        input,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async deleteTemplateRole(roleId: string): Promise<void> {
+    try {
+      await this.repositories.projectTemplates.deleteTemplateRole(roleId);
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async listWorkflowTemplates(
+    includeArchived = false,
+  ): Promise<WorkflowTemplate[]> {
+    try {
+      return await this.repositories.projectTemplates.listWorkflowTemplates(
+        includeArchived,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async createWorkflowTemplate(
+    input: CreateWorkflowTemplateInput,
+  ): Promise<WorkflowTemplate> {
+    try {
+      return await this.repositories.projectTemplates.createWorkflowTemplate(
+        input,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
+  }
+
+  async updateWorkflowTemplate(
+    workflowTemplateId: string,
+    input: UpdateWorkflowTemplateInput,
+  ): Promise<WorkflowTemplate> {
+    try {
+      return await this.repositories.projectTemplates.updateWorkflowTemplate(
+        workflowTemplateId,
+        input,
+      );
+    } catch (error) {
+      throw translateProjectTemplateError(error);
+    }
   }
 
   async listProjectRoles(projectId: string): Promise<ProjectRole[]> {
@@ -4971,6 +5218,19 @@ function instanceStatusAudit(
     return [{ kind: "instance.cancelled", summary: "工作流已取消" }];
   }
   return [];
+}
+
+function translateProjectTemplateError(error: unknown): Error {
+  if (error instanceof ApplicationError) return error;
+  if (error instanceof ProjectTemplateRepositoryError) {
+    return new ApplicationError(
+      error.code,
+      error.message,
+      error.statusCode,
+      error.details,
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export * from "./run-executor.js";

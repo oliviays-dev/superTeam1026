@@ -431,6 +431,8 @@ interface WorkflowRow {
   source_md: string;
   graph: WorkflowGraph | null;
   status: WorkflowDefinition["status"];
+  source_template_id: string | null;
+  source_template_version: number | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -807,6 +809,8 @@ function workflowFromRow(row: WorkflowRow): WorkflowDefinition {
     sourceMarkdown: row.source_md ?? "",
     graph: row.graph ?? null,
     status: row.status,
+    sourceTemplateId: row.source_template_id,
+    sourceTemplateVersion: row.source_template_version,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };

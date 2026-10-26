@@ -22,7 +22,10 @@ import type {
   DecideWorkflowApprovalInput,
   ArchiveTaskAttachmentInput,
   CreateProjectInput,
+  CreateProjectTemplateInput,
   CreateTaskInput,
+  CreateTemplateRoleInput,
+  CreateWorkflowTemplateInput,
   CreateWorkflowInput,
   CosignWorkflowApprovalInput,
   ImportWorkflowMarkdownInput,
@@ -48,6 +51,8 @@ import type {
   Project,
   ProjectMember,
   ProjectRole,
+  ProjectTemplate,
+  ProjectTemplateRevisionSummary,
   ProjectReportDetail,
   ProjectReportGenerationResult,
   ProjectReportSummary,
@@ -70,6 +75,9 @@ import type {
   UpdateProjectMemberInput,
   UpdateProjectInput,
   UpdateProjectRoleInput,
+  UpdateProjectTemplateInput,
+  UpdateTemplateRoleInput,
+  UpdateWorkflowTemplateInput,
   UpdateTaskInput,
   UpdateWorkbenchBriefSettingsInput,
   ValidateWorkflowMarkdownInput,
@@ -79,6 +87,11 @@ import type {
   WorkbenchDashboard,
   WorkbenchFollow,
   WorkflowDefinition,
+  WorkflowTemplate,
+  TemplateRole,
+  CopyProjectTemplateInput,
+  ArchiveProjectTemplateInput,
+  ViewerCapabilities,
   WorkflowAuditPage,
   WorkflowAuditKind,
   WorkflowInstance,
@@ -148,9 +161,135 @@ export async function listProjects(): Promise<Project[]> {
   return (await request<ListResponse<Project>>("/projects")).items;
 }
 
-export function createProject(input: CreateProjectInput): Promise<Project> {
+export function createProject(
+  input: CreateProjectInput,
+  idempotencyKey?: string,
+): Promise<Project> {
   return request("/projects", {
     method: "POST",
+    ...(idempotencyKey === undefined
+      ? {}
+      : { headers: { "idempotency-key": idempotencyKey } }),
+    body: JSON.stringify(input),
+  });
+}
+
+export function getViewerCapabilities(): Promise<ViewerCapabilities> {
+  return request("/viewer");
+}
+
+export async function listProjectTemplates(
+  includeArchived = false,
+): Promise<ProjectTemplate[]> {
+  return (
+    await request<{ items: ProjectTemplate[] }>(
+      `/project-templates${includeArchived ? "?includeArchived=1" : ""}`,
+    )
+  ).items;
+}
+
+export function createProjectTemplate(
+  input: CreateProjectTemplateInput,
+): Promise<ProjectTemplate> {
+  return request("/project-templates", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateProjectTemplate(
+  templateId: string,
+  input: UpdateProjectTemplateInput,
+): Promise<ProjectTemplate> {
+  return request(`/project-templates/${templateId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function copyProjectTemplate(
+  templateId: string,
+  input: CopyProjectTemplateInput,
+): Promise<ProjectTemplate> {
+  return request(`/project-templates/${templateId}/copy`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function archiveProjectTemplate(
+  templateId: string,
+  input: ArchiveProjectTemplateInput,
+): Promise<ProjectTemplate> {
+  return request(`/project-templates/${templateId}/archive`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listProjectTemplateHistory(
+  templateId: string,
+): Promise<ProjectTemplateRevisionSummary[]> {
+  return (
+    await request<{ items: ProjectTemplateRevisionSummary[] }>(
+      `/project-templates/${templateId}/history`,
+    )
+  ).items;
+}
+
+export async function listTemplateRoles(
+  includeArchived = false,
+): Promise<TemplateRole[]> {
+  return (
+    await request<{ items: TemplateRole[] }>(
+      `/template-roles${includeArchived ? "?includeArchived=1" : ""}`,
+    )
+  ).items;
+}
+
+export function createTemplateRole(
+  input: CreateTemplateRoleInput,
+): Promise<TemplateRole> {
+  return request("/template-roles", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateTemplateRole(
+  roleId: string,
+  input: UpdateTemplateRoleInput,
+): Promise<TemplateRole> {
+  return request(`/template-roles/${roleId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteTemplateRole(roleId: string): Promise<void> {
+  await request<void>(`/template-roles/${roleId}`, { method: "DELETE" });
+}
+
+export async function listWorkflowTemplates(): Promise<WorkflowTemplate[]> {
+  return (await request<{ items: WorkflowTemplate[] }>("/workflow-templates"))
+    .items;
+}
+
+export function createWorkflowTemplate(
+  input: CreateWorkflowTemplateInput,
+): Promise<WorkflowTemplate> {
+  return request("/workflow-templates", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWorkflowTemplate(
+  workflowTemplateId: string,
+  input: UpdateWorkflowTemplateInput,
+): Promise<WorkflowTemplate> {
+  return request(`/workflow-templates/${workflowTemplateId}`, {
+    method: "PATCH",
     body: JSON.stringify(input),
   });
 }

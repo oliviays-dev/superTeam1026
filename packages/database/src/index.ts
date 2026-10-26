@@ -28,6 +28,14 @@ export {
   type ResolvedCreateProjectMemberInput,
 } from "./project-membership-repository.js";
 export {
+  ProjectTemplatesRepository,
+  ProjectTemplateRepositoryError,
+  type CreateProjectTemplateSnapshotInput,
+  type MaterializedProjectTemplate,
+  type MaterializeProjectTemplateInput,
+  type ProjectTemplateSnapshot,
+} from "./project-templates-repository.js";
+export {
   AgentRepository,
   JobRepository,
   PlatformRepositories,

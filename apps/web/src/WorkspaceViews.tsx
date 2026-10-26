@@ -18,6 +18,7 @@ import {
   Edit3,
   FileText,
   History,
+  LayoutTemplate,
   ListTodo,
   LoaderCircle,
   MessageSquare,
@@ -32,7 +33,7 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addMemoryClaim,
   createProject,
@@ -42,6 +43,7 @@ import {
   archiveTaskAttachment,
   getTaskDetail,
   listMemory,
+  listProjectTemplates,
   listProjectRoles,
   listTaskRuns,
   listTasks,
@@ -96,11 +98,32 @@ function ProjectCreateForm({
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [templateId, setTemplateId] = useState("");
+  const materializationKey = useRef<string | undefined>(undefined);
+  const templatesQuery = useQuery({
+    queryKey: ["project-templates", "available"],
+    queryFn: () => listProjectTemplates(),
+  });
   const mutation = useMutation({
-    mutationFn: () => createProject({ name, description }),
+    mutationFn: () => {
+      materializationKey.current ??= crypto.randomUUID();
+      return createProject(
+        {
+          name,
+          description,
+          ...(templateId === "" ? {} : { templateId }),
+          ...(templateId === ""
+            ? {}
+            : { materializationKey: materializationKey.current }),
+        },
+        templateId === "" ? undefined : materializationKey.current,
+      );
+    },
     onSuccess: (project) => {
       setName("");
       setDescription("");
+      setTemplateId("");
+      materializationKey.current = undefined;
       setOpen(false);
       onCreated(project);
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
@@ -151,6 +174,37 @@ function ProjectCreateForm({
         value={description}
         onChange={(event) => setDescription(event.target.value)}
       />
+      <label className="template-create-select">
+        <span>项目模板（可选）</span>
+        <select
+          value={templateId}
+          onChange={(event) => {
+            setTemplateId(event.target.value);
+            materializationKey.current = undefined;
+          }}
+          disabled={templatesQuery.isLoading}
+        >
+          <option value="">不使用模板</option>
+          {templatesQuery.data?.map((template) => (
+            <option key={template.id} value={template.id}>
+              {template.name} · {template.roles.length} 个角色
+            </option>
+          ))}
+        </select>
+        {templatesQuery.isError && (
+          <small>项目模板加载失败，可先创建空项目后重试。</small>
+        )}
+        {templatesQuery.data?.length === 0 && (
+          <small>当前还没有可用项目模板。</small>
+        )}
+      </label>
+      {mutation.error !== null && (
+        <div className="pm-error">
+          {mutation.error instanceof Error
+            ? mutation.error.message
+            : "创建项目失败"}
+        </div>
+      )}
       <button
         className="pm-btn primary"
         type="submit"
@@ -297,12 +351,16 @@ export function ProjectsView({
   onOpenSource,
   initialReportId,
   initialTab,
+  canManageTemplates,
+  onOpenTemplates,
 }: SharedViewProps & {
   onOpenTask: (taskId: string, projectId: string) => void;
   onOpenMeeting: (meetingId: string, projectId: string) => void;
   onOpenSource: (source: WorkbenchSourceRef, reportId?: string) => void;
   initialReportId?: string;
   initialTab?: "overview" | "tasks" | "memory" | "members" | "reports";
+  canManageTemplates: boolean;
+  onOpenTemplates: () => void;
 }) {
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<
@@ -347,9 +405,21 @@ export function ProjectsView({
           <h1>项目</h1>
           <p>按项目组织任务、AI 伙伴和可复用记忆。</p>
         </div>
-        <ProjectCreateForm
-          onCreated={(created) => onProjectChange(created.id)}
-        />
+        <div className="pm-head-actions">
+          {canManageTemplates && (
+            <button
+              className="pm-btn secondary"
+              type="button"
+              onClick={onOpenTemplates}
+            >
+              <LayoutTemplate size={14} />
+              项目模版
+            </button>
+          )}
+          <ProjectCreateForm
+            onCreated={(created) => onProjectChange(created.id)}
+          />
+        </div>
       </header>
 
       <div className="pm-two-column project-layout">

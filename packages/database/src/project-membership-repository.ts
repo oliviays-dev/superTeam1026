@@ -12,8 +12,12 @@ import type { Database } from "./database.js";
 interface ProjectRoleRow {
   id: string;
   project_id: string;
+  code: string;
   name: string;
+  category: ProjectRole["category"];
   description: string;
+  permissions: ProjectRole["permissions"];
+  library_role_id: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -64,10 +68,19 @@ export class ProjectMembershipRepository {
   ): Promise<ProjectRole> {
     const result = await this.database.query<ProjectRoleRow>(
       `INSERT INTO project_roles (
-         id, project_id, name, description, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+         id, project_id, code, name, category, description, permissions,
+         created_at, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW(), NOW())
        RETURNING *`,
-      [randomUUID(), projectId, input.name, input.description],
+      [
+        randomUUID(),
+        projectId,
+        input.code ?? generatedProjectRoleCode(input.name),
+        input.name,
+        input.category ?? "execution",
+        input.description,
+        JSON.stringify(input.permissions ?? ["read"]),
+      ],
     );
     return projectRoleFromRow(result.rows[0]!);
   }
@@ -80,12 +93,25 @@ export class ProjectMembershipRepository {
     const result = await this.database.query<ProjectRoleRow>(
       `UPDATE project_roles
        SET
-         name = COALESCE($3, name),
-         description = COALESCE($4, description),
+         code = COALESCE($3, code),
+         name = COALESCE($4, name),
+         category = COALESCE($5, category),
+         description = COALESCE($6, description),
+         permissions = COALESCE($7::jsonb, permissions),
          updated_at = NOW()
        WHERE project_id = $1 AND id = $2
        RETURNING *`,
-      [projectId, roleId, input.name ?? null, input.description ?? null],
+      [
+        projectId,
+        roleId,
+        input.code ?? null,
+        input.name ?? null,
+        input.category ?? null,
+        input.description ?? null,
+        input.permissions === undefined
+          ? null
+          : JSON.stringify(input.permissions),
+      ],
     );
     const row = result.rows[0];
     return row === undefined ? undefined : projectRoleFromRow(row);
@@ -257,11 +283,27 @@ function projectRoleFromRow(row: ProjectRoleRow): ProjectRole {
   return {
     id: row.id,
     projectId: row.project_id,
+    code: row.code,
     name: row.name,
+    category: row.category,
     description: row.description,
+    permissions: row.permissions,
+    libraryRoleId: row.library_role_id,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
+}
+
+function generatedProjectRoleCode(name: string): string {
+  const normalized = name
+    .normalize("NFKD")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+  return normalized === ""
+    ? `PROJECT_ROLE_${randomUUID().slice(0, 8).toUpperCase()}`
+    : normalized;
 }
 
 function projectMemberFromRow(

@@ -1552,3 +1552,179 @@ CREATE TABLE IF NOT EXISTS supplier_risks (
 CREATE INDEX IF NOT EXISTS supplier_risks_project_idx
   ON supplier_risks(project_id, status, risk_score DESC);
 `;
+
+export const PROJECT_TEMPLATES_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS template_roles (
+  id UUID PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN (
+    'management',
+    'execution',
+    'review',
+    'approval',
+    'planning',
+    'procurement',
+    'support'
+  )),
+  description TEXT NOT NULL DEFAULT '',
+  permissions JSONB NOT NULL DEFAULT '["read"]'::jsonb,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS template_roles_status_idx
+  ON template_roles(status, category, name);
+
+CREATE TABLE IF NOT EXISTS workflow_templates (
+  id UUID PRIMARY KEY,
+  key TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  definition JSONB NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS workflow_templates_status_idx
+  ON workflow_templates(status, name);
+
+CREATE TABLE IF NOT EXISTS project_templates (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL,
+  code TEXT NOT NULL UNIQUE,
+  type TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_by TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS project_templates_status_idx
+  ON project_templates(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_template_revisions (
+  template_id UUID NOT NULL
+    REFERENCES project_templates(id) ON DELETE RESTRICT,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  snapshot JSONB NOT NULL,
+  change_summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('active', 'archived')),
+  actor_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (template_id, revision)
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_project_template_revision_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'project template revisions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_template_revisions_immutable
+  ON project_template_revisions;
+
+CREATE TRIGGER project_template_revisions_immutable
+BEFORE UPDATE OR DELETE ON project_template_revisions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_template_revision_mutation();
+
+CREATE TABLE IF NOT EXISTS project_template_role_refs (
+  template_id UUID NOT NULL
+    REFERENCES project_templates(id) ON DELETE CASCADE,
+  role_id UUID NOT NULL
+    REFERENCES template_roles(id) ON DELETE RESTRICT,
+  PRIMARY KEY (template_id, role_id)
+);
+
+CREATE INDEX IF NOT EXISTS project_template_role_refs_role_idx
+  ON project_template_role_refs(role_id, template_id);
+
+CREATE TABLE IF NOT EXISTS project_template_workflow_refs (
+  template_id UUID NOT NULL
+    REFERENCES project_templates(id) ON DELETE CASCADE,
+  workflow_template_id UUID NOT NULL
+    REFERENCES workflow_templates(id) ON DELETE RESTRICT,
+  workflow_version INTEGER NOT NULL CHECK (workflow_version > 0),
+  key_snapshot TEXT NOT NULL,
+  name_snapshot TEXT NOT NULL,
+  PRIMARY KEY (template_id, workflow_template_id)
+);
+
+CREATE INDEX IF NOT EXISTS project_template_workflow_refs_workflow_idx
+  ON project_template_workflow_refs(workflow_template_id, template_id);
+
+CREATE TABLE IF NOT EXISTS project_template_grants (
+  template_id UUID NOT NULL
+    REFERENCES project_templates(id) ON DELETE CASCADE,
+  actor_id TEXT NOT NULL,
+  PRIMARY KEY (template_id, actor_id)
+);
+
+CREATE INDEX IF NOT EXISTS project_template_grants_actor_idx
+  ON project_template_grants(actor_id, template_id);
+
+CREATE TABLE IF NOT EXISTS project_template_materializations (
+  id UUID PRIMARY KEY,
+  template_id UUID NOT NULL
+    REFERENCES project_templates(id) ON DELETE RESTRICT,
+  template_revision INTEGER NOT NULL CHECK (template_revision > 0),
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  project_id UUID NOT NULL UNIQUE
+    REFERENCES projects(id) ON DELETE CASCADE,
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (template_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS project_template_materializations_template_idx
+  ON project_template_materializations(template_id, created_at DESC);
+
+ALTER TABLE projects
+  ADD COLUMN IF NOT EXISTS source_template_id UUID
+    REFERENCES project_templates(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS source_template_revision INTEGER;
+
+CREATE INDEX IF NOT EXISTS projects_source_template_idx
+  ON projects(source_template_id, source_template_revision);
+
+ALTER TABLE project_roles
+  ADD COLUMN IF NOT EXISTS code TEXT NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'execution',
+  ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '["read"]'::jsonb,
+  ADD COLUMN IF NOT EXISTS library_role_id UUID
+    REFERENCES template_roles(id) ON DELETE RESTRICT;
+
+UPDATE project_roles
+SET code = CASE
+  WHEN name = '项目负责人' THEN 'PROJECT_OWNER'
+  ELSE 'PROJECT_ROLE_' || UPPER(SUBSTRING(REPLACE(id::text, '-', '') FROM 1 FOR 8))
+END
+WHERE code = '';
+
+CREATE INDEX IF NOT EXISTS project_roles_library_role_idx
+  ON project_roles(library_role_id)
+  WHERE library_role_id IS NOT NULL;
+
+ALTER TABLE workflow_definitions
+  ADD COLUMN IF NOT EXISTS source_template_id UUID
+    REFERENCES workflow_templates(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS source_template_version INTEGER;
+
+CREATE INDEX IF NOT EXISTS workflow_definitions_source_template_idx
+  ON workflow_definitions(source_template_id, source_template_version);
+`;
