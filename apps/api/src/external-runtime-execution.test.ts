@@ -261,6 +261,103 @@ integration("external runtime execution", () => {
     expect(task?.status).toBe("review");
   });
 
+  it("executes a workflow task through a bound Codex JSONL runtime", async () => {
+    const agent = await createAgent("codex-jsonl");
+    const runtime = await createActiveRuntime("codex-jsonl");
+    await bind(agent.id, runtime.id);
+    const project = await request<{ id: string }>("POST", "/api/v1/projects", {
+      name: `External workflow ${randomUUID().slice(0, 8)}`,
+      description: "",
+    });
+    expect(project.statusCode).toBe(201);
+    const role = await request<{ id: string }>(
+      "POST",
+      `/api/v1/projects/${project.body.id}/roles`,
+      { name: "Workflow external executor", description: "" },
+    );
+    expect(role.statusCode).toBe(201);
+    const member = await request(
+      "POST",
+      `/api/v1/projects/${project.body.id}/members`,
+      {
+        kind: "agent",
+        agentId: agent.id,
+        responsibility: "Execute the workflow task",
+        roleIds: [role.body.id],
+      },
+    );
+    expect(member.statusCode).toBe(201);
+    const workflow = await request<{ id: string }>(
+      "POST",
+      "/api/v1/workflows/import",
+      {
+        projectId: project.body.id,
+        markdown: `# 工作流：Workflow external runtime ${randomUUID().slice(0, 8)}
+
+## 元信息
+
+- key: external-workflow-${randomUUID()}
+- version: 1
+
+## 节点
+
+### Execute
+
+- id: execute
+- type: task
+- executor: role:${role.body.id}
+- execution: task-worker
+- trigger: auto-on-ready
+
+### Review
+
+- id: review
+- type: service
+- executor: system:manual
+
+## 连接
+
+- execute -> review`,
+      },
+    );
+    expect(workflow.statusCode, JSON.stringify(workflow.body)).toBe(201);
+    const started = await request<{
+      id: string;
+      steps: Array<{ taskId: string | null; runId: string | null }>;
+    }>("POST", `/api/v1/workflows/${workflow.body.id}/start`, {
+      title: `External workflow run ${randomUUID().slice(0, 8)}`,
+    });
+    expect(started.statusCode).toBe(201);
+    const taskId = started.body.steps[0]?.taskId;
+    const runId = started.body.steps[0]?.runId;
+    expect(taskId).toBeTruthy();
+    expect(runId).toBeTruthy();
+    const dispatchSnapshot = await repositories.runs.get(runId!);
+    expect(dispatchSnapshot?.executionSnapshot).toMatchObject({
+      runtime: {
+        id: runtime.id,
+        protocol: "codex-jsonl",
+        revision: runtime.revision,
+      },
+      binding: { revision: 1 },
+    });
+    const job = await repositories.jobs.claimNext(
+      "external-workflow-worker",
+      60,
+      runId!,
+    );
+    expect(job).toBeDefined();
+    await processJob(job!, "external-workflow-worker");
+    const completed = await repositories.runs.get(runId!);
+    expect(completed).toMatchObject({
+      status: "completed",
+      externalRuntimeId: runtime.id,
+      externalRuntimeProtocol: "codex-jsonl",
+      externalSessionId: "codex-session-fixture",
+    });
+    expect((await repositories.tasks.get(taskId!))?.status).toBe("review");
+  });
+
   it("executes a bound plain-text runtime for AI direct chat", async () => {
     const agent = await createAgent("plain-text");
     const runtime = await createActiveRuntime("plain-text");

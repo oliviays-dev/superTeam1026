@@ -114,13 +114,14 @@ test("project role, task dependency and structured memory", async ({
   );
 
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "工作台" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "每日简报" })).toBeVisible();
   await page
     .locator(".sidebar-project-list button")
     .filter({ hasText: project.name })
     .first()
     .click();
   await page.getByRole("button", { name: /项目记忆/ }).click();
+  await page.getByRole("tab", { name: "Topic 与 Truth" }).click();
   const memoryCard = page
     .locator(".memory-topic-card")
     .filter({ hasText: topic.title })
@@ -132,7 +133,7 @@ test("project role, task dependency and structured memory", async ({
     .getByRole("checkbox")
     .check();
   await memoryCard.getByRole("button", { name: "发布 Truth" }).click();
-  await expect(memoryCard).toContainText("Current Truth v2");
+  await expect(memoryCard).toContainText("Current Truth v4");
 
   await page.getByRole("button", { name: "任务", exact: true }).click();
   await page

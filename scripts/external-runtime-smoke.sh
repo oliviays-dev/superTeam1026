@@ -16,6 +16,7 @@ API_BASE="http://127.0.0.1:$API_PORT/api/v1"
 WEB_BASE="http://127.0.0.1:$WEB_PORT"
 LOG_DIR="${LOG_DIR:-$ROOT/.tmp/batch13e}"
 DSH_HOME_VALUE="${DSH_HOME:-$(cd "$ROOT/.." && pwd)/dsh-home-batch13}"
+PLAYWRIGHT_FULL="${PLAYWRIGHT_FULL:-0}"
 PIDS=()
 
 mkdir -p "$LOG_DIR" "$DSH_HOME_VALUE"
@@ -222,10 +223,14 @@ if [[ "$capability_count" != "1" ||
   exit 1
 fi
 
-PLUGINMAX_WEB_BASE_URL="$WEB_BASE" \
-  pnpm playwright test \
-    e2e/external-runtimes.spec.ts \
-    e2e/external-runtime-gui.spec.ts
+if [[ "$PLAYWRIGHT_FULL" == "1" ]]; then
+  PLUGINMAX_WEB_BASE_URL="$WEB_BASE" pnpm playwright test
+else
+  PLUGINMAX_WEB_BASE_URL="$WEB_BASE" \
+    pnpm playwright test \
+      e2e/external-runtimes.spec.ts \
+      e2e/external-runtime-gui.spec.ts
+fi
 
 printf 'external_runtime_smoke=ok\n'
 printf 'api=%s\n' "$API_BASE"
@@ -235,3 +240,4 @@ printf 'runtime_id=%s\n' "$runtime_id"
 printf 'probe_status=%s\n' "$completed_status"
 printf 'runtime_status=%s\n' "$enabled_status"
 printf 'dsh_home=%s\n' "$DSH_HOME"
+printf 'playwright_full=%s\n' "$PLAYWRIGHT_FULL"

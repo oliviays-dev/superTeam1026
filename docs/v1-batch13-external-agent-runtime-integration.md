@@ -1,6 +1,6 @@
 # V1 Batch 13: External Agent Runtime Integration
 
-> 状态：Batch 13A、13B、13C、13D、13E 已实现；全量发布门禁待后续阶段
+> 状态：Batch 13A、13B、13C、13D、13E 与 Phase 6 发布门禁均已通过
 >
 > 分支：`feat/v1-batch13-external-agent-runtime`
 >
@@ -30,7 +30,8 @@ Pluginmax Platform V1 已完成 Batch 13A-E：
 - spawn marker 阻止启动后的自动重放，reasoning 正文不持久化。
 - Runtime 管理、AI 伙伴 Binding/Preflight 与 Run 外部执行观测 GUI 已接入。
 
-剩余工作集中在 TaskExecutionPolicy 深化、发布门禁和全量兼容验收。
+发布门禁已完成：Migration 0→23、20→23、22→23 通过，完整 Vitest 与完整
+Playwright 通过，无 P0/P1 缺陷。后续工作只剩独立范围的 TaskExecutionPolicy 深化。
 
 ## 2. 目标
 
@@ -59,17 +60,17 @@ Pluginmax Platform V1 已完成 Batch 13A-E：
 
 | 能力 | 旧 DSH 插件 | V1 当前 | Batch 13 目标 |
 | --- | --- | --- | --- |
-| Runtime 定义 | 插件 KV `external_runtimes` | 无 | Migration 21 PostgreSQL 表 |
-| Provider / Protocol | codex、workbuddy、command；两种协议 | 契约/UI 占位 | V1 Provider + Protocol 受控枚举 |
-| 注册和管理 API | `/api/collab/agent/...` | 无 | `/api/v1/runtimes` |
-| 探测 | `--version` 进程探测 | 无 | Worker/管理服务异步探测与结果审计 |
-| Agent 绑定 | 旧 Profile `externalRuntimeId` | Agent 只有 `runtime_kind` | 独立绑定表与 revision |
-| Preflight | 旧 Agent 服务内校验 | Fake/DSH 固定集合校验 | Runtime 能力、状态、探测、权限统一校验 |
-| CLI Adapter | `ExternalAgentProcessRunner` | 仅 fake/dsh-sdk | V1 Worker Adapter |
-| 事件 | 旧执行事件/终端 trace | 平台 RunEvent | JSONL/plain-text 归一化 RunEvent |
-| 取消 | 子进程 signal + 旧 cancel | Runtime effect 控制 | AbortSignal + 进程组终止 + Run 结算 |
-| Session | Provider session ID | DSH SDK 内部 Session | Runtime Session 快照与诊断字段 |
-| 存储 | 插件 KV | 无 | PostgreSQL + Outbox + Job |
+| Runtime 定义 | 插件 KV `external_runtimes` | Migration 21-23 PostgreSQL 表 | PostgreSQL 定义与审计 |
+| Provider / Protocol | codex、workbuddy、command；两种协议 | V1 Provider + Protocol 受控枚举 | 与 V1 契约一致 |
+| 注册和管理 API | `/api/collab/agent/...` | `/api/v1/runtimes` | 独立 V1 管理面 |
+| 探测 | `--version` 进程探测 | Worker 异步探测与结果审计 | Probe Job + Capability 快照 |
+| Agent 绑定 | 旧 Profile `externalRuntimeId` | 独立绑定表与 revision | Preflight 统一门禁 |
+| Preflight | 旧 Agent 服务内校验 | Runtime 状态、Probe、能力、权限统一校验 | 四条执行入口共用 |
+| CLI Adapter | `ExternalAgentProcessRunner` | V1 Worker `codex-jsonl`/`plain-text` Adapter | 受控 argv、`shell: false` |
+| 事件 | 旧执行事件/终端 trace | JSONL/plain-text 归一化 RunEvent | Run/Trace 可追溯 |
+| 取消 | 子进程 signal + 旧 cancel | AbortSignal + Runtime effect + Run 结算 | 不自动 replay |
+| Session | Provider session ID | Runtime Session 快照与诊断字段 | 第一版不 resume |
+| 存储 | 插件 KV | PostgreSQL + Outbox + Job | 统一 Worker 执行面 |
 
 旧实现可以复用协议解析、参数生成、进程终止和安全经验，但 Runner、存储、API、
 权限、Run 结算和 UI 必须重新实现和验证，不能直接搬运旧服务。
@@ -139,7 +140,7 @@ Pluginmax Platform V1 已完成 Batch 13A-E：
 
 退出条件：任务、会议、私聊三条 Worker 链路均通过外部假 CLI 集成测试。
 
-### Phase 5: API 与 GUI
+### Phase 5: API 与 GUI（Batch 13E 已完成）
 
 依赖：Phase 1、Phase 3、Phase 4。
 
@@ -152,17 +153,18 @@ Pluginmax Platform V1 已完成 Batch 13A-E：
 
 退出条件：桌面和 900px 以下无横向溢出，API 错误可指导修复。
 
-### Phase 6: 兼容与发布门禁
+### Phase 6: 兼容与发布门禁（已完成）
 
 依赖：Phase 1 至 Phase 5。
 
-- 验证 Batch 8、9、10A、10B、11A、11B、12A、12B 回归。
-- Migration 20→21 smoke、全新 `0→21` smoke。
-- 只运行外部 Runtime 场景的 Playwright，同时保留全量回归。
-- 验证 Agent 停用、Runtime 归档、Probe 失败和历史 Run 可读。
-- 验证 Fake/DSH SDK/外部 Runtime 混用不会改变既有派发语义。
+- [x] 验证 Batch 8、9、10A、10B、11A、11B、12A、12B 回归。
+- [x] Migration 0→23、20→23、22→23 smoke。
+- [x] 外部 Runtime Playwright 与完整 Playwright 回归均通过。
+- [x] 验证 Agent 停用、Runtime 归档、Probe 失败和历史 Run 可读。
+- [x] 验证 Fake/DSH SDK/外部 Runtime 混用不会改变既有派发语义。
 
-退出条件：验收标准全部满足，无 P0/P1 缺陷。
+退出条件已满足：验收标准全部通过，无遗留 P0/P1 缺陷。完整证据见
+`docs/v1-batch13-release-gate.md`。
 
 ## 6. 数据模型
 
@@ -247,7 +249,7 @@ HTTP Route 内直接执行命令。普通项目成员只能读取可用 Runtime 
 ## 8. 模块改动
 
 - `packages/contracts`: Runtime、Probe、Binding、Capability、执行快照和 API schema。
-- `packages/database`: Migration 21、Runtime/Binding/Probe/Event Repository。
+- `packages/database`: Migration 21-23、Runtime/Binding/Probe/Event Repository。
 - `packages/application`: Runtime 管理、Preflight、绑定和派发门禁。
 - `packages/agent-runtime`: Codex JSONL 与 plain-text Adapter、事件归一化。
 - `packages/application/src/run-executor.ts`: Adapter 解析、Execute、取消和回写。
@@ -277,14 +279,15 @@ HTTP Route 内直接执行命令。普通项目成员只能读取可用 Runtime 
 - 含 shell 拼接或非法 argv 的定义被拒绝，API 不产生任何外部进程。
 - AI 伙伴可绑定 active 且 Probe 通过的 Runtime。
 - Runtime 停用、归档、Probe 失败、能力不足时派发前返回稳定错误码和修复建议。
-- 任务、会议 AI 发言和 AI 私聊均可由 Worker 通过外部假 CLI 执行。
+- 任务、Workflow Task、会议 AI 发言和 AI 私聊均可由 Worker 通过外部假 CLI 执行。
 - API 在 POST 阶段不启动模型或子进程，只写业务数据、Run、Job 和 Outbox。
 - codex-jsonl 产生可用 progress/tool/final 事件，不泄漏 reasoning 正文。
 - plain-text 明确显示 final-only，不生成虚假结构化步骤。
 - 取消、超时、非零退出、空 stdout、Worker 崩溃和重试均有明确 Run/消息状态。
 - Job 重试、租约恢复和 Runtime effect replay 不产生重复 Task 消息、会议发言或私聊回复。
 - Runtime Capability、Execution Envelope、Provider Session 和 Run/Trace 可在详情中追溯。
-- Migration 20→21 保留旧 Agent、Run、Trace、ContextPack、会议和内存数据。
+- Migration 20→23 保留旧 Agent、Task、Run、Trace、ContextPack、Meeting、
+  Direct Chat、Memory 和 Template 数据。
 - Batch 8、9、10A、10B、11A、11B、12A、12B 全量回归通过。
 - 900px 以下 Runtime 管理页和 AI 伙伴绑定 UI 无横向溢出。
 
@@ -294,10 +297,10 @@ HTTP Route 内直接执行命令。普通项目成员只能读取可用 Runtime 
 - Database：Runtime CRUD、revision、审计、迁移、绑定唯一性。
 - Runtime Adapter：假 codex JSONL、plain-text、stderr、空输出、取消、超时、能力降级。
 - API：权限、命令注入拒绝、探测 Job、绑定、Preflight、停用/归档。
-- Worker：任务、会议、私聊三条链路；取消、租约、重试和幂等回写。
+- Worker：任务、Workflow Task、会议、私聊四条链路；取消、租约、重试和幂等回写。
 - GUI：注册、探测、启停、绑定、不可用原因、Run 降级展示。
-- Playwright：只跑外部 Runtime 场景，使用假 CLI；不得依赖真实模型凭证。
-- 兼容：独立 PostgreSQL 全量 Vitest、Migration 20→21、旧会议/旧 Run/旧私聊读取。
+- Playwright：外部 Runtime 场景与完整回归，使用假 CLI；不得依赖真实模型凭证。
+- 兼容：独立 PostgreSQL 全量 Vitest、Migration 0→23/20→23/22→23，旧数据可读。
 
 ## 12. 排期与依赖
 

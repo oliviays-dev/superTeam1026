@@ -76,7 +76,9 @@ test("project template maintenance and template-based project creation", async (
 
   await page.goto("/");
   await page.getByRole("button", { name: "项目", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "项目" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "项目", exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "项目模版" }).click();
   await expect(
     page.getByRole("heading", { name: "项目模版维护" }),

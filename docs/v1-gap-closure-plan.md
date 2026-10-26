@@ -1,6 +1,6 @@
 # Pluginmax V1 功能缺口收敛计划
 
-> 状态：执行中
+> 状态：Batch 13 发布门禁已通过；其余 V1 深化项继续执行
 >
 > 界面基线：与原 DSH 项目保持一致，采用 264px 左侧导航、DSH 风格明暗主题
 > Token、工作台六栏卡片、项目双栏、任务四列看板和 AI 伙伴双栏。
@@ -9,7 +9,7 @@
 
 - 独立 Web、API、Worker 和 PostgreSQL。
 - 项目、任务、Run、ContextPack、文件产物、验收和基础记忆。
-- Fake Runtime 与 DSH SDK Adapter；外部 Agent Runtime 尚未接入 V1。
+- Fake Runtime、DSH SDK Adapter 与外部 Agent Runtime 均已接入 V1。
 - 执行输入快照、ContextPack 来源、Run 事件、实时文本、最终输出和交付物展示。
 - 原项目一致的全局导航与主要页面布局。
 - 工作台六栏模块、项目目录与详情、任务四列看板、工作流、沟通和 AI 伙伴页面。
@@ -77,22 +77,23 @@
 - [x] 定期源码和数据库备份。
 - [x] OpenTelemetry 或等价 Run 追踪。
 - [x] Playwright 浏览器自动化回归。
+- [x] Migration 0→23、20→23、22→23 兼容门禁与完整发布回归。
 
 ### 2.8 Agent Runtime
 
 - [x] 外部 Runtime 注册、探测、启停、归档和审计。
 - [x] 受控 Command + argv 安全执行边界。
-- [ ] `codex-jsonl` 与 `plain-text` 的 V1 Runtime Adapter。
-- [ ] AI 伙伴绑定外部 Runtime、Preflight、能力降级和不可用原因。
-- [ ] 外部 Runtime 通过 Worker/Run/Outbox 执行、取消、超时、失败和幂等回写。
-- [ ] `/api/v1` 外部 Runtime 管理接口与 GUI。
+- [x] `codex-jsonl` 与 `plain-text` 的 V1 Runtime Adapter。
+- [x] AI 伙伴绑定外部 Runtime、Preflight、能力降级和不可用原因。
+- [x] 外部 Runtime 通过 Worker/Run/Outbox 执行、取消、超时、失败和幂等回写。
+- [x] `/api/v1` 外部 Runtime 管理接口与 GUI。
 
-> 当前结论：旧 DSH 插件仍有外部 Agent 实现，但 Pluginmax Platform V1 尚未完成
-> Runtime 注册、绑定、Adapter 和 Worker 执行链路。因此 V1 任务、会议和私聊目前
-> 不能实际调用 Codex 或通用外部 CLI Runtime。详细计划见
-> `docs/v1-batch13-external-agent-runtime-integration.md`。
+> 当前结论：Pluginmax Platform V1 已完成 Runtime 注册、绑定、Preflight、
+> Adapter、Worker 执行、GUI 和发布门禁。任务、Workflow Task、会议 AI 与私聊均可
+> 通过受控外部假 CLI 执行；真实 Provider Session resume、危险 sandbox 和任意 shell
+> 仍不在范围内。验收记录见 `docs/v1-batch13-release-gate.md`。
 
-## 3. 下一执行批次
+## 3. 批次执行记录
 
 批次 3A 已交付：项目成员与项目角色。
 
@@ -137,8 +138,8 @@
 - 实例详情可查询节点迁移、分支、审批、重试和失败原因。
 - Migration 10 可升级旧线性实例，旧 steps 数据保持可读。
 
-批次 13：External Agent Runtime Integration（Batch 13A 已交付 Registry/Probe/Audit，
-Adapter 与绑定待后续阶段）。
+批次 13：External Agent Runtime Integration（已完成 Batch 13A-E 与 Phase 6
+发布门禁）。
 
 排期位置：Batch 12B 已收口并提交后，Batch 13 才进入实现；不得回写、扩展或重开
 Batch 12B 功能范围。
@@ -154,3 +155,5 @@ Batch 12B 功能范围。
 - 不支持结构化事件的 Runtime 明确降级为 summary/final-only，不伪造计划或工具步骤。
 
 验收与完整阶段清单见 Batch 13 文档。
+Phase 6 的兼容、迁移、完整 Vitest、完整 Playwright、GUI 和安全边界结果见
+`docs/v1-batch13-release-gate.md`。

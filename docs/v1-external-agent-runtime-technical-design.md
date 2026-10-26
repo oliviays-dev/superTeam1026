@@ -1,7 +1,7 @@
 # Pluginmax V1 External Agent Runtime Technical Design
 
-> 状态：Batch 13A-D 已实现（Runtime 管理、Adapter Core、Binding/Preflight、
-> Worker Run 执行）
+> 状态：Batch 13A-E 与 Phase 6 发布门禁已通过（Runtime 管理、Adapter Core、
+> Binding/Preflight、Worker Run 执行、GUI 与兼容验收）
 >
 > 基线：`7e85bc8b1faa89ee6e016928b191353dc14715a7`
 >
@@ -18,9 +18,9 @@ Meeting 和 Direct Chat 执行面。Batch 13 不复制旧 DSH 插件的外部 Ag
 4. 在现有 `RunExecutor` 中接入 Adapter，不绕过 Worker；
 5. 让任务、会议和私聊继续使用各自现有业务回写与幂等规则。
 
-`packages/contracts/src/runtime-execution.ts` 已存在
-`RuntimeCapabilityProfile`、`ExecutionEnvelope`、`RunEvent` 等基础契约，但当前没有
-接入 V1 Runtime 管理或 `RunExecutor`。这些契约是 Batch 13 的输入，不是完成证明。
+`packages/contracts/src/runtime-execution.ts` 中的
+`RuntimeCapabilityProfile`、`ExecutionEnvelope`、`RunEvent` 已接入 V1 Runtime
+管理、Preflight、`RunExecutor`、Worker 和 Run/Trace 观测。
 
 ## 2. 架构
 
@@ -155,7 +155,7 @@ interface AgentRuntimeBinding {
 
 ## 4. 数据模型
 
-Migration 21 预计新增或修改：
+Migration 21-23 新增或修改：
 
 ### `external_runtimes`
 
@@ -407,10 +407,11 @@ Run 详情：
 
 ## 10. Migration 与兼容
 
-Migration 21：
+Migration 21-23：
 
-- 新增 Runtime、Probe、Capability、Binding、Event、Probe Job 表；
-- Run 增加 nullable 外部执行字段；
+- Migration 21 新增 Runtime、Probe、Capability、Event、Probe Job 表；
+- Migration 22 新增 Agent Runtime Binding 与绑定审计；
+- Migration 23 为 Run 增加 nullable 外部执行字段和 Runtime 索引；
 - 不为旧 DSH 插件 KV 自动导入配置，因为无法安全推断命令权限和所有者；
 - 不自动把 `runtime_kind = codex-jsonl | plain-text` 的 Agent 视为已绑定；
 - 旧外部 Agent 数据保持原样，V1 只读取自己的 PostgreSQL 表。
@@ -430,9 +431,12 @@ Migration 21：
 - 安全测试：shell 元字符、管道、重定向、命令替换、非法 cwd、环境变量泄漏。
 - Repository：状态机、revision、binding 唯一性、append-only audit。
 - API：管理员权限、owner 权限、Probe 异步、绑定、Preflight。
-- Worker：任务/会议/私聊三条链路、取消、超时、租约、interrupted、显式重试。
-- Migration：20→21 和 0→21，旧 Run/会议/私聊/内存/模板可读。
-- Playwright：注册、探测、绑定、不可用和 Run 降级；使用假 CLI，不依赖真实凭证。
+- Worker：任务/Workflow Task/会议/私聊四条链路、取消、超时、租约、interrupted、
+  显式重试。
+- Migration：0→23、20→23、22→23，旧 Agent/Task/Run/Trace/Context/Meeting/
+  Direct Chat/Memory/Template 可读。
+- Playwright：注册、探测、绑定、不可用和 Run 降级，以及完整 1440/900/390 回归；
+  使用假 CLI，不依赖真实凭证。
 - 全量 Vitest：独立 PostgreSQL，覆盖 Batch 8 至 12B。
 
 ## 12. 风险
