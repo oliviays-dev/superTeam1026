@@ -75,9 +75,10 @@ export interface TaskMessageRow {
 
 export interface RunRow {
   id: string;
-  project_id: string;
+  project_id: string | null;
   task_id: string | null;
   meeting_turn_id: string | null;
+  direct_chat_turn_id: string | null;
   agent_id: string;
   status: Run["status"];
   context_pack_id: string | null;
@@ -198,6 +199,7 @@ export function runFromRow(row: RunRow): Run {
     projectId: row.project_id,
     taskId: row.task_id,
     meetingTurnId: row.meeting_turn_id,
+    directChatTurnId: row.direct_chat_turn_id,
     agentId: row.agent_id,
     status: row.status,
     contextPackId: row.context_pack_id,

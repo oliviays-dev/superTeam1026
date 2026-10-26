@@ -20,6 +20,14 @@ export {
   type MeetingAiTurnRecord,
 } from "./meeting-ai-repository.js";
 export {
+  DirectChatPreconditionError,
+  DirectChatRepository,
+  cancelDirectChatRunWithClient,
+  completeDirectChatTurnWithClient,
+  failDirectChatTurnWithClient,
+  type DirectChatRunContext,
+} from "./direct-chat-repository.js";
+export {
   MemoryClosureRepository,
   MemoryReviewConflictError,
 } from "./memory-closure-repository.js";

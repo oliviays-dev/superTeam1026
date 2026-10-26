@@ -7,9 +7,15 @@ import {
   type AgentRuntimeEvent,
   type DshSdkAdapterOptions,
 } from "@pluginmax/agent-runtime";
-import { buildMeetingContext, buildTaskContext } from "@pluginmax/context";
-import type { Agent, Run, Task } from "@pluginmax/contracts";
 import {
+  buildDirectChatContext,
+  buildMeetingContext,
+  buildTaskContext,
+} from "@pluginmax/context";
+import type { Agent, Project, Run, Task } from "@pluginmax/contracts";
+import {
+  DirectChatPreconditionError,
+  type DirectChatRunContext,
   MeetingAiPreconditionError,
   type MeetingAiRunContext,
   type PlatformRepositories,
@@ -136,10 +142,45 @@ export class RunExecutor {
       }
       run = await this.requireRun(runId);
     }
+    let directChatContext: DirectChatRunContext | null = null;
+    if (run.directChatTurnId !== null) {
+      try {
+        directChatContext =
+          await this.repositories.directChats.prepareRun(runId);
+      } catch (error) {
+        if (!(error instanceof DirectChatPreconditionError)) throw error;
+        if (run.status === "cancelled") return;
+        await this.repositories.runs.appendEventIfAbsent(
+          runId,
+          "error",
+          "AI direct chat was rejected before execution",
+          { code: error.code, error: error.message },
+        );
+        await this.repositories.runs.finish(
+          runId,
+          "failed",
+          null,
+          error.message,
+        );
+        await this.repositories.directChats.failTurn(
+          runId,
+          error.code,
+          error.message,
+        );
+        return;
+      }
+      run = await this.requireRun(runId);
+    }
     const agent = await this.repositories.agents.get(run.agentId);
     if (agent === undefined) throw new Error("agent is unavailable");
-    const project = await this.repositories.projects.get(run.projectId);
-    if (project === undefined) throw new Error("project is unavailable");
+    let project: Project | null = null;
+    if (run.projectId !== null) {
+      const loadedProject = await this.repositories.projects.get(run.projectId);
+      if (loadedProject === undefined) {
+        throw new Error("project is unavailable");
+      }
+      project = loadedProject;
+    }
     const effectKey = runtimeEffectKey(runId);
     const effect = await this.repositories.runtimeEffects.begin({
       effectKey,
@@ -164,7 +205,14 @@ export class RunExecutor {
           attempt: effect.receipt.attempt,
         },
       );
-      await this.completeRun(runId, task, meetingContext, output, assertLease);
+      await this.completeRun(
+        runId,
+        task,
+        meetingContext,
+        directChatContext,
+        output,
+        assertLease,
+      );
       return;
     }
     if (effect.kind === "cancelled") {
@@ -190,10 +238,12 @@ export class RunExecutor {
       throw error;
     }
     const episodes =
-      await this.repositories.memoryClosure.listEpisodesForContext(
-        project.id,
-        agent.id,
-      );
+      project === null
+        ? []
+        : await this.repositories.memoryClosure.listEpisodesForContext(
+            project.id,
+            agent.id,
+          );
     if (meetingContext !== null) {
       const currentMeetingContext =
         await this.repositories.meetingAi.getRunContext(runId);
@@ -202,26 +252,42 @@ export class RunExecutor {
       }
       meetingContext = currentMeetingContext;
     }
+    if (directChatContext !== null) {
+      directChatContext =
+        (await this.repositories.directChats.getRunContext(runId)) ??
+        directChatContext;
+    }
     const context =
-      meetingContext === null
-        ? buildTaskContext({
+      directChatContext !== null
+        ? buildDirectChatContext({
             runId,
-            project,
-            task: task!,
+            thread: directChatContext.thread,
+            turn: directChatContext.turn,
+            messages: directChatContext.messages,
             agent,
-            episodes,
           })
-        : buildMeetingContext({
-            runId,
-            project,
-            meeting: meetingContext.meeting,
-            turn: meetingContext.turn,
-            messages: meetingContext.messages,
-            agent,
-            episodes,
-          });
+        : meetingContext === null
+          ? buildTaskContext({
+              runId,
+              project: project!,
+              task: task!,
+              agent,
+              episodes,
+            })
+          : buildMeetingContext({
+              runId,
+              project: project!,
+              meeting: meetingContext.meeting,
+              turn: meetingContext.turn,
+              messages: meetingContext.messages,
+              agent,
+              episodes,
+            });
     await this.repositories.contexts.save(context.pack, context.receipt);
-    const workspacePath = resolve(this.options.workspaceRoot, run.projectId);
+    const workspacePath = resolve(
+      this.options.workspaceRoot,
+      run.projectId ?? `direct-chat/${directChatContext!.thread.id}`,
+    );
     await mkdir(workspacePath, { recursive: true });
 
     await this.repositories.runs.markRunning(runId);
@@ -310,8 +376,15 @@ export class RunExecutor {
           effectKey,
           title:
             task?.title ??
-            `${meetingContext!.meeting.title} · ${meetingContext!.turn.triggerKind}`,
-          description: task?.description ?? meetingContext!.turn.triggerReason,
+            (directChatContext === null
+              ? `${meetingContext!.meeting.title} · ${meetingContext!.turn.triggerKind}`
+              : `AI 对话 · ${agent.name}`),
+          description:
+            task?.description ??
+            (directChatContext === null
+              ? meetingContext!.turn.triggerReason
+              : (directChatContext.messages.at(-1)?.content ??
+                run.inputSnapshot.taskDescription)),
           acceptance: task?.acceptance ?? [],
           instruction: context.pack.renderedPrompt,
           agentName: agent.name,
@@ -341,6 +414,7 @@ export class RunExecutor {
             runId,
             task,
             meetingContext,
+            directChatContext,
             event.output,
             assertLease,
           );
@@ -380,6 +454,12 @@ export class RunExecutor {
         await this.repositories.runs.timeout(runId, "Run exceeded its timeout");
         if (task !== null) {
           await this.repositories.tasks.setStatus(task.id, "queued");
+        } else if (directChatContext !== null) {
+          await this.repositories.directChats.failTurn(
+            runId,
+            "direct_chat_timeout",
+            "AI direct chat reply exceeded its run budget",
+          );
         } else {
           await this.repositories.meetingAi.failTurn(
             runId,
@@ -428,13 +508,16 @@ export class RunExecutor {
     runId: string,
     task: Task | null,
     meetingContext: MeetingAiRunContext | null,
+    directChatContext: DirectChatRunContext | null,
     output: string,
     assertLease: () => Promise<void>,
   ): Promise<void> {
     const run = await this.requireRun(runId);
     if (run.status === "cancelled") throw new RunCancelledError();
     if (run.status === "completed") {
-      if (meetingContext !== null) {
+      if (directChatContext !== null) {
+        await this.repositories.directChats.completeTurn(runId, output);
+      } else if (meetingContext !== null) {
         await this.repositories.meetingAi.completeTurn(runId, output);
       }
       return;
@@ -443,6 +526,16 @@ export class RunExecutor {
       throw new Error("runtime returned an empty output");
     }
     await this.repositories.runs.finish(runId, "completed", output, null);
+    if (directChatContext !== null) {
+      await this.repositories.directChats.completeTurn(runId, output);
+      await this.repositories.runs.appendEventIfAbsent(
+        runId,
+        "run.completed",
+        "AI 私聊回复已完成",
+        { threadId: directChatContext.thread.id },
+      );
+      return;
+    }
     if (meetingContext !== null) {
       await this.repositories.meetingAi.completeTurn(runId, output);
       await this.repositories.runs.appendEventIfAbsent(
@@ -454,7 +547,7 @@ export class RunExecutor {
       return;
     }
     const ref = await this.fileStore.put({
-      workspaceId: run.projectId,
+      workspaceId: run.projectId!,
       name: `${task!.title.replace(/[^a-zA-Z0-9._-]+/g, "-")}-result.md`,
       mimeType: "text/markdown",
       content: Buffer.from(output, "utf8"),
@@ -469,7 +562,7 @@ export class RunExecutor {
       ) ??
       (await this.repositories.artifacts.save({
         runId,
-        projectId: run.projectId,
+        projectId: run.projectId!,
         ref,
       }));
     await this.repositories.runs.appendEventIfAbsent(

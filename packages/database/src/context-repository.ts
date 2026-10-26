@@ -8,10 +8,11 @@ export class ContextRepository {
     await this.database.transaction(async (client) => {
       await client.query(
         `INSERT INTO context_packs (
-           id, run_id, project_id, task_id, meeting_turn_id, agent_id,
+           id, run_id, project_id, task_id, meeting_turn_id,
+           direct_chat_turn_id, agent_id,
            pack, receipt, content_hash, created_at
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9, $10
+           $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11
          )
          ON CONFLICT (run_id) DO UPDATE SET
            pack = EXCLUDED.pack,
@@ -23,6 +24,7 @@ export class ContextRepository {
           pack.projectId,
           pack.taskId,
           pack.meetingTurnId,
+          pack.directChatTurnId,
           pack.agentId,
           JSON.stringify(pack),
           JSON.stringify(receipt),

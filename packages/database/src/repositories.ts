@@ -58,6 +58,11 @@ import { WorkflowIdempotencyRepository } from "./workflow-idempotency-repository
 import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
 import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.js";
 import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
+import {
+  cancelDirectChatRunWithClient,
+  DirectChatRepository,
+  failDirectChatTurnWithClient,
+} from "./direct-chat-repository.js";
 import { RuntimeTraceRepository } from "./runtime-trace-repository.js";
 import { MeetingDecisionsRepository } from "./meeting-decisions-repository.js";
 import {
@@ -825,6 +830,12 @@ export class RunRepository {
           "UPDATE tasks SET status = 'cancelled', updated_at = NOW() WHERE id = $1",
           [run.taskId],
         );
+      } else if (run.directChatTurnId !== null) {
+        await cancelDirectChatRunWithClient(
+          client,
+          run.id,
+          "direct chat run cancelled",
+        );
       }
       await this.appendEvent(
         id,
@@ -1160,12 +1171,16 @@ export class JobRepository {
         attempts: number;
         max_attempts: number;
         task_id: string | null;
+        meeting_turn_id: string | null;
+        direct_chat_turn_id: string | null;
       }>(
         `SELECT
            job.run_id,
            job.attempts,
            job.max_attempts,
-           run.task_id
+           run.task_id,
+           run.meeting_turn_id,
+           run.direct_chat_turn_id
          FROM jobs AS job
          JOIN runs AS run ON run.id = job.run_id
          WHERE job.id = $1
@@ -1261,7 +1276,14 @@ export class JobRepository {
            WHERE id = $1 AND status = 'in_progress'`,
           [row.task_id],
         );
-      } else {
+      } else if (row.direct_chat_turn_id !== null) {
+        await failDirectChatTurnWithClient(
+          client,
+          row.run_id,
+          "direct_chat_runtime_failed",
+          safeError,
+        );
+      } else if (row.meeting_turn_id !== null) {
         await failMeetingTurnWithClient(
           client,
           row.run_id,
@@ -1297,12 +1319,16 @@ export class JobRepository {
         attempts: number;
         max_attempts: number;
         task_id: string | null;
+        meeting_turn_id: string | null;
+        direct_chat_turn_id: string | null;
       }>(
         `SELECT
            job.run_id,
            job.attempts,
            job.max_attempts,
-           run.task_id
+           run.task_id,
+           run.meeting_turn_id,
+           run.direct_chat_turn_id
          FROM jobs AS job
          JOIN runs AS run ON run.id = job.run_id
          WHERE job.id = $1
@@ -1353,12 +1379,21 @@ export class JobRepository {
           [row.task_id],
         );
       } else if (exhausted) {
-        await failMeetingTurnWithClient(
-          client,
-          row.run_id,
-          "meeting_ai_interrupted",
-          reason,
-        );
+        if (row.direct_chat_turn_id !== null) {
+          await failDirectChatTurnWithClient(
+            client,
+            row.run_id,
+            "direct_chat_interrupted",
+            reason,
+          );
+        } else if (row.meeting_turn_id !== null) {
+          await failMeetingTurnWithClient(
+            client,
+            row.run_id,
+            "meeting_ai_interrupted",
+            reason,
+          );
+        }
       }
       await appendRunEventWithClient(
         client,
@@ -1433,7 +1468,11 @@ export class JobRepository {
            WHERE job_id = $1 AND status = 'running'`,
           [job.id],
         );
-        const interrupted = await client.query<{ task_id: string }>(
+        const interrupted = await client.query<{
+          task_id: string | null;
+          meeting_turn_id: string | null;
+          direct_chat_turn_id: string | null;
+        }>(
           `UPDATE runs
            SET
              status = 'interrupted',
@@ -1441,18 +1480,28 @@ export class JobRepository {
              ended_at = NOW(),
              updated_at = NOW()
            WHERE id = $1 AND status IN ('queued', 'running')
-           RETURNING task_id`,
+           RETURNING task_id, meeting_turn_id, direct_chat_turn_id`,
           [job.run_id],
         );
-        const taskId = interrupted.rows[0]?.task_id;
+        const interruptedRun = interrupted.rows[0];
+        const taskId = interruptedRun?.task_id;
         if (taskId !== undefined) {
           if (taskId === null && outcome === "dead_letter") {
-            await failMeetingTurnWithClient(
-              client,
-              job.run_id,
-              "meeting_ai_lease_expired",
-              "Worker lease expired after all retry attempts",
-            );
+            if (interruptedRun?.direct_chat_turn_id !== null) {
+              await failDirectChatTurnWithClient(
+                client,
+                job.run_id,
+                "direct_chat_lease_expired",
+                "Worker lease expired after all retry attempts",
+              );
+            } else if (interruptedRun?.meeting_turn_id !== null) {
+              await failMeetingTurnWithClient(
+                client,
+                job.run_id,
+                "meeting_ai_lease_expired",
+                "Worker lease expired after all retry attempts",
+              );
+            }
           } else if (taskId !== null) {
             await client.query(
               `UPDATE tasks
@@ -1634,6 +1683,7 @@ export class PlatformRepositories {
   readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
   readonly meetingAi: MeetingAiRepository;
+  readonly directChats: DirectChatRepository;
   readonly meetingDecisions: MeetingDecisionsRepository;
   readonly workbench: WorkbenchRepository;
   readonly workbenchReports: WorkbenchReportsRepository;
@@ -1660,6 +1710,7 @@ export class PlatformRepositories {
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
     this.meetingAi = new MeetingAiRepository(database);
+    this.directChats = new DirectChatRepository(database);
     this.meetingDecisions = new MeetingDecisionsRepository(database);
     this.workbench = new WorkbenchRepository(database);
     this.workbenchReports = new WorkbenchReportsRepository(database);

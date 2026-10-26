@@ -28,6 +28,11 @@ import type {
   CreateWorkflowTemplateInput,
   CreateWorkflowInput,
   CosignWorkflowApprovalInput,
+  DirectChatDetail,
+  DirectChatSendResult,
+  DirectChatThread,
+  DirectChatThreadListItem,
+  DirectChatTurn,
   ImportWorkflowMarkdownInput,
   IdempotencyCleanupInput,
   IdempotencyCleanupResult,
@@ -1022,6 +1027,54 @@ export function dispatchWorkflowStep(instanceId: string): Promise<{
   readonly runId: string;
 }> {
   return request(`/workflow-instances/${instanceId}/dispatch`, {
+    method: "POST",
+  });
+}
+
+export async function listDirectChats(): Promise<DirectChatThreadListItem[]> {
+  return (
+    await request<ListResponse<DirectChatThreadListItem>>("/direct-chats")
+  ).items;
+}
+
+export function ensureDirectChat(agentId: string): Promise<DirectChatThread> {
+  return request("/direct-chats", {
+    method: "POST",
+    body: JSON.stringify({ agentId }),
+  });
+}
+
+export function getDirectChat(threadId: string): Promise<DirectChatDetail> {
+  return request(`/direct-chats/${threadId}`);
+}
+
+export function sendDirectChatMessage(
+  threadId: string,
+  content: string,
+  clientMessageId: string,
+): Promise<DirectChatSendResult> {
+  return request(`/direct-chats/${threadId}/messages`, {
+    method: "POST",
+    headers: { "idempotency-key": clientMessageId },
+    body: JSON.stringify({ content, clientMessageId }),
+  });
+}
+
+export function retryDirectChatTurn(
+  threadId: string,
+  turnId: string,
+): Promise<DirectChatSendResult> {
+  return request(`/direct-chats/${threadId}/turns/${turnId}/retry`, {
+    method: "POST",
+    headers: { "idempotency-key": `direct-chat-retry:${turnId}` },
+  });
+}
+
+export function cancelDirectChatTurn(
+  threadId: string,
+  turnId: string,
+): Promise<{ readonly turn: DirectChatTurn }> {
+  return request(`/direct-chats/${threadId}/turns/${turnId}/cancel`, {
     method: "POST",
   });
 }

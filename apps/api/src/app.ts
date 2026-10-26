@@ -5,6 +5,7 @@ import {
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
   confirmHandoffCardInputSchema,
+  createDirectChatInputSchema,
   createAgentInputSchema,
   createAgentEpisodeInputSchema,
   createHandoffCardInputSchema,
@@ -42,6 +43,7 @@ import {
   refreshWorkbenchBriefInputSchema,
   reviewMemoryClaimsInputSchema,
   setWorkbenchFollowInputSchema,
+  sendDirectChatMessageInputSchema,
   taskReviewInputSchema,
   traceIdSchema,
   triggerMeetingAiInputSchema,
@@ -110,6 +112,10 @@ const workflowInstanceParamsSchema = z.object({
   instanceId: z.string().uuid(),
 });
 const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
+const directChatParamsSchema = z.object({ threadId: z.string().uuid() });
+const directChatTurnParamsSchema = directChatParamsSchema.extend({
+  turnId: z.string().uuid(),
+});
 const meetingActionItemParamsSchema = meetingParamsSchema.extend({
   actionItemId: z.string().uuid(),
 });
@@ -246,7 +252,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 19;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 20;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -915,7 +921,10 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/agents", async (request, reply) => {
     const input = createAgentInputSchema.parse(request.body);
-    return reply.status(201).send(await application.createAgent(input));
+    const actorId = requestActorId(request.headers);
+    return reply
+      .status(201)
+      .send(await application.createAgent(input, actorId));
   });
 
   app.get("/api/v1/agents/:id", async (request, reply) => {
@@ -926,13 +935,15 @@ export function buildApi(options: BuildApiOptions): {
   app.patch("/api/v1/agents/:id", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const input = updateAgentInputSchema.parse(request.body);
-    return reply.send(await application.updateAgent(id, input));
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.updateAgent(id, input, actorId));
   });
 
   app.post("/api/v1/agents/:id/status", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const { status } = agentStatusInputSchema.parse(request.body);
-    return reply.send(await application.setAgentStatus(id, status));
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.setAgentStatus(id, status, actorId));
   });
 
   app.get("/api/v1/tasks", async (request, reply) => {
@@ -1067,14 +1078,28 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/runs/:runId", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
-    return reply.send(await application.getRunDetail(runId));
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getRunDetail(runId, actorId));
   });
 
   app.get("/api/v1/traces/:traceId", async (request, reply) => {
     const { traceId } = traceParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
     const trace = await repositories.traces.get(traceId);
     if (trace === undefined) {
       throw new ApplicationError("trace_not_found", "Trace was not found", 404);
+    }
+    for (const run of trace.runs) {
+      if (
+        run.directChatTurnId !== null &&
+        !(await repositories.directChats.canAccessRun(run.id, actorId))
+      ) {
+        throw new ApplicationError(
+          "direct_chat_forbidden",
+          "The AI direct chat belongs to another account",
+          403,
+        );
+      }
     }
     return reply.send(trace);
   });
@@ -1082,7 +1107,8 @@ export function buildApi(options: BuildApiOptions): {
   app.get("/api/v1/runs/:runId/events", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
     const { afterSeq, afterDeltaSeq } = eventQuerySchema.parse(request.query);
-    const detail = await application.getRunDetail(runId);
+    const actorId = requestActorId(request.headers);
+    const detail = await application.getRunDetail(runId, actorId);
     const repository = new PlatformRepositories(database).runs;
     return reply.send({
       runId,
@@ -1094,23 +1120,29 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/runs/:runId/input", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
-    const detail = await application.getRunDetail(runId);
+    const actorId = requestActorId(request.headers);
+    const detail = await application.getRunDetail(runId, actorId);
     return reply.send({ inputSnapshot: detail.run.inputSnapshot });
   });
 
   app.get("/api/v1/runs/:runId/context", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
-    return reply.send(await application.getRunContext(runId));
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getRunContext(runId, actorId));
   });
 
   app.get("/api/v1/runs/:runId/artifacts", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
-    return reply.send({ items: await application.listArtifacts(runId) });
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listArtifacts(runId, actorId),
+    });
   });
 
   app.get("/api/v1/artifacts/:artifactId/download", async (request, reply) => {
     const { artifactId } = artifactParamsSchema.parse(request.params);
-    const artifact = await application.getArtifact(artifactId);
+    const actorId = requestActorId(request.headers);
+    const artifact = await application.getArtifact(artifactId, actorId);
     const ref: FileRef = {
       id: artifact.id,
       storageKey: artifact.storageKey,
@@ -1131,7 +1163,8 @@ export function buildApi(options: BuildApiOptions): {
 
   app.post("/api/v1/runs/:runId/cancel", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
-    await application.cancelRun(runId);
+    const actorId = requestActorId(request.headers);
+    await application.cancelRun(runId, actorId);
     return reply.status(202).send({ ok: true });
   });
 
@@ -1766,6 +1799,89 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
+  app.get("/api/v1/direct-chats", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listDirectChats(actorId),
+    });
+  });
+
+  app.post("/api/v1/direct-chats", async (request, reply) => {
+    const input = createDirectChatInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.ensureDirectChat(input, actorId));
+  });
+
+  app.get("/api/v1/direct-chats/:threadId", async (request, reply) => {
+    const { threadId } = directChatParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getDirectChat(threadId, actorId));
+  });
+
+  app.post(
+    "/api/v1/direct-chats/:threadId/messages",
+    async (request, reply) => {
+      const { threadId } = directChatParamsSchema.parse(request.params);
+      const input = sendDirectChatMessageInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `direct-chat:${threadId}`,
+        operation: "direct-chat.message.send",
+        actorId,
+        payload: input,
+        statusCode: 202,
+        execute: () =>
+          application.sendDirectChatMessage(
+            threadId,
+            input,
+            actorId,
+            requestTraces.get(request) ?? createRootTraceContext(),
+          ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/direct-chats/:threadId/turns/:turnId/retry",
+    async (request, reply) => {
+      const { threadId, turnId } = directChatTurnParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `direct-chat:${threadId}`,
+        operation: "direct-chat.message.retry",
+        actorId,
+        payload: { turnId },
+        statusCode: 202,
+        execute: () =>
+          application.retryDirectChatTurn(
+            threadId,
+            turnId,
+            actorId,
+            requestTraces.get(request) ?? createRootTraceContext(),
+          ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/direct-chats/:threadId/turns/:turnId/cancel",
+    async (request, reply) => {
+      const { threadId, turnId } = directChatTurnParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply.status(202).send({
+        turn: await application.cancelDirectChatTurn(threadId, turnId, actorId),
+      });
+    },
+  );
+
   app.get("/api/v1/meetings", async (request, reply) => {
     const { projectId } = listTasksQuerySchema.parse(request.query);
     if (projectId === undefined) {
@@ -1996,6 +2112,8 @@ export function buildApi(options: BuildApiOptions): {
   app.get("/api/v1/runs/:runId/stream", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
     const { afterSeq, afterDeltaSeq } = eventQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    await application.getRunDetail(runId, actorId);
     const repository = new PlatformRepositories(database).runs;
     const initial = await repository.get(runId);
     if (initial === undefined) {

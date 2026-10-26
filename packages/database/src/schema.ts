@@ -1915,3 +1915,106 @@ WHERE participant.value ->> 'kind' = 'agent'
     ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 ON CONFLICT (meeting_id, agent_id) DO NOTHING;
 `;
+
+export const AI_DIRECT_CHAT_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS direct_chat_threads (
+  id UUID PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (owner_id, agent_id)
+);
+
+CREATE INDEX IF NOT EXISTS direct_chat_threads_owner_idx
+  ON direct_chat_threads(owner_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS direct_chat_messages (
+  id UUID PRIMARY KEY,
+  thread_id UUID NOT NULL
+    REFERENCES direct_chat_threads(id) ON DELETE CASCADE,
+  sequence BIGINT NOT NULL CHECK (sequence > 0),
+  sender_type TEXT NOT NULL
+    CHECK (sender_type IN ('owner', 'agent', 'system')),
+  sender_id TEXT NOT NULL,
+  sender_name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  client_message_id UUID,
+  turn_id UUID,
+  run_id UUID REFERENCES runs(id) ON DELETE SET NULL,
+  trace_id TEXT,
+  status TEXT NOT NULL DEFAULT 'sent'
+    CHECK (status IN ('sent', 'failed', 'cancelled')),
+  error_code TEXT,
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (thread_id, sequence)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS direct_chat_messages_client_idx
+  ON direct_chat_messages(thread_id, client_message_id)
+  WHERE client_message_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS direct_chat_messages_thread_idx
+  ON direct_chat_messages(thread_id, created_at, sequence);
+
+CREATE TABLE IF NOT EXISTS direct_chat_turns (
+  id UUID PRIMARY KEY,
+  thread_id UUID NOT NULL
+    REFERENCES direct_chat_threads(id) ON DELETE CASCADE,
+  source_message_id UUID NOT NULL
+    REFERENCES direct_chat_messages(id) ON DELETE CASCADE,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN (
+      'queued',
+      'running',
+      'completed',
+      'failed',
+      'cancelled'
+    )),
+  run_id UUID UNIQUE REFERENCES runs(id) ON DELETE SET NULL,
+  response_message_id UUID UNIQUE
+    REFERENCES direct_chat_messages(id) ON DELETE SET NULL,
+  error_code TEXT,
+  error_message TEXT,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (thread_id, source_message_id, attempt)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS direct_chat_turns_active_source_idx
+  ON direct_chat_turns(source_message_id)
+  WHERE status IN ('queued', 'running', 'completed');
+
+CREATE INDEX IF NOT EXISTS direct_chat_turns_thread_idx
+  ON direct_chat_turns(thread_id, created_at DESC);
+
+ALTER TABLE direct_chat_messages
+  DROP CONSTRAINT IF EXISTS direct_chat_messages_turn_id_fkey;
+
+ALTER TABLE direct_chat_messages
+  ADD CONSTRAINT direct_chat_messages_turn_id_fkey
+  FOREIGN KEY (turn_id) REFERENCES direct_chat_turns(id) ON DELETE SET NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS direct_chat_messages_turn_idx
+  ON direct_chat_messages(turn_id)
+  WHERE turn_id IS NOT NULL;
+
+ALTER TABLE runs
+  ALTER COLUMN project_id DROP NOT NULL,
+  ADD COLUMN IF NOT EXISTS direct_chat_turn_id UUID
+    REFERENCES direct_chat_turns(id) ON DELETE SET NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS runs_direct_chat_turn_idx
+  ON runs(direct_chat_turn_id)
+  WHERE direct_chat_turn_id IS NOT NULL;
+
+ALTER TABLE context_packs
+  ALTER COLUMN project_id DROP NOT NULL,
+  ADD COLUMN IF NOT EXISTS direct_chat_turn_id UUID
+    REFERENCES direct_chat_turns(id) ON DELETE SET NULL;
+`;

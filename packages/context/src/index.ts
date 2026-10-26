@@ -42,6 +42,24 @@ export interface BuildMeetingContextInput {
   readonly now?: Date;
 }
 
+export interface BuildDirectChatContextInput {
+  readonly runId: string;
+  readonly thread: {
+    readonly id: string;
+    readonly ownerId: string;
+  };
+  readonly turn: {
+    readonly id: string;
+  };
+  readonly messages: readonly {
+    readonly senderName: string;
+    readonly senderType: "owner" | "agent" | "system";
+    readonly content: string;
+  }[];
+  readonly agent: Agent;
+  readonly now?: Date;
+}
+
 function contextHash(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -116,6 +134,7 @@ export function buildTaskContext(input: BuildTaskContextInput): {
     projectId: input.project.id,
     taskId: input.task.id,
     meetingTurnId: null,
+    directChatTurnId: null,
     agentId: input.agent.id,
     identity: {
       name: input.agent.name,
@@ -210,6 +229,7 @@ export function buildMeetingContext(input: BuildMeetingContextInput): {
     projectId: input.project.id,
     taskId: null,
     meetingTurnId: input.turn.id,
+    directChatTurnId: null,
     agentId: input.agent.id,
     identity: {
       name: input.agent.name,
@@ -229,6 +249,75 @@ export function buildMeetingContext(input: BuildMeetingContextInput): {
       excludedSources: [],
       reason:
         "Meeting context contains the agent identity, policy trigger, recent meeting transcript, and scoped episodes.",
+      createdAt,
+    },
+  };
+}
+
+export function buildDirectChatContext(input: BuildDirectChatContextInput): {
+  pack: ContextPack;
+  receipt: ContextReceipt;
+} {
+  const now = input.now ?? new Date();
+  const createdAt = now.toISOString();
+  const recentMessages = input.messages
+    .filter((message) => message.senderType !== "system")
+    .slice(-40);
+  const sources: ContextSource[] = [
+    {
+      type: "conversation",
+      id: input.thread.id,
+      label: `AI direct chat with ${input.agent.name}`,
+    },
+  ];
+  const renderedPrompt = [
+    "# Agent identity",
+    `You are ${input.agent.name}, speaking directly with the owner of this conversation.`,
+    input.agent.description,
+    input.agent.soul,
+    "",
+    "# Conversation scope",
+    "This is a private one-to-one chat. Use only this conversation and your own agent identity.",
+    "Do not infer or disclose other conversations, other agents, meetings, projects, or memory from unrelated scopes.",
+    "",
+    "# Conversation transcript",
+    ...(recentMessages.length === 0
+      ? ["No messages are available."]
+      : recentMessages.map(
+          (message) =>
+            `[${message.senderType}] ${message.senderName}: ${message.content}`,
+        )),
+    "",
+    "# Output requirements",
+    "Reply directly to the owner in plain text. Do not impersonate the owner and do not claim access to context that was not provided.",
+  ].join("\n");
+  const id = randomUUID();
+  const pack: ContextPack = {
+    id,
+    runId: input.runId,
+    projectId: null,
+    taskId: null,
+    meetingTurnId: null,
+    directChatTurnId: input.turn.id,
+    agentId: input.agent.id,
+    identity: {
+      name: input.agent.name,
+      runtimeKind: input.agent.runtimeKind,
+    },
+    sources,
+    renderedPrompt,
+    contentHash: contextHash(renderedPrompt),
+    createdAt,
+  };
+  return {
+    pack,
+    receipt: {
+      contextPackId: id,
+      runId: input.runId,
+      usedSources: sources,
+      excludedSources: [],
+      reason:
+        "Direct chat context contains only the stable owner-agent conversation and the selected agent identity.",
       createdAt,
     },
   };

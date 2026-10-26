@@ -63,6 +63,12 @@ import type {
   CreateTemplateRoleInput,
   CreateWorkflowTemplateInput,
   CopyProjectTemplateInput,
+  CreateDirectChatInput,
+  DirectChatDetail,
+  DirectChatSendResult,
+  DirectChatThread,
+  DirectChatThreadListItem,
+  DirectChatTurn,
   ArchiveProjectTemplateInput,
   TemplateRole,
   UpdateProjectTemplateInput,
@@ -71,6 +77,7 @@ import type {
   WorkflowTemplate,
   RunDetail,
   RunInputSnapshot,
+  SendDirectChatMessageInput,
   RetryWorkflowNodeInput,
   StartWorkflowInput,
   Task,
@@ -137,6 +144,7 @@ import {
   workflowRetryDelayMs,
 } from "@pluginmax/domain";
 import {
+  DirectChatPreconditionError,
   MeetingAiPreconditionError,
   MemoryReviewConflictError,
   ProjectTemplateRepositoryError,
@@ -738,21 +746,28 @@ export class PlatformApplication {
     };
   }
 
-  createAgent(input: CreateAgentInput): Promise<Agent> {
-    return this.repositories.agents.create(input, "local-admin", "local-admin");
+  createAgent(
+    input: CreateAgentInput,
+    actorId = "local-admin",
+  ): Promise<Agent> {
+    return this.repositories.agents.create(input, actorId, actorId);
   }
 
-  async updateAgent(id: string, input: UpdateAgentInput): Promise<AgentDetail> {
-    const agent = await this.repositories.agents.update(
-      id,
-      input,
-      "local-admin",
-    );
+  async updateAgent(
+    id: string,
+    input: UpdateAgentInput,
+    actorId = "local-admin",
+  ): Promise<AgentDetail> {
+    const agent = await this.repositories.agents.update(id, input, actorId);
     if (agent === undefined) {
       throw new ApplicationError("agent_not_found", "Agent not found", 404);
     }
     if (agent.status !== "active") {
       await this.repositories.meetingAi.cancelAgentOpenRuns(
+        agent.id,
+        "agent disabled",
+      );
+      await this.repositories.directChats.cancelOpenTurnsForAgent(
         agent.id,
         "agent disabled",
       );
@@ -763,16 +778,104 @@ export class PlatformApplication {
   async setAgentStatus(
     id: string,
     status: Agent["status"],
+    actorId = "local-admin",
   ): Promise<AgentDetail> {
-    const agent = await this.repositories.agents.setStatus(
-      id,
-      status,
-      "local-admin",
-    );
+    const agent = await this.repositories.agents.setStatus(id, status, actorId);
     if (agent === undefined) {
       throw new ApplicationError("agent_not_found", "Agent not found", 404);
     }
+    if (status !== "active") {
+      await this.repositories.directChats.cancelOpenTurnsForAgent(
+        agent.id,
+        "agent disabled",
+      );
+    }
     return this.getAgent(id);
+  }
+
+  async listDirectChats(
+    actorId = "local-admin",
+  ): Promise<DirectChatThreadListItem[]> {
+    return this.repositories.directChats.listForOwner(actorId);
+  }
+
+  async ensureDirectChat(
+    input: CreateDirectChatInput,
+    actorId = "local-admin",
+  ): Promise<DirectChatThread> {
+    try {
+      return await this.repositories.directChats.ensureThread(
+        actorId,
+        input.agentId,
+      );
+    } catch (error) {
+      throw directChatApplicationError(error);
+    }
+  }
+
+  async getDirectChat(
+    threadId: string,
+    actorId = "local-admin",
+  ): Promise<DirectChatDetail> {
+    try {
+      return await this.repositories.directChats.getDetail(threadId, actorId);
+    } catch (error) {
+      throw directChatApplicationError(error);
+    }
+  }
+
+  async sendDirectChatMessage(
+    threadId: string,
+    input: SendDirectChatMessageInput,
+    actorId = "local-admin",
+    trace: TraceContext = createRootTraceContext(),
+  ): Promise<DirectChatSendResult> {
+    try {
+      return await this.repositories.directChats.sendMessage(
+        threadId,
+        actorId,
+        input,
+        trace,
+      );
+    } catch (error) {
+      throw directChatApplicationError(error);
+    }
+  }
+
+  async retryDirectChatTurn(
+    threadId: string,
+    turnId: string,
+    actorId = "local-admin",
+    trace: TraceContext = createRootTraceContext(),
+  ): Promise<DirectChatSendResult> {
+    try {
+      return await this.repositories.directChats.retryTurn(
+        threadId,
+        turnId,
+        actorId,
+        trace,
+      );
+    } catch (error) {
+      throw directChatApplicationError(error);
+    }
+  }
+
+  async cancelDirectChatTurn(
+    threadId: string,
+    turnId: string,
+    actorId = "local-admin",
+    reason = "用户取消了 AI 私聊回复",
+  ): Promise<DirectChatTurn> {
+    try {
+      return await this.repositories.directChats.cancelTurn(
+        threadId,
+        turnId,
+        actorId,
+        reason,
+      );
+    } catch (error) {
+      throw directChatApplicationError(error);
+    }
   }
 
   listTasks(projectId?: string): Promise<Task[]> {
@@ -1256,16 +1359,27 @@ export class PlatformApplication {
     return { agentId: agent.id };
   }
 
-  async getRunDetail(runId: string): Promise<RunDetail> {
+  async getRunDetail(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<RunDetail> {
     const run = await this.repositories.runs.get(runId);
     if (run === undefined) {
       throw new ApplicationError("run_not_found", "Run not found", 404);
+    }
+    if (!(await this.repositories.directChats.canAccessRun(runId, actorId))) {
+      throw new ApplicationError(
+        "direct_chat_forbidden",
+        "The AI direct chat belongs to another account",
+        403,
+      );
     }
     const events = await this.repositories.runs.listEvents(runId);
     return { run, events };
   }
 
-  async getRunContext(runId: string) {
+  async getRunContext(runId: string, actorId = "local-admin") {
+    await this.getRunDetail(runId, actorId);
     const context = await this.repositories.contexts.getByRun(runId);
     if (context === undefined) {
       throw new ApplicationError(
@@ -1277,10 +1391,17 @@ export class PlatformApplication {
     return context;
   }
 
-  async cancelRun(runId: string): Promise<void> {
+  async cancelRun(runId: string, actorId = "local-admin"): Promise<void> {
     const run = await this.repositories.runs.get(runId);
     if (run === undefined) {
       throw new ApplicationError("run_not_found", "Run not found", 404);
+    }
+    if (!(await this.repositories.directChats.canAccessRun(runId, actorId))) {
+      throw new ApplicationError(
+        "direct_chat_forbidden",
+        "The AI direct chat belongs to another account",
+        403,
+      );
     }
     if (isTerminalRunStatus(run.status)) {
       throw new ApplicationError(
@@ -1349,11 +1470,15 @@ export class PlatformApplication {
     return this.getTask(taskId);
   }
 
-  async listArtifacts(runId: string): Promise<Artifact[]> {
+  async listArtifacts(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<Artifact[]> {
+    await this.getRunDetail(runId, actorId);
     return this.repositories.artifacts.listByRun(runId);
   }
 
-  async getArtifact(id: string): Promise<Artifact> {
+  async getArtifact(id: string, actorId = "local-admin"): Promise<Artifact> {
     const artifact = await this.repositories.artifacts.get(id);
     if (artifact === undefined) {
       throw new ApplicationError(
@@ -1362,6 +1487,7 @@ export class PlatformApplication {
         404,
       );
     }
+    await this.getRunDetail(artifact.runId, actorId);
     return artifact;
   }
 
@@ -5498,6 +5624,22 @@ function translateProjectTemplateError(error: unknown): Error {
       error.statusCode,
       error.details,
     );
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function directChatApplicationError(error: unknown): Error {
+  if (error instanceof ApplicationError) return error;
+  if (error instanceof DirectChatPreconditionError) {
+    const statusCode =
+      error.code === "direct_chat_forbidden"
+        ? 403
+        : error.code === "direct_chat_not_found" ||
+            error.code === "direct_chat_turn_not_found" ||
+            error.code === "agent_not_found"
+          ? 404
+          : 409;
+    return new ApplicationError(error.code, error.message, statusCode);
   }
   return error instanceof Error ? error : new Error(String(error));
 }

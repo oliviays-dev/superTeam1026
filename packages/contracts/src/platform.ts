@@ -330,6 +330,14 @@ export const runInputSnapshotSchema = z.object({
       agendaItem: z.string().nullable().optional(),
     })
     .optional(),
+  directChat: z
+    .object({
+      threadId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      ownerId: z.string(),
+      agentId: z.string().uuid(),
+    })
+    .optional(),
   runtimeOptions: z
     .object({
       fault: z.enum(["fail", "timeout"]).optional(),
@@ -341,9 +349,10 @@ export type RunInputSnapshot = z.infer<typeof runInputSnapshotSchema>;
 
 export const runSchema = z.object({
   id: z.string().uuid(),
-  projectId: z.string().uuid(),
+  projectId: z.string().uuid().nullable(),
   taskId: z.string().uuid().nullable(),
   meetingTurnId: z.string().uuid().nullable(),
+  directChatTurnId: z.string().uuid().nullable(),
   agentId: z.string().uuid(),
   status: runStatusSchema,
   contextPackId: z.string().uuid().nullable(),
@@ -420,7 +429,14 @@ export const runDeltaSchema = z.object({
 export type RunDelta = z.infer<typeof runDeltaSchema>;
 
 export const contextSourceSchema = z.object({
-  type: z.enum(["project", "task", "acceptance", "attachment", "memory"]),
+  type: z.enum([
+    "project",
+    "task",
+    "acceptance",
+    "attachment",
+    "memory",
+    "conversation",
+  ]),
   id: z.string(),
   label: z.string(),
 });
@@ -429,9 +445,10 @@ export type ContextSource = z.infer<typeof contextSourceSchema>;
 export const contextPackSchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
-  projectId: z.string().uuid(),
+  projectId: z.string().uuid().nullable(),
   taskId: z.string().uuid().nullable(),
   meetingTurnId: z.string().uuid().nullable(),
+  directChatTurnId: z.string().uuid().nullable(),
   agentId: z.string().uuid(),
   identity: z.object({
     name: z.string(),

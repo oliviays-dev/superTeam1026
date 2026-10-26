@@ -1,5 +1,6 @@
 import {
   AGENT_MANAGEMENT_SCHEMA_SQL,
+  AI_DIRECT_CHAT_SCHEMA_SQL,
   COLLABORATION_SCHEMA_SQL,
   CONTEXT_SCHEMA_SQL,
   INITIAL_SCHEMA_SQL,
@@ -41,6 +42,7 @@ const migrations = [
   { version: 17, sql: WORKBENCH_REPORTS_SCHEMA_SQL },
   { version: 18, sql: PROJECT_TEMPLATES_SCHEMA_SQL },
   { version: 19, sql: MEETING_AI_PARTICIPATION_SCHEMA_SQL },
+  { version: 20, sql: AI_DIRECT_CHAT_SCHEMA_SQL },
 ] as const;
 
 export async function migrate(

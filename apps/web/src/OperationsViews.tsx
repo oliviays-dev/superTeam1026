@@ -1,5 +1,6 @@
 import type {
   Agent,
+  DirectChatThreadListItem,
   Meeting,
   MeetingAiPolicy,
   MeetingDetail,
@@ -24,6 +25,7 @@ import {
   Pause,
   Play,
   RefreshCw,
+  Search,
   Square,
   Star,
   TriangleAlert,
@@ -38,12 +40,14 @@ import {
   createWorkflow,
   decideWorkflowApproval,
   dispatchWorkflowStep,
+  ensureDirectChat,
   getWorkflowInstanceDetail,
   importWorkflowMarkdown,
   getMeeting,
   getMeetingAiPolicy,
   getWorkbenchDashboard,
   listMeetings,
+  listDirectChats,
   listProjectMembers,
   listProjectRoles,
   listWorkbenchFollows,
@@ -67,6 +71,7 @@ import {
 } from "./api.js";
 import { MeetingDecisionsPanel } from "./MeetingDecisionsPanel.js";
 import { WorkflowRuntimePanel } from "./WorkflowRuntimePanel.js";
+import { DirectChatRoom } from "./DirectChatRoom.js";
 
 interface ProjectViewProps {
   readonly projects: Project[];
@@ -1134,6 +1139,11 @@ export function MeetingsView({
   const queryClient = useQueryClient();
   const selectedProjectId = projectId || projects[0]?.id || "";
   const [meetingId, setMeetingId] = useState("");
+  const [directChatId, setDirectChatId] = useState("");
+  const [conversationKind, setConversationKind] = useState<
+    "all" | "direct" | "meeting"
+  >("all");
+  const [conversationSearch, setConversationSearch] = useState("");
   const [title, setTitle] = useState("");
   const [agenda, setAgenda] = useState("");
   const [agentId, setAgentId] = useState("");
@@ -1142,6 +1152,8 @@ export function MeetingsView({
   useEffect(() => {
     if (initialMeetingId === "") return;
     setMeetingId(initialMeetingId);
+    setDirectChatId("");
+    setConversationKind("meeting");
     onInitialMeetingConsumed();
   }, [initialMeetingId, onInitialMeetingConsumed]);
   const meetingsQuery = useQuery({
@@ -1154,6 +1166,11 @@ export function MeetingsView({
     queryFn: () => getMeeting(meetingId),
     enabled: meetingId !== "",
     refetchInterval: 2_000,
+  });
+  const directChatsQuery = useQuery({
+    queryKey: ["direct-chats"],
+    queryFn: listDirectChats,
+    refetchInterval: 4_000,
   });
   const membersQuery = useQuery({
     queryKey: ["project-members", selectedProjectId],
@@ -1171,8 +1188,19 @@ export function MeetingsView({
     onSuccess: (meeting) => {
       setTitle("");
       setAgenda("");
+      setDirectChatId("");
+      setConversationKind("meeting");
       setMeetingId(meeting.id);
       void queryClient.invalidateQueries({ queryKey: ["meetings"] });
+    },
+  });
+  const ensureDirectChatMutation = useMutation({
+    mutationFn: ensureDirectChat,
+    onSuccess: (thread) => {
+      setMeetingId("");
+      setConversationKind("direct");
+      setDirectChatId(thread.id);
+      void queryClient.invalidateQueries({ queryKey: ["direct-chats"] });
     },
   });
   const messageMutation = useMutation({
@@ -1195,13 +1223,34 @@ export function MeetingsView({
     },
   });
   const detail: MeetingDetail | undefined = detailQuery.data;
+  const normalizedSearch = conversationSearch.trim().toLocaleLowerCase();
+  const directChats = (directChatsQuery.data ?? []).filter((item) =>
+    normalizedSearch === ""
+      ? true
+      : `${item.agent.name} ${item.ownerId} ${item.latestMessage?.content ?? ""}`
+          .toLocaleLowerCase()
+          .includes(normalizedSearch),
+  );
+  const meetings = (meetingsQuery.data ?? []).filter((meeting) =>
+    normalizedSearch === ""
+      ? true
+      : `${meeting.title} ${meeting.agenda}`
+          .toLocaleLowerCase()
+          .includes(normalizedSearch),
+  );
+  const conversationCount =
+    conversationKind === "direct"
+      ? directChats.length
+      : conversationKind === "meeting"
+        ? meetings.length
+        : directChats.length + meetings.length;
 
   return (
     <main className="pm-page">
       <header className="pm-page-head">
         <div>
           <h1>沟通</h1>
-          <p>围绕项目和 AI 伙伴保留可追溯的会议过程与结论。</p>
+          <p>在同一工作区继续 AI 私聊和项目会议，并保留完整运行轨迹。</p>
         </div>
         <select
           className="pm-compact-select"
@@ -1210,6 +1259,7 @@ export function MeetingsView({
           onChange={(event) => {
             onProjectChange(event.target.value);
             setMeetingId("");
+            setDirectChatId("");
           }}
         >
           {projects.map((project) => (
@@ -1224,81 +1274,178 @@ export function MeetingsView({
         <section className="pm-panel meeting-list-panel">
           <div className="pm-section-head">
             <div>
-              <h2>会议</h2>
-              <p>{meetingsQuery.data?.length ?? 0} 场会议</p>
+              <h2>会话</h2>
+              <p>{conversationCount} 个会话</p>
             </div>
             <MessageSquare size={16} />
           </div>
-          <form
-            className="meeting-create-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (title.trim() !== "") createMutation.mutate();
-            }}
-          >
-            <input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="会议主题"
-            />
-            <textarea
-              value={agenda}
-              onChange={(event) => setAgenda(event.target.value)}
-              placeholder="会议议程"
-              rows={2}
-            />
+          <div className="communication-toolbar">
             <select
-              aria-label="邀请 AI 伙伴"
-              value={agentId}
-              onChange={(event) => setAgentId(event.target.value)}
+              aria-label="会话类型"
+              value={conversationKind}
+              onChange={(event) => {
+                const kind = event.target.value as "all" | "direct" | "meeting";
+                setConversationKind(kind);
+                if (kind === "meeting") setDirectChatId("");
+                if (kind === "direct") setMeetingId("");
+              }}
             >
-              <option value="">仅本地用户</option>
-              {agents
-                .filter((agent) => agent.status === "active")
-                .map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name}
-                  </option>
-                ))}
+              <option value="all">全部会话</option>
+              <option value="direct">AI 对话</option>
+              <option value="meeting">会议</option>
             </select>
-            <button className="pm-btn secondary" type="submit">
-              <Plus size={14} />
-              新建会议
+            <input
+              aria-label="搜索会话"
+              value={conversationSearch}
+              onChange={(event) => setConversationSearch(event.target.value)}
+              placeholder="搜索会话"
+            />
+            <button
+              className="pm-icon-button"
+              type="button"
+              aria-label="执行搜索"
+              title="搜索"
+            >
+              <Search size={14} />
             </button>
-          </form>
-          <div className="meeting-list">
-            {meetingsQuery.data?.map((meeting: Meeting) => (
-              <button
-                key={meeting.id}
-                className={`meeting-row ${
-                  meeting.id === meetingId ? "active" : ""
-                }`}
-                type="button"
-                onClick={() => setMeetingId(meeting.id)}
-              >
-                <span className="meeting-row-icon">
-                  <CalendarClock size={14} />
-                </span>
-                <span>
-                  <strong>{meeting.title}</strong>
-                  <small>{formatDateTime(meeting.updatedAt)}</small>
-                </span>
-                <i
-                  className={`pm-pill ${meeting.status === "open" ? "progress" : "done"}`}
-                >
-                  {meeting.status === "open" ? "进行中" : "已结束"}
-                </i>
-              </button>
-            ))}
           </div>
+          {conversationKind !== "direct" && (
+            <form
+              className="meeting-create-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (title.trim() !== "") createMutation.mutate();
+              }}
+            >
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="会议主题"
+              />
+              <textarea
+                value={agenda}
+                onChange={(event) => setAgenda(event.target.value)}
+                placeholder="会议议程"
+                rows={2}
+              />
+              <select
+                aria-label="邀请 AI 伙伴"
+                value={agentId}
+                onChange={(event) => setAgentId(event.target.value)}
+              >
+                <option value="">仅本地用户</option>
+                {agents
+                  .filter((agent) => agent.status === "active")
+                  .map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+              </select>
+              <button className="pm-btn secondary" type="submit">
+                <Plus size={14} />
+                新建会议
+              </button>
+            </form>
+          )}
+          {conversationKind !== "meeting" && (
+            <div className="communication-list-section">
+              <div className="communication-list-label">
+                <span>AI 对话</span>
+                <b>{directChats.length}</b>
+              </div>
+              <div className="meeting-list">
+                {directChats.map((item) => (
+                  <DirectChatConversationRow
+                    key={item.agent.id}
+                    item={item}
+                    active={item.threadId === directChatId}
+                    creating={
+                      ensureDirectChatMutation.isPending &&
+                      ensureDirectChatMutation.variables === item.agent.id
+                    }
+                    onOpen={() => {
+                      if (item.threadId !== null) {
+                        setMeetingId("");
+                        setDirectChatId(item.threadId);
+                        return;
+                      }
+                      ensureDirectChatMutation.mutate(item.agent.id);
+                    }}
+                  />
+                ))}
+                {directChats.length === 0 && (
+                  <div className="pm-empty compact">没有匹配的 AI 对话</div>
+                )}
+              </div>
+            </div>
+          )}
+          {conversationKind !== "direct" && (
+            <div className="communication-list-section">
+              <div className="communication-list-label">
+                <span>会议</span>
+                <b>{meetings.length}</b>
+              </div>
+              <div className="meeting-list">
+                {meetings.map((meeting: Meeting) => (
+                  <button
+                    key={meeting.id}
+                    className={`meeting-row ${
+                      meeting.id === meetingId ? "active" : ""
+                    }`}
+                    type="button"
+                    onClick={() => {
+                      setDirectChatId("");
+                      setMeetingId(meeting.id);
+                    }}
+                  >
+                    <span className="meeting-row-icon">
+                      <CalendarClock size={14} />
+                    </span>
+                    <span>
+                      <strong>{meeting.title}</strong>
+                      <small>{formatDateTime(meeting.updatedAt)}</small>
+                    </span>
+                    <i
+                      className={`pm-pill ${meeting.status === "open" ? "progress" : "done"}`}
+                    >
+                      {meeting.status === "open" ? "进行中" : "已结束"}
+                    </i>
+                  </button>
+                ))}
+                {meetings.length === 0 && (
+                  <div className="pm-empty compact">没有匹配的会议</div>
+                )}
+              </div>
+            </div>
+          )}
+          {(ensureDirectChatMutation.error ??
+            directChatsQuery.error ??
+            meetingsQuery.error) !== null && (
+            <div className="pm-error">
+              {
+                (
+                  ensureDirectChatMutation.error ??
+                  directChatsQuery.error ??
+                  meetingsQuery.error
+                )?.message
+              }
+            </div>
+          )}
         </section>
 
-        <section className="pm-panel meeting-room">
-          {detail === undefined ? (
+        <section
+          className={`pm-panel meeting-room ${
+            directChatId !== "" ? "direct-chat-room" : ""
+          }`}
+        >
+          {directChatId !== "" ? (
+            <DirectChatRoom threadId={directChatId} />
+          ) : detail === undefined ? (
             <div className="pm-empty meeting-empty">
               <MessageSquare size={28} />
-              <strong>选择或创建会议</strong>
-              <span>会议消息、AI 参会人和纪要将在这里汇总。</span>
+              <strong>选择 AI 对话或会议</strong>
+              <span>消息、运行状态和协作记录将在这里汇总。</span>
             </div>
           ) : (
             <>
@@ -1407,6 +1554,59 @@ export function MeetingsView({
         </section>
       </div>
     </main>
+  );
+}
+
+function DirectChatConversationRow({
+  item,
+  active,
+  creating,
+  onOpen,
+}: {
+  readonly item: DirectChatThreadListItem;
+  readonly active: boolean;
+  readonly creating: boolean;
+  readonly onOpen: () => void;
+}) {
+  const runtimeUnavailable = !["fake", "dsh-sdk"].includes(
+    item.agent.runtimeKind,
+  );
+  return (
+    <button
+      className={`meeting-row direct-chat-row ${active ? "active" : ""}`}
+      type="button"
+      onClick={onOpen}
+      disabled={creating}
+    >
+      <span className="meeting-row-icon direct-chat-row-icon">
+        <Bot size={14} />
+      </span>
+      <span>
+        <strong>{item.agent.name}</strong>
+        <small>
+          {item.latestMessage?.content ?? `归属 ${item.ownerId} · 开始对话`}
+        </small>
+      </span>
+      <i
+        className={`pm-pill ${
+          item.activeTurn !== null
+            ? "progress"
+            : item.agent.status === "active" && !runtimeUnavailable
+              ? "done"
+              : ""
+        }`}
+      >
+        {item.activeTurn !== null
+          ? item.activeTurn.status === "running"
+            ? "运行中"
+            : "排队中"
+          : item.agent.status === "active"
+            ? runtimeUnavailable
+              ? "运行时不可用"
+              : "AI"
+            : "已停用"}
+      </i>
+    </button>
   );
 }
 
