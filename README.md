@@ -119,3 +119,10 @@ Batch 13 外部 Runtime 集成见
 
 Batch 14A 的 Identity/Principal/RBAC 清点、规范模型与迁移方案见
 [v1-batch14a-identity-principal-rbac-audit.md](./docs/v1-batch14a-identity-principal-rbac-audit.md)。
+Batch 14B-14D 的 Session、写授权、读授权和 Project Capability 见
+[v1-batch14b-auth-session.md](./docs/v1-batch14b-auth-session.md)、
+[v1-batch14c-rbac-authorization.md](./docs/v1-batch14c-rbac-authorization.md)、
+[v1-batch14d-read-authorization.md](./docs/v1-batch14d-read-authorization.md)。
+Batch 14 之后的执行顺序以
+[v1-post-batch13-migration-roadmap.md](./docs/v1-post-batch13-migration-roadmap.md)
+为准。
