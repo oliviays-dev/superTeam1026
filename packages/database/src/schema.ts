@@ -2231,3 +2231,66 @@ BEFORE UPDATE ON external_runtime_capabilities
 FOR EACH ROW
 EXECUTE FUNCTION pluginmax_reject_capability_snapshot_mutation();
 `;
+
+export const AGENT_RUNTIME_BINDING_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS agent_runtime_bindings (
+  id UUID PRIMARY KEY,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  runtime_id UUID NOT NULL REFERENCES external_runtimes(id) ON DELETE CASCADE,
+  execution_mode TEXT NOT NULL DEFAULT 'external'
+    CHECK (execution_mode = 'external'),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  bound_by TEXT NOT NULL CHECK (length(bound_by) BETWEEN 1 AND 180),
+  disabled_by TEXT CHECK (
+    disabled_by IS NULL OR length(disabled_by) BETWEEN 1 AND 180
+  ),
+  disabled_reason TEXT CHECK (
+    disabled_reason IS NULL OR length(btrim(disabled_reason)) BETWEEN 1 AND 1000
+  ),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  disabled_at TIMESTAMPTZ,
+  CHECK (
+    (status = 'active' AND disabled_at IS NULL)
+    OR (status = 'disabled' AND disabled_at IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS agent_runtime_bindings_active_agent_idx
+  ON agent_runtime_bindings(agent_id)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS agent_runtime_bindings_agent_history_idx
+  ON agent_runtime_bindings(agent_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS agent_runtime_bindings_runtime_active_idx
+  ON agent_runtime_bindings(runtime_id, status)
+  WHERE status = 'active';
+
+ALTER TABLE external_runtime_events
+  ADD COLUMN IF NOT EXISTS agent_id UUID
+    REFERENCES agents(id) ON DELETE SET NULL;
+
+ALTER TABLE external_runtime_events
+  DROP CONSTRAINT IF EXISTS external_runtime_events_kind_check;
+
+ALTER TABLE external_runtime_events
+  ADD CONSTRAINT external_runtime_events_kind_check
+  CHECK (kind IN (
+    'registered',
+    'updated',
+    'probed',
+    'enabled',
+    'disabled',
+    'archived',
+    'restored',
+    'bound',
+    'unbound'
+  ));
+
+CREATE INDEX IF NOT EXISTS external_runtime_events_agent_idx
+  ON external_runtime_events(agent_id, created_at DESC)
+  WHERE agent_id IS NOT NULL;
+`;

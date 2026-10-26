@@ -6,6 +6,8 @@ COMPOSE_PROJECT="${COMPOSE_PROJECT:-pluginmax-batch13}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.batch13.yml}"
 DATABASE_URL_INPUT="${DATABASE_URL:-postgres://pluginmax:pluginmax@127.0.0.1:54422/pluginmax}"
 STAMP="$(date -u +%Y%m%d%H%M%S)"
+export TMPDIR="$ROOT/.tmp/tmp-batch13"
+mkdir -p "$TMPDIR"
 
 compose() {
   "$ROOT/scripts/db-compose.sh" -p "$COMPOSE_PROJECT" -f "$ROOT/$COMPOSE_FILE" "$@"
@@ -41,10 +43,12 @@ trap cleanup EXIT
 cd "$ROOT"
 TEST_DATABASE_URL="$database_url" CI=true \
   pnpm vitest run \
+    packages/database/src/agent-runtime-binding-repository.test.ts \
     apps/api/src/app.test.ts \
     apps/api/src/meeting-ai-participation.test.ts \
     apps/api/src/ai-direct-chat.test.ts \
     apps/api/src/external-runtimes.test.ts \
+    apps/api/src/agent-runtime-bindings.test.ts \
     apps/worker/src/runtime-probe-service.test.ts \
     --no-file-parallelism
 

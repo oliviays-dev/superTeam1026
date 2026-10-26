@@ -524,6 +524,8 @@ export const externalRuntimeEventKindSchema = z.enum([
   "disabled",
   "archived",
   "restored",
+  "bound",
+  "unbound",
 ]);
 export type ExternalRuntimeEventKind = z.infer<
   typeof externalRuntimeEventKindSchema
@@ -532,6 +534,7 @@ export type ExternalRuntimeEventKind = z.infer<
 export const externalRuntimeEventSchema = z.object({
   id: z.string().uuid(),
   runtimeId: z.string().uuid(),
+  agentId: z.string().uuid().nullable(),
   kind: externalRuntimeEventKindSchema,
   actorId: z.string().min(1).max(180),
   previousStatus: externalRuntimeStatusSchema.nullable(),

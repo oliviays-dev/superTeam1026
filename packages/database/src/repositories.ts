@@ -73,6 +73,7 @@ import { MemoryClosureRepository } from "./memory-closure-repository.js";
 import { WorkbenchReportsRepository } from "./workbench-reports-repository.js";
 import { ProjectTemplatesRepository } from "./project-templates-repository.js";
 import { ExternalRuntimeRepository } from "./external-runtime-repository.js";
+import { AgentRuntimeBindingRepository } from "./agent-runtime-binding-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -1692,6 +1693,7 @@ export class PlatformRepositories {
   readonly runtimeEffects: RuntimeEffectRepository;
   readonly traces: RuntimeTraceRepository;
   readonly externalRuntimes: ExternalRuntimeRepository;
+  readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
 
   constructor(database: Database) {
     this.projects = new ProjectRepository(database);
@@ -1720,5 +1722,6 @@ export class PlatformRepositories {
     this.runtimeEffects = new RuntimeEffectRepository(database);
     this.traces = new RuntimeTraceRepository(database);
     this.externalRuntimes = new ExternalRuntimeRepository(database);
+    this.agentRuntimeBindings = new AgentRuntimeBindingRepository(database);
   }
 }

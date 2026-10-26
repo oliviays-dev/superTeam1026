@@ -3,6 +3,9 @@ import type {
   Agent,
   AgentDetail,
   AgentEpisode,
+  AgentRuntimeBindingDetail,
+  AgentRuntimePreflightInput,
+  AgentRuntimePreflightResult,
   ApprovalSlaSweepResult,
   Artifact,
   ConfirmHandoffCardInput,
@@ -79,6 +82,7 @@ import type {
   RunDetail,
   RunInputSnapshot,
   SendDirectChatMessageInput,
+  SetAgentRuntimeBindingInput,
   RetryWorkflowNodeInput,
   StartWorkflowInput,
   Task,
@@ -133,6 +137,7 @@ import type {
   ExternalRuntimeProbeRequestResult,
   ExternalRuntimeStatus,
   UpdateExternalRuntimeInput,
+  RemoveAgentRuntimeBindingInput,
 } from "@pluginmax/contracts";
 import {
   createExternalRuntimeInputSchema,
@@ -164,6 +169,10 @@ import {
   todayInShanghai,
 } from "@pluginmax/database";
 import type { FileRef, FileStore } from "@pluginmax/files";
+import {
+  AgentRuntimePreflightService,
+  type AgentRuntimePreflightEvaluation,
+} from "./agent-runtime-preflight.js";
 
 export class ApplicationError extends Error {
   constructor(
@@ -209,10 +218,14 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 export class PlatformApplication {
+  private readonly agentRuntimePreflight: AgentRuntimePreflightService;
+
   constructor(
     private readonly repositories: PlatformRepositories,
     private readonly files?: FileStore,
-  ) {}
+  ) {
+    this.agentRuntimePreflight = new AgentRuntimePreflightService(repositories);
+  }
 
   listProjects(): Promise<Project[]> {
     return this.repositories.projects.list();
@@ -1015,6 +1028,116 @@ export class PlatformApplication {
     const runtime = await this.requireExternalRuntime(runtimeId);
     assertExternalRuntimeReadable(runtime, actorId, administrator);
     return this.repositories.externalRuntimes.listCapabilities(runtimeId);
+  }
+
+  async getAgentRuntimeBinding(
+    agentId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<AgentRuntimeBindingDetail> {
+    const agent = await this.repositories.agents.get(agentId, true);
+    if (agent === undefined) {
+      throw new ApplicationError("agent_not_found", "Agent not found", 404);
+    }
+    const binding =
+      await this.repositories.agentRuntimeBindings.getCurrent(agentId);
+    if (binding === undefined) {
+      return { agentId, binding: null, runtime: null };
+    }
+    const runtime = await this.requireExternalRuntime(binding.runtimeId);
+    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    return { agentId, binding, runtime };
+  }
+
+  async setAgentRuntimeBinding(
+    agentId: string,
+    input: SetAgentRuntimeBindingInput,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<AgentRuntimeBindingDetail> {
+    const runtime = await this.requireExternalRuntime(input.runtimeId);
+    assertExternalRuntimeManageable(runtime, actorId, administrator);
+    const result = await this.repositories.agentRuntimeBindings.set({
+      agentId,
+      runtimeId: input.runtimeId,
+      expectedRevision: input.expectedRevision,
+      actorId,
+    });
+    switch (result.kind) {
+      case "bound":
+      case "unchanged":
+        break;
+      case "revision_conflict":
+        throw new ApplicationError(
+          "runtime_binding_revision_conflict",
+          "The agent runtime binding was changed by another request",
+          409,
+        );
+      case "failed":
+        throw applicationErrorForBindingFailure(result.code, result.message);
+    }
+    return this.getAgentRuntimeBinding(agentId, actorId, administrator);
+  }
+
+  async removeAgentRuntimeBinding(
+    agentId: string,
+    input: RemoveAgentRuntimeBindingInput,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<AgentRuntimeBindingDetail> {
+    const agent = await this.repositories.agents.get(agentId, true);
+    if (agent === undefined) {
+      throw new ApplicationError("agent_not_found", "Agent not found", 404);
+    }
+    const current =
+      await this.repositories.agentRuntimeBindings.getCurrent(agentId);
+    if (current?.status !== "active") {
+      throw new ApplicationError(
+        "runtime_binding_not_found",
+        "The agent has no active external runtime binding",
+        404,
+      );
+    }
+    const runtime = await this.requireExternalRuntime(current.runtimeId);
+    assertExternalRuntimeManageable(runtime, actorId, administrator);
+    const result = await this.repositories.agentRuntimeBindings.remove({
+      agentId,
+      expectedRevision: input.expectedRevision,
+      actorId,
+      reason: "explicitly unbound by runtime owner",
+    });
+    switch (result.kind) {
+      case "removed":
+        return { agentId, binding: result.binding, runtime };
+      case "not_found":
+        throw new ApplicationError(
+          "runtime_binding_not_found",
+          "The agent has no active external runtime binding",
+          404,
+        );
+      case "revision_conflict":
+        throw new ApplicationError(
+          "runtime_binding_revision_conflict",
+          "The agent runtime binding was changed by another request",
+          409,
+        );
+    }
+  }
+
+  async preflightAgentRuntime(
+    agentId: string,
+    input: AgentRuntimePreflightInput,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<AgentRuntimePreflightResult> {
+    const result = await this.agentRuntimePreflight.preflight({
+      agentId,
+      actorId,
+      administrator,
+      request: input,
+    });
+    if (result.kind === "compatible") return result.result;
+    throwPreflightFailure(result);
   }
 
   private async requireExternalRuntime(
@@ -5907,6 +6030,46 @@ function externalRuntimeRevisionConflict(): ApplicationError {
   );
 }
 
+function applicationErrorForBindingFailure(
+  code:
+    | "agent_not_found"
+    | "agent_unavailable"
+    | "runtime_not_found"
+    | "runtime_inactive"
+    | "runtime_archived"
+    | "runtime_probe_missing"
+    | "runtime_probe_pending"
+    | "runtime_probe_failed"
+    | "runtime_probe_stale"
+    | "runtime_command_digest_mismatch"
+    | "runtime_args_digest_mismatch",
+  message: string,
+): ApplicationError {
+  const statusCode =
+    code === "agent_not_found" || code === "runtime_not_found" ? 404 : 409;
+  return new ApplicationError(code, message, statusCode);
+}
+
+function throwPreflightFailure(
+  failure: Extract<AgentRuntimePreflightEvaluation, { kind: "failed" }>,
+): never {
+  const statusCode =
+    failure.code === "runtime_forbidden"
+      ? 403
+      : failure.code === "agent_not_found" ||
+          failure.code === "runtime_not_found"
+        ? 404
+        : failure.code === "runtime_workspace_invalid"
+          ? 400
+          : 409;
+  throw new ApplicationError(failure.code, failure.message, statusCode, {
+    preflightCode: failure.code,
+    remediation: failure.remediation,
+    bindingRevision: failure.bindingRevision,
+    runtimeRevision: failure.runtimeRevision,
+  });
+}
+
 function directChatApplicationError(error: unknown): Error {
   if (error instanceof ApplicationError) return error;
   if (error instanceof DirectChatPreconditionError) {
@@ -5923,5 +6086,6 @@ function directChatApplicationError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+export * from "./agent-runtime-preflight.js";
 export * from "./run-executor.js";
 export * from "./runtime-metrics.js";

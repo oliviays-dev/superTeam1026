@@ -215,7 +215,7 @@ integration("runtime operations API contract", () => {
     expect(response.json()).toMatchObject({
       metrics: {
         expectedMigrationVersion: 21,
-        migrationVersion: 21,
+        migrationVersion: 22,
         activeWorkers: 1,
         deadLetterCount: expect.any(Number),
       },

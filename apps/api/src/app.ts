@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ApiError,
+  agentRuntimePreflightInputSchema,
   agentStatusInputSchema,
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
@@ -42,6 +43,7 @@ import {
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
   refreshWorkbenchBriefInputSchema,
+  removeAgentRuntimeBindingInputSchema,
   reviewMemoryClaimsInputSchema,
   setWorkbenchFollowInputSchema,
   sendDirectChatMessageInputSchema,
@@ -51,6 +53,7 @@ import {
   transferTaskInputSchema,
   retryWorkflowNodeInputSchema,
   runtimeRevisionInputSchema,
+  setAgentRuntimeBindingInputSchema,
   startWorkflowInputSchema,
   uploadTaskAttachmentInputSchema,
   updateAgentInputSchema,
@@ -117,6 +120,7 @@ const workflowInstanceParamsSchema = z.object({
 const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
 const directChatParamsSchema = z.object({ threadId: z.string().uuid() });
 const runtimeParamsSchema = z.object({ runtimeId: z.string().uuid() });
+const agentParamsSchema = z.object({ agentId: z.string().uuid() });
 const directChatTurnParamsSchema = directChatParamsSchema.extend({
   turnId: z.string().uuid(),
 });
@@ -262,7 +266,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 21;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 22;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -955,6 +959,82 @@ export function buildApi(options: BuildApiOptions): {
     const actorId = requestActorId(request.headers);
     return reply.send(await application.setAgentStatus(id, status, actorId));
   });
+
+  app.get("/api/v1/agents/:agentId/runtime-binding", async (request, reply) => {
+    const { agentId } = agentParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.getAgentRuntimeBinding(
+        agentId,
+        actorId,
+        actorId === localActorId,
+      ),
+    );
+  });
+
+  app.put("/api/v1/agents/:agentId/runtime-binding", async (request, reply) => {
+    const { agentId } = agentParamsSchema.parse(request.params);
+    const input = setAgentRuntimeBindingInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `agent-runtime-binding:${agentId}`,
+      operation: "runtime.binding.set",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () =>
+        application.setAgentRuntimeBinding(
+          agentId,
+          input,
+          actorId,
+          actorId === localActorId,
+        ),
+    });
+  });
+
+  app.delete(
+    "/api/v1/agents/:agentId/runtime-binding",
+    async (request, reply) => {
+      const { agentId } = agentParamsSchema.parse(request.params);
+      const input = removeAgentRuntimeBindingInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `agent-runtime-binding:${agentId}`,
+        operation: "runtime.binding.remove",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.removeAgentRuntimeBinding(
+            agentId,
+            input,
+            actorId,
+            actorId === localActorId,
+          ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/agents/:agentId/runtime-preflight",
+    async (request, reply) => {
+      const { agentId } = agentParamsSchema.parse(request.params);
+      const input = agentRuntimePreflightInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.preflightAgentRuntime(
+          agentId,
+          input,
+          actorId,
+          actorId === localActorId,
+        ),
+      );
+    },
+  );
 
   app.get("/api/v1/runtimes", async (request, reply) => {
     const query = listRuntimesQuerySchema.parse(request.query);

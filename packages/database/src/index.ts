@@ -28,6 +28,13 @@ export {
   type DirectChatRunContext,
 } from "./direct-chat-repository.js";
 export {
+  AgentRuntimeBindingRepository,
+  disableActiveAgentRuntimeBindingsWithClient,
+  type DisabledRuntimeBinding,
+  type RemoveAgentRuntimeBindingResult,
+  type SetAgentRuntimeBindingResult,
+} from "./agent-runtime-binding-repository.js";
+export {
   ExternalRuntimeRepository,
   externalRuntimeArgsDigest,
   externalRuntimeCommandDigest,

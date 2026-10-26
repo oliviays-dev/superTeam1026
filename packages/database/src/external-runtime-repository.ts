@@ -17,6 +17,7 @@ import {
   type UpdateExternalRuntimeInput,
 } from "@pluginmax/contracts";
 import type { PoolClient, QueryResultRow } from "pg";
+import { disableActiveAgentRuntimeBindingsWithClient } from "./agent-runtime-binding-repository.js";
 import type { Database } from "./database.js";
 
 interface ExternalRuntimeRow {
@@ -84,6 +85,7 @@ interface ExternalRuntimeCapabilityRow {
 interface ExternalRuntimeEventRow {
   id: string;
   runtime_id: string;
+  agent_id: string | null;
   kind: ExternalRuntimeEventKind;
   actor_id: string;
   previous_status: ExternalRuntimeStatus | null;
@@ -261,6 +263,7 @@ function eventFromRow(row: ExternalRuntimeEventRow): ExternalRuntimeEvent {
   return {
     id: row.id,
     runtimeId: row.runtime_id,
+    agentId: row.agent_id,
     kind: row.kind,
     actorId: row.actor_id,
     previousStatus: row.previous_status,
@@ -708,6 +711,17 @@ export class ExternalRuntimeRepository {
         row,
         await latestProbeFor(client, input.runtimeId),
       );
+      if (input.nextStatus === "archived" || input.nextStatus === "disabled") {
+        await disableActiveAgentRuntimeBindingsWithClient(client, {
+          runtimeId: input.runtimeId,
+          runtimeStatus: input.nextStatus,
+          actorId: input.actorId,
+          reason:
+            input.nextStatus === "archived"
+              ? "runtime archived"
+              : "runtime disabled",
+        });
+      }
       const kind: ExternalRuntimeEventKind =
         input.nextStatus === "active"
           ? "enabled"
@@ -1111,6 +1125,21 @@ export class ExternalRuntimeRepository {
   ): Promise<ExternalRuntimeProbe | undefined> {
     const row = await latestProbeFor(this.database, runtimeId);
     return row === undefined ? undefined : probeFromRow(row);
+  }
+
+  async capabilityForProbe(
+    runtimeId: string,
+    probeId: string,
+  ): Promise<ExternalRuntimeCapabilitySnapshot | undefined> {
+    const result = await this.database.query<ExternalRuntimeCapabilityRow>(
+      `SELECT * FROM external_runtime_capabilities
+       WHERE runtime_id = $1 AND probe_id = $2
+       ORDER BY captured_at DESC, id DESC
+       LIMIT 1`,
+      [runtimeId, probeId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : capabilityFromRow(row);
   }
 
   async listEvents(

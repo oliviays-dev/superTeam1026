@@ -1,4 +1,5 @@
 import {
+  AGENT_RUNTIME_BINDING_SCHEMA_SQL,
   AGENT_MANAGEMENT_SCHEMA_SQL,
   AI_DIRECT_CHAT_SCHEMA_SQL,
   COLLABORATION_SCHEMA_SQL,
@@ -45,6 +46,7 @@ const migrations = [
   { version: 19, sql: MEETING_AI_PARTICIPATION_SCHEMA_SQL },
   { version: 20, sql: AI_DIRECT_CHAT_SCHEMA_SQL },
   { version: 21, sql: EXTERNAL_RUNTIME_SCHEMA_SQL },
+  { version: 22, sql: AGENT_RUNTIME_BINDING_SCHEMA_SQL },
 ] as const;
 
 export async function migrate(
