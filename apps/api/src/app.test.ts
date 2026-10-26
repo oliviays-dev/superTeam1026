@@ -376,16 +376,20 @@ integration("runtime operations API contract", () => {
     expect(disabledResponse.statusCode).toBe(409);
     expect(disabledResponse.json().code).toBe("agent_unavailable");
 
-    const externalAgentId = await createAgent("codex-jsonl");
-    const externalTask = await createTaskFixture({
-      agentId: externalAgentId,
-    });
-    const externalResponse = await app.inject({
-      method: "POST",
-      url: `/api/v1/tasks/${externalTask.taskId}/dispatch`,
-    });
-    expect(externalResponse.statusCode).toBe(409);
-    expect(externalResponse.json().code).toBe("runtime_adapter_unavailable");
+    for (const runtimeKind of ["codex-jsonl", "plain-text"] as const) {
+      const externalAgentId = await createAgent(runtimeKind);
+      const externalTask = await createTaskFixture({
+        agentId: externalAgentId,
+      });
+      const externalResponse = await app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${externalTask.taskId}/dispatch`,
+      });
+      expect(externalResponse.statusCode).toBe(409);
+      expect(externalResponse.json().code).toBe(
+        "runtime_adapter_unavailable",
+      );
+    }
   });
 
   it("transfers queued tasks only to active AI project members", async () => {
