@@ -80,8 +80,8 @@
 
 ### 2.8 Agent Runtime
 
-- [ ] 外部 Runtime 注册、探测、启停、归档和审计。
-- [ ] 受控 Command + argv 安全执行边界。
+- [x] 外部 Runtime 注册、探测、启停、归档和审计。
+- [x] 受控 Command + argv 安全执行边界。
 - [ ] `codex-jsonl` 与 `plain-text` 的 V1 Runtime Adapter。
 - [ ] AI 伙伴绑定外部 Runtime、Preflight、能力降级和不可用原因。
 - [ ] 外部 Runtime 通过 Worker/Run/Outbox 执行、取消、超时、失败和幂等回写。
@@ -137,7 +137,8 @@
 - 实例详情可查询节点迁移、分支、审批、重试和失败原因。
 - Migration 10 可升级旧线性实例，旧 steps 数据保持可读。
 
-批次 13：External Agent Runtime Integration（规划中，尚未开始实现）。
+批次 13：External Agent Runtime Integration（Batch 13A 已交付 Registry/Probe/Audit，
+Adapter 与绑定待后续阶段）。
 
 排期位置：Batch 12B 已收口并提交后，Batch 13 才进入实现；不得回写、扩展或重开
 Batch 12B 功能范围。

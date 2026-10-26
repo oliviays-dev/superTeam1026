@@ -72,6 +72,7 @@ import {
 import { MemoryClosureRepository } from "./memory-closure-repository.js";
 import { WorkbenchReportsRepository } from "./workbench-reports-repository.js";
 import { ProjectTemplatesRepository } from "./project-templates-repository.js";
+import { ExternalRuntimeRepository } from "./external-runtime-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -1690,6 +1691,7 @@ export class PlatformRepositories {
   readonly runtimeReliability: RuntimeReliabilityRepository;
   readonly runtimeEffects: RuntimeEffectRepository;
   readonly traces: RuntimeTraceRepository;
+  readonly externalRuntimes: ExternalRuntimeRepository;
 
   constructor(database: Database) {
     this.projects = new ProjectRepository(database);
@@ -1717,5 +1719,6 @@ export class PlatformRepositories {
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
     this.runtimeEffects = new RuntimeEffectRepository(database);
     this.traces = new RuntimeTraceRepository(database);
+    this.externalRuntimes = new ExternalRuntimeRepository(database);
   }
 }

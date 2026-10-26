@@ -9,6 +9,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  SquareTerminal,
   Sun,
   Workflow as WorkflowIcon,
 } from "lucide-react";
@@ -22,6 +23,7 @@ import {
 } from "./OperationsViews.js";
 import { ProjectsView, TasksView } from "./WorkspaceViews.js";
 import { ProjectTemplatesView } from "./ProjectTemplatesView.js";
+import { RuntimesView } from "./RuntimesView.js";
 import { getViewerCapabilities, listAllAgents, listProjects } from "./api.js";
 import type { WorkbenchSourceRef } from "@pluginmax/contracts";
 
@@ -32,6 +34,7 @@ type AppView =
   | "workflows"
   | "meetings"
   | "agents"
+  | "runtimes"
   | "operations"
   | "project-templates";
 
@@ -44,6 +47,7 @@ const navItems = [
   { key: "workflows", label: "工作流", icon: WorkflowIcon },
   { key: "meetings", label: "沟通", icon: MessagesSquare },
   { key: "agents", label: "AI伙伴", icon: Bot },
+  { key: "runtimes", label: "运行时", icon: SquareTerminal },
   { key: "operations", label: "运维", icon: Activity },
 ] as const satisfies ReadonlyArray<{
   key: AppView;
@@ -391,6 +395,7 @@ export function App() {
           />
         )}
         {view === "agents" && <AgentsView />}
+        {view === "runtimes" && <RuntimesView />}
         {view === "operations" && <OperationsDashboardView />}
       </div>
     </div>

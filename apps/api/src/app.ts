@@ -6,6 +6,7 @@ import {
   archiveTaskAttachmentInputSchema,
   confirmHandoffCardInputSchema,
   createDirectChatInputSchema,
+  createExternalRuntimeInputSchema,
   createAgentInputSchema,
   createAgentEpisodeInputSchema,
   createHandoffCardInputSchema,
@@ -49,9 +50,11 @@ import {
   triggerMeetingAiInputSchema,
   transferTaskInputSchema,
   retryWorkflowNodeInputSchema,
+  runtimeRevisionInputSchema,
   startWorkflowInputSchema,
   uploadTaskAttachmentInputSchema,
   updateAgentInputSchema,
+  updateExternalRuntimeInputSchema,
   updateHandoffCardInputSchema,
   updateMeetingActionItemInputSchema,
   updateMeetingAiPolicyInputSchema,
@@ -113,6 +116,7 @@ const workflowInstanceParamsSchema = z.object({
 });
 const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
 const directChatParamsSchema = z.object({ threadId: z.string().uuid() });
+const runtimeParamsSchema = z.object({ runtimeId: z.string().uuid() });
 const directChatTurnParamsSchema = directChatParamsSchema.extend({
   turnId: z.string().uuid(),
 });
@@ -185,6 +189,12 @@ const listAgentsQuerySchema = z.object({
     .optional()
     .transform((value) => value === "1" || value === "true"),
 });
+const listRuntimesQuerySchema = z.object({
+  includeArchived: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+});
 const eventQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().default(0),
   afterDeltaSeq: z.coerce.number().int().nonnegative().default(0),
@@ -252,7 +262,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 20;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 21;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -945,6 +955,162 @@ export function buildApi(options: BuildApiOptions): {
     const actorId = requestActorId(request.headers);
     return reply.send(await application.setAgentStatus(id, status, actorId));
   });
+
+  app.get("/api/v1/runtimes", async (request, reply) => {
+    const query = listRuntimesQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listExternalRuntimes(
+        actorId,
+        actorId === localActorId,
+        query.includeArchived,
+      ),
+    });
+  });
+
+  app.post("/api/v1/runtimes", async (request, reply) => {
+    const input = createExternalRuntimeInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: "external-runtimes",
+      operation: "runtime.create",
+      actorId,
+      payload: input,
+      statusCode: 201,
+      execute: () =>
+        application.createExternalRuntime(
+          input,
+          actorId,
+          actorId === localActorId,
+        ),
+    });
+  });
+
+  app.get("/api/v1/runtimes/:runtimeId", async (request, reply) => {
+    const { runtimeId } = runtimeParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.getExternalRuntime(
+        runtimeId,
+        actorId,
+        actorId === localActorId,
+      ),
+    );
+  });
+
+  app.patch("/api/v1/runtimes/:runtimeId", async (request, reply) => {
+    const { runtimeId } = runtimeParamsSchema.parse(request.params);
+    const input = updateExternalRuntimeInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `external-runtime:${runtimeId}`,
+      operation: "runtime.update",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () =>
+        application.updateExternalRuntime(
+          runtimeId,
+          input,
+          actorId,
+          actorId === localActorId,
+        ),
+    });
+  });
+
+  app.post("/api/v1/runtimes/:runtimeId/probe", async (request, reply) => {
+    const { runtimeId } = runtimeParamsSchema.parse(request.params);
+    const input = runtimeRevisionInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `external-runtime:${runtimeId}`,
+      operation: "runtime.probe",
+      actorId,
+      payload: input,
+      statusCode: 202,
+      execute: () =>
+        application.requestExternalRuntimeProbe(
+          runtimeId,
+          input.expectedRevision,
+          actorId,
+          actorId === localActorId,
+        ),
+    });
+  });
+
+  for (const transition of [
+    "enable",
+    "disable",
+    "archive",
+    "restore",
+  ] as const) {
+    app.post(
+      `/api/v1/runtimes/:runtimeId/${transition}`,
+      async (request, reply) => {
+        const { runtimeId } = runtimeParamsSchema.parse(request.params);
+        const input = runtimeRevisionInputSchema.parse(request.body);
+        const actorId = requestActorId(request.headers);
+        const nextStatus =
+          transition === "enable"
+            ? "active"
+            : transition === "restore"
+              ? "disabled"
+              : transition === "archive"
+                ? "archived"
+                : "disabled";
+        return idempotentRoute({
+          request,
+          reply,
+          scope: `external-runtime:${runtimeId}`,
+          operation: `runtime.${transition}`,
+          actorId,
+          payload: input,
+          statusCode: 200,
+          execute: () =>
+            application.transitionExternalRuntime(
+              runtimeId,
+              nextStatus,
+              input.expectedRevision,
+              actorId,
+              actorId === localActorId,
+            ),
+        });
+      },
+    );
+  }
+
+  app.get("/api/v1/runtimes/:runtimeId/events", async (request, reply) => {
+    const { runtimeId } = runtimeParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listExternalRuntimeEvents(
+        runtimeId,
+        actorId,
+        actorId === localActorId,
+      ),
+    });
+  });
+
+  app.get(
+    "/api/v1/runtimes/:runtimeId/capabilities",
+    async (request, reply) => {
+      const { runtimeId } = runtimeParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.listExternalRuntimeCapabilities(
+          runtimeId,
+          actorId,
+          actorId === localActorId,
+        ),
+      });
+    },
+  );
 
   app.get("/api/v1/tasks", async (request, reply) => {
     const query = listTasksQuerySchema.parse(request.query);

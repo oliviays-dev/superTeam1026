@@ -25,6 +25,9 @@ export interface PlatformConfig {
   readonly maintenanceLeaseSeconds: number;
   readonly approvalSlaBatchSize: number;
   readonly runtimeEffectPollIntervalMs: number;
+  readonly runtimeProbePollIntervalMs: number;
+  readonly runtimeProbeTimeoutMs: number;
+  readonly runtimeProbeLeaseSeconds: number;
   readonly localActorId: string;
   readonly agentWorkspaceRoot: string;
   readonly dshBin: string | undefined;
@@ -181,6 +184,21 @@ export function loadConfig(
       env.RUNTIME_EFFECT_POLL_INTERVAL_MS,
       500,
       "RUNTIME_EFFECT_POLL_INTERVAL_MS",
+    ),
+    runtimeProbePollIntervalMs: integer(
+      env.RUNTIME_PROBE_POLL_INTERVAL_MS,
+      500,
+      "RUNTIME_PROBE_POLL_INTERVAL_MS",
+    ),
+    runtimeProbeTimeoutMs: integer(
+      env.RUNTIME_PROBE_TIMEOUT_MS,
+      5_000,
+      "RUNTIME_PROBE_TIMEOUT_MS",
+    ),
+    runtimeProbeLeaseSeconds: integer(
+      env.RUNTIME_PROBE_LEASE_SECONDS,
+      30,
+      "RUNTIME_PROBE_LEASE_SECONDS",
     ),
     localActorId: env.LOCAL_ACTOR_ID ?? "local-admin",
     agentWorkspaceRoot: resolve(

@@ -1,8 +1,8 @@
 # Pluginmax V1 External Agent Runtime Technical Design
 
-> 状态：Batch 13 技术设计草案，尚未实现
+> 状态：Batch 13A（注册、Probe、Capability、权限和审计）已实现
 >
-> 基线：Batch 12B `d39a11bec0eadd4ed4f542837f85c9e701f94049`
+> 基线：`7e85bc8b1faa89ee6e016928b191353dc14715a7`
 >
 > 预计 Migration：21
 

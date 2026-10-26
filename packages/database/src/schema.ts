@@ -2018,3 +2018,216 @@ ALTER TABLE context_packs
   ADD COLUMN IF NOT EXISTS direct_chat_turn_id UUID
     REFERENCES direct_chat_turns(id) ON DELETE SET NULL;
 `;
+
+export const EXTERNAL_RUNTIME_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS external_runtimes (
+  id UUID PRIMARY KEY,
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 160),
+  provider TEXT NOT NULL
+    CHECK (provider IN ('codex', 'workbuddy', 'command')),
+  protocol TEXT NOT NULL
+    CHECK (protocol IN ('codex-jsonl', 'plain-text')),
+  command TEXT NOT NULL CHECK (length(btrim(command)) BETWEEN 1 AND 500),
+  managed_args JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(managed_args) = 'array'),
+  custom_args JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(custom_args) = 'array'),
+  supported_models JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(supported_models) = 'array'),
+  default_model TEXT,
+  context_window_tokens INTEGER
+    CHECK (context_window_tokens IS NULL OR context_window_tokens > 0),
+  supported_tools JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(supported_tools) = 'array'),
+  network_mode TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (network_mode IN ('none', 'restricted', 'public', 'unknown')),
+  sandbox_mode TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (sandbox_mode IN (
+      'read-only',
+      'workspace-write',
+      'danger-full-access',
+      'custom',
+      'unknown'
+    )),
+  status TEXT NOT NULL DEFAULT 'disabled'
+    CHECK (status IN ('disabled', 'active', 'archived')),
+  visibility TEXT NOT NULL DEFAULT 'owner'
+    CHECK (visibility IN ('platform', 'owner')),
+  owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 180),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  command_digest TEXT NOT NULL CHECK (length(command_digest) = 64),
+  args_digest TEXT NOT NULL CHECK (length(args_digest) = 64),
+  last_probe_id UUID,
+  last_probe_at TIMESTAMPTZ,
+  last_probe_ok BOOLEAN,
+  last_probe_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  archived_at TIMESTAMPTZ,
+  CHECK (
+    default_model IS NULL
+    OR supported_models ? default_model
+  )
+);
+
+CREATE INDEX IF NOT EXISTS external_runtimes_list_idx
+  ON external_runtimes(status, visibility, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS external_runtimes_owner_idx
+  ON external_runtimes(owner_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS external_runtime_probes (
+  id UUID PRIMARY KEY,
+  runtime_id UUID NOT NULL
+    REFERENCES external_runtimes(id) ON DELETE CASCADE,
+  runtime_revision INTEGER NOT NULL CHECK (runtime_revision > 0),
+  requested_by TEXT NOT NULL CHECK (length(requested_by) BETWEEN 1 AND 180),
+  status TEXT NOT NULL DEFAULT 'requested'
+    CHECK (status IN ('requested', 'running', 'passed', 'failed')),
+  command_digest TEXT NOT NULL CHECK (length(command_digest) = 64),
+  args_digest TEXT NOT NULL CHECK (length(args_digest) = 64),
+  requested_at TIMESTAMPTZ NOT NULL,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+  exit_code INTEGER,
+  timed_out BOOLEAN NOT NULL DEFAULT FALSE,
+  runtime_version TEXT,
+  stdout_excerpt TEXT,
+  stderr_excerpt TEXT,
+  error_code TEXT,
+  error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS external_runtime_probes_runtime_idx
+  ON external_runtime_probes(runtime_id, requested_at DESC);
+
+CREATE TABLE IF NOT EXISTS external_runtime_capabilities (
+  id UUID PRIMARY KEY,
+  runtime_id UUID NOT NULL
+    REFERENCES external_runtimes(id) ON DELETE CASCADE,
+  runtime_revision INTEGER NOT NULL CHECK (runtime_revision > 0),
+  probe_id UUID NOT NULL
+    REFERENCES external_runtime_probes(id) ON DELETE CASCADE,
+  adapter_profile JSONB NOT NULL,
+  declared_profile JSONB NOT NULL,
+  probe_profile JSONB NOT NULL,
+  effective_profile JSONB NOT NULL,
+  captured_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS external_runtime_capabilities_runtime_idx
+  ON external_runtime_capabilities(runtime_id, runtime_revision DESC, captured_at DESC);
+
+CREATE TABLE IF NOT EXISTS external_runtime_events (
+  id UUID PRIMARY KEY,
+  runtime_id UUID NOT NULL
+    REFERENCES external_runtimes(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL
+    CHECK (kind IN (
+      'registered',
+      'updated',
+      'probed',
+      'enabled',
+      'disabled',
+      'archived',
+      'restored'
+    )),
+  actor_id TEXT NOT NULL CHECK (length(actor_id) BETWEEN 1 AND 180),
+  previous_status TEXT
+    CHECK (previous_status IS NULL OR previous_status IN (
+      'disabled',
+      'active',
+      'archived'
+    )),
+  next_status TEXT NOT NULL
+    CHECK (next_status IN ('disabled', 'active', 'archived')),
+  changed_fields JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(changed_fields) = 'array'),
+  previous_state JSONB,
+  next_state JSONB NOT NULL,
+  message TEXT NOT NULL CHECK (length(btrim(message)) BETWEEN 1 AND 4000),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS external_runtime_events_runtime_idx
+  ON external_runtime_events(runtime_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS runtime_probe_jobs (
+  id UUID PRIMARY KEY,
+  runtime_id UUID NOT NULL
+    REFERENCES external_runtimes(id) ON DELETE CASCADE,
+  probe_id UUID NOT NULL UNIQUE
+    REFERENCES external_runtime_probes(id) ON DELETE CASCADE,
+  outbox_id UUID NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued', 'running', 'completed', 'dead_letter')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts > 0),
+  available_at TIMESTAMPTZ NOT NULL,
+  lease_owner TEXT,
+  lease_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS runtime_probe_jobs_claim_idx
+  ON runtime_probe_jobs(status, available_at, lease_expires_at);
+
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_probe_jobs_active_runtime_idx
+  ON runtime_probe_jobs(runtime_id)
+  WHERE status IN ('queued', 'running');
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_runtime_event_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'external_runtime_events is append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS external_runtime_events_append_only
+  ON external_runtime_events;
+CREATE TRIGGER external_runtime_events_append_only
+BEFORE UPDATE OR DELETE ON external_runtime_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_runtime_event_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_completed_probe_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.status IN ('passed', 'failed') THEN
+    RAISE EXCEPTION 'completed external runtime probes are immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS external_runtime_probes_terminal_immutable
+  ON external_runtime_probes;
+CREATE TRIGGER external_runtime_probes_terminal_immutable
+BEFORE UPDATE ON external_runtime_probes
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_completed_probe_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_capability_snapshot_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'external runtime capability snapshots are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS external_runtime_capabilities_immutable
+  ON external_runtime_capabilities;
+CREATE TRIGGER external_runtime_capabilities_immutable
+BEFORE UPDATE ON external_runtime_capabilities
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_capability_snapshot_mutation();
+`;

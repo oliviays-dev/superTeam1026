@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { PlatformApplication, RunExecutor } from "@pluginmax/application";
 import { loadConfig, loadLocalEnv } from "@pluginmax/config";
 import { Database, PlatformRepositories } from "@pluginmax/database";
 import { WorkerRuntime } from "./worker-runtime.js";
 import { RuntimeMaintenanceService } from "./maintenance-service.js";
+import { RuntimeProbeService } from "./runtime-probe-service.js";
 
 loadLocalEnv();
 const config = loadConfig();
@@ -62,6 +64,16 @@ const maintenance = new RuntimeMaintenanceService(
   },
   log,
 );
+const runtimeProbe = new RuntimeProbeService(
+  repositories,
+  {
+    owner: workerId,
+    workspaceRoot: resolve(config.agentWorkspaceRoot, "runtime-probes"),
+    timeoutMs: config.runtimeProbeTimeoutMs,
+    leaseSeconds: config.runtimeProbeLeaseSeconds,
+  },
+  log,
+);
 
 const runtime = new WorkerRuntime(
   {
@@ -78,12 +90,14 @@ const runtime = new WorkerRuntime(
     workerHeartbeatStaleAfterSeconds: config.workerHeartbeatStaleAfterSeconds,
     sweepIntervalMs: config.workflowSweepIntervalMs,
     maintenanceIntervalMs: config.maintenancePollIntervalMs,
+    runtimeProbePollIntervalMs: config.runtimeProbePollIntervalMs,
   },
   {
     repositories,
     executor,
     sweep,
     maintenance,
+    runtimeProbe,
     log,
   },
 );

@@ -9,6 +9,7 @@ import type {
   ContextReceipt,
   ConvertMeetingActionItemInput,
   CreateAgentInput,
+  CreateExternalRuntimeInput,
   CreateHandoffCardInput,
   CreateMeetingActionItemInput,
   CreateMemoryClaimInput,
@@ -33,6 +34,11 @@ import type {
   DirectChatThread,
   DirectChatThreadListItem,
   DirectChatTurn,
+  ExternalRuntime,
+  ExternalRuntimeCapabilitySnapshot,
+  ExternalRuntimeDetail,
+  ExternalRuntimeEvent,
+  ExternalRuntimeProbeRequestResult,
   ImportWorkflowMarkdownInput,
   IdempotencyCleanupInput,
   IdempotencyCleanupResult,
@@ -79,6 +85,7 @@ import type {
   TriggerMeetingAiResult,
   UploadTaskAttachmentInput,
   UpdateAgentInput,
+  UpdateExternalRuntimeInput,
   UpdateHandoffCardInput,
   UpdateMeetingAiPolicyInput,
   UpdateMemoryClaimInput,
@@ -428,6 +435,82 @@ export function setAgentStatus(
     method: "POST",
     body: JSON.stringify({ status }),
   });
+}
+
+export async function listExternalRuntimes(
+  includeArchived = false,
+): Promise<ExternalRuntime[]> {
+  return (
+    await request<{ items: ExternalRuntime[] }>(
+      `/runtimes${includeArchived ? "?includeArchived=1" : ""}`,
+    )
+  ).items;
+}
+
+export function createExternalRuntime(
+  input: CreateExternalRuntimeInput,
+): Promise<ExternalRuntime> {
+  return request("/runtimes", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getExternalRuntime(
+  runtimeId: string,
+): Promise<ExternalRuntimeDetail> {
+  return request(`/runtimes/${runtimeId}`);
+}
+
+export function updateExternalRuntime(
+  runtimeId: string,
+  input: UpdateExternalRuntimeInput,
+): Promise<ExternalRuntime> {
+  return request(`/runtimes/${runtimeId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function probeExternalRuntime(
+  runtimeId: string,
+  expectedRevision: number,
+): Promise<ExternalRuntimeProbeRequestResult> {
+  return request(`/runtimes/${runtimeId}/probe`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+export function transitionExternalRuntime(
+  runtimeId: string,
+  transition: "enable" | "disable" | "archive" | "restore",
+  expectedRevision: number,
+): Promise<ExternalRuntime> {
+  return request(`/runtimes/${runtimeId}/${transition}`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+export async function listExternalRuntimeEvents(
+  runtimeId: string,
+): Promise<ExternalRuntimeEvent[]> {
+  return (
+    await request<{ items: ExternalRuntimeEvent[] }>(
+      `/runtimes/${runtimeId}/events`,
+    )
+  ).items;
+}
+
+export async function listExternalRuntimeCapabilities(
+  runtimeId: string,
+): Promise<ExternalRuntimeCapabilitySnapshot[]> {
+  return (
+    await request<{ items: ExternalRuntimeCapabilitySnapshot[] }>(
+      `/runtimes/${runtimeId}/capabilities`,
+    )
+  ).items;
 }
 
 export async function listTasks(projectId?: string): Promise<Task[]> {

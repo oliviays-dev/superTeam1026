@@ -64,6 +64,7 @@ import type {
   CreateWorkflowTemplateInput,
   CopyProjectTemplateInput,
   CreateDirectChatInput,
+  CreateExternalRuntimeInput,
   DirectChatDetail,
   DirectChatSendResult,
   DirectChatThread,
@@ -125,8 +126,18 @@ import type {
   WorkflowStepDefinition,
   WorkflowValidationResult,
   OperationsSnapshot,
+  ExternalRuntime,
+  ExternalRuntimeCapabilitySnapshot,
+  ExternalRuntimeDetail,
+  ExternalRuntimeEvent,
+  ExternalRuntimeProbeRequestResult,
+  ExternalRuntimeStatus,
+  UpdateExternalRuntimeInput,
 } from "@pluginmax/contracts";
-import { createRootTraceContext } from "@pluginmax/contracts";
+import {
+  createExternalRuntimeInputSchema,
+  createRootTraceContext,
+} from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
   assertValidTaskDependencies,
@@ -791,6 +802,234 @@ export class PlatformApplication {
       );
     }
     return this.getAgent(id);
+  }
+
+  listExternalRuntimes(
+    actorId: string,
+    administrator: boolean,
+    includeArchived = false,
+  ): Promise<ExternalRuntime[]> {
+    return this.repositories.externalRuntimes.list({
+      actorId,
+      administrator,
+      includeArchived,
+    });
+  }
+
+  async getExternalRuntime(
+    runtimeId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ExternalRuntimeDetail> {
+    const runtime = await this.requireExternalRuntime(runtimeId);
+    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    return {
+      runtime,
+      latestProbe:
+        (await this.repositories.externalRuntimes.latestProbe(runtimeId)) ??
+        null,
+    };
+  }
+
+  createExternalRuntime(
+    input: CreateExternalRuntimeInput,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ExternalRuntime> {
+    if (
+      !administrator &&
+      input.ownerId !== undefined &&
+      input.ownerId !== actorId
+    ) {
+      throw new ApplicationError(
+        "runtime_owner_forbidden",
+        "Only a platform administrator can create a runtime for another owner",
+        403,
+      );
+    }
+    const ownerId = administrator ? (input.ownerId ?? actorId) : actorId;
+    return this.repositories.externalRuntimes.create(input, ownerId, actorId);
+  }
+
+  async updateExternalRuntime(
+    runtimeId: string,
+    input: UpdateExternalRuntimeInput,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ExternalRuntime> {
+    const current = await this.requireExternalRuntime(runtimeId);
+    assertExternalRuntimeManageable(current, actorId, administrator);
+    if (current.status === "archived") {
+      throw new ApplicationError(
+        "runtime_archived",
+        "Restore the runtime before editing it",
+        409,
+      );
+    }
+    const mergedInput = createExternalRuntimeInputSchema.parse({
+      name: input.name ?? current.name,
+      provider: input.provider ?? current.provider,
+      protocol: input.protocol ?? current.protocol,
+      command: input.command ?? current.command,
+      managedArgs: input.managedArgs ?? current.managedArgs,
+      customArgs: input.customArgs ?? current.customArgs,
+      supportedModels: input.supportedModels ?? current.supportedModels,
+      defaultModel:
+        input.defaultModel === undefined
+          ? current.defaultModel
+          : input.defaultModel,
+      contextWindowTokens:
+        input.contextWindowTokens === undefined
+          ? current.contextWindowTokens
+          : input.contextWindowTokens,
+      supportedTools: input.supportedTools ?? current.supportedTools,
+      networkMode: input.networkMode ?? current.networkMode,
+      sandboxMode: input.sandboxMode ?? current.sandboxMode,
+      visibility: input.visibility ?? current.visibility,
+    });
+    const merged: ExternalRuntime = {
+      ...current,
+      ...mergedInput,
+      ownerId: current.ownerId,
+    };
+    const result = await this.repositories.externalRuntimes.updateDefinition({
+      runtimeId,
+      current,
+      update: input,
+      merged,
+      actorId,
+    });
+    if (result.kind === "not_found") {
+      throw new ApplicationError(
+        "runtime_not_found",
+        "External runtime not found",
+        404,
+      );
+    }
+    if (result.kind === "revision_conflict") {
+      throw externalRuntimeRevisionConflict();
+    }
+    return result.runtime;
+  }
+
+  async requestExternalRuntimeProbe(
+    runtimeId: string,
+    expectedRevision: number,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ExternalRuntimeProbeRequestResult> {
+    const runtime = await this.requireExternalRuntime(runtimeId);
+    assertExternalRuntimeManageable(runtime, actorId, administrator);
+    const result = await this.repositories.externalRuntimes.requestProbe({
+      runtimeId,
+      expectedRevision,
+      actorId,
+    });
+    switch (result.kind) {
+      case "requested":
+        return {
+          runtime: result.runtime,
+          probe: result.probe,
+          jobId: result.jobId,
+        };
+      case "not_found":
+        throw new ApplicationError(
+          "runtime_not_found",
+          "External runtime not found",
+          404,
+        );
+      case "revision_conflict":
+        throw externalRuntimeRevisionConflict();
+      case "archived":
+        throw new ApplicationError(
+          "runtime_archived",
+          "Archived runtimes cannot be probed",
+          409,
+        );
+      case "probe_in_progress":
+        throw new ApplicationError(
+          "runtime_probe_in_progress",
+          "A probe is already queued or running for this runtime",
+          409,
+        );
+    }
+  }
+
+  async transitionExternalRuntime(
+    runtimeId: string,
+    nextStatus: ExternalRuntimeStatus,
+    expectedRevision: number,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ExternalRuntime> {
+    const runtime = await this.requireExternalRuntime(runtimeId);
+    assertExternalRuntimeManageable(runtime, actorId, administrator);
+    const result = await this.repositories.externalRuntimes.transition({
+      runtimeId,
+      expectedRevision,
+      nextStatus,
+      actorId,
+      requirePassedProbe: nextStatus === "active",
+    });
+    switch (result.kind) {
+      case "updated":
+        return result.runtime;
+      case "not_found":
+        throw new ApplicationError(
+          "runtime_not_found",
+          "External runtime not found",
+          404,
+        );
+      case "revision_conflict":
+        throw externalRuntimeRevisionConflict();
+      case "invalid_transition":
+        throw new ApplicationError(
+          "runtime_state_conflict",
+          `Runtime cannot transition from ${runtime.status} to ${nextStatus}`,
+          409,
+        );
+      case "probe_required":
+        throw new ApplicationError(
+          "runtime_probe_required",
+          "A successful probe for the current runtime revision is required",
+          409,
+        );
+    }
+  }
+
+  async listExternalRuntimeEvents(
+    runtimeId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ExternalRuntimeEvent[]> {
+    const runtime = await this.requireExternalRuntime(runtimeId);
+    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    return this.repositories.externalRuntimes.listEvents(runtimeId);
+  }
+
+  async listExternalRuntimeCapabilities(
+    runtimeId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ExternalRuntimeCapabilitySnapshot[]> {
+    const runtime = await this.requireExternalRuntime(runtimeId);
+    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    return this.repositories.externalRuntimes.listCapabilities(runtimeId);
+  }
+
+  private async requireExternalRuntime(
+    runtimeId: string,
+  ): Promise<ExternalRuntime> {
+    const runtime =
+      await this.repositories.externalRuntimes.get(runtimeId);
+    if (runtime === undefined) {
+      throw new ApplicationError(
+        "runtime_not_found",
+        "External runtime not found",
+        404,
+      );
+    }
+    return runtime;
   }
 
   async listDirectChats(
@@ -5626,6 +5865,46 @@ function translateProjectTemplateError(error: unknown): Error {
     );
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function assertExternalRuntimeReadable(
+  runtime: ExternalRuntime,
+  actorId: string,
+  administrator: boolean,
+): void {
+  if (
+    !administrator &&
+    runtime.ownerId !== actorId &&
+    runtime.visibility !== "platform"
+  ) {
+    throw new ApplicationError(
+      "runtime_forbidden",
+      "The actor cannot access this external runtime",
+      403,
+    );
+  }
+}
+
+function assertExternalRuntimeManageable(
+  runtime: ExternalRuntime,
+  actorId: string,
+  administrator: boolean,
+): void {
+  if (!administrator && runtime.ownerId !== actorId) {
+    throw new ApplicationError(
+      "runtime_forbidden",
+      "Only a platform administrator or the runtime owner can manage this runtime",
+      403,
+    );
+  }
+}
+
+function externalRuntimeRevisionConflict(): ApplicationError {
+  return new ApplicationError(
+    "runtime_revision_conflict",
+    "The runtime was changed by another request",
+    409,
+  );
 }
 
 function directChatApplicationError(error: unknown): Error {

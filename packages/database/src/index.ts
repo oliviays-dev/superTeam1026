@@ -28,6 +28,16 @@ export {
   type DirectChatRunContext,
 } from "./direct-chat-repository.js";
 export {
+  ExternalRuntimeRepository,
+  externalRuntimeArgsDigest,
+  externalRuntimeCommandDigest,
+  type ClaimedRuntimeProbeJob,
+  type CompleteRuntimeProbeInput,
+  type RequestRuntimeProbeResult,
+  type RuntimeTransitionResult,
+  type UpdateRuntimeDefinitionResult,
+} from "./external-runtime-repository.js";
+export {
   MemoryClosureRepository,
   MemoryReviewConflictError,
 } from "./memory-closure-repository.js";

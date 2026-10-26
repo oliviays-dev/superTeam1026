@@ -28,6 +28,7 @@ export interface WorkerRuntimeOptions {
   readonly workerHeartbeatStaleAfterSeconds: number;
   readonly sweepIntervalMs: number;
   readonly maintenanceIntervalMs?: number;
+  readonly runtimeProbePollIntervalMs?: number;
 }
 
 export interface WorkerRuntimeDependencies {
@@ -35,6 +36,9 @@ export interface WorkerRuntimeDependencies {
   readonly executor: RunExecutor;
   readonly sweep?: () => Promise<void>;
   readonly maintenance?: {
+    runOnce(): Promise<number>;
+  };
+  readonly runtimeProbe?: {
     runOnce(): Promise<number>;
   };
   readonly log?: (event: string, data?: Record<string, unknown>) => void;
@@ -101,11 +105,31 @@ export class WorkerRuntime {
     if (this.dependencies.maintenance !== undefined) {
       this.loopPromises.push(this.maintenanceLoop());
     }
+    if (this.dependencies.runtimeProbe !== undefined) {
+      this.loopPromises.push(this.runtimeProbeLoop());
+    }
     await Promise.all(this.loopPromises);
     if (this.sweepTimer !== null) clearInterval(this.sweepTimer);
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     await this.heartbeat("stopped");
     this.log("worker.stopped");
+  }
+
+  private async runtimeProbeLoop(): Promise<void> {
+    const pollInterval = this.options.runtimeProbePollIntervalMs ?? 500;
+    while (!this.stopping) {
+      try {
+        const count = await this.dependencies.runtimeProbe!.runOnce();
+        if (count === 0) {
+          await sleep(pollInterval);
+        }
+      } catch (error) {
+        this.log("runtime_probe.loop_failed", {
+          error: this.message(error),
+        });
+        await sleep(pollInterval);
+      }
+    }
   }
 
   async stop(signal = "SIGTERM"): Promise<void> {
