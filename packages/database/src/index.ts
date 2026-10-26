@@ -101,3 +101,16 @@ export {
   WorkbenchReportsRepository,
   todayInShanghai,
 } from "./workbench-reports-repository.js";
+export {
+  buildPrincipalDryRunReport,
+  principalDryRunMarkdown,
+  stablePrincipalDryRunJson,
+  writePrincipalDryRunReports,
+  type PrincipalDryRunReport,
+} from "./legacy-principal-dry-run.js";
+export {
+  LEGACY_PRINCIPAL_DOMAINS,
+  LegacySnapshotError,
+  readLegacyPrincipalSnapshot,
+  type LegacyPrincipalSnapshot,
+} from "./legacy-principal-snapshot.js";

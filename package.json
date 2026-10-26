@@ -15,6 +15,7 @@
     "db:down": "./scripts/db-compose.sh down",
     "db:migrate": "pnpm --filter @pluginmax/database migrate",
     "db:up": "./scripts/db-compose.sh up -d postgres",
+    "migration:principal-dry-run": "tsx packages/database/src/legacy-principal-dry-run-cli.ts",
     "dev": "pnpm run build:packages && pnpm --parallel --filter @pluginmax/api --filter @pluginmax/worker --filter @pluginmax/web run dev",
     "dev:api": "pnpm --filter @pluginmax/api dev",
     "dev:web": "pnpm --filter @pluginmax/web dev",
