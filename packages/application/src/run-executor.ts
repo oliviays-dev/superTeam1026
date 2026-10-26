@@ -625,6 +625,16 @@ export class RunExecutor {
         return;
       case "artifact":
         return;
+      case "warning":
+        await this.repositories.runs.appendEvent(
+          runId,
+          "warning",
+          event.summary,
+        );
+        return;
+      case "error":
+        await this.repositories.runs.appendEvent(runId, "error", event.summary);
+        return;
       case "completed":
         return;
     }

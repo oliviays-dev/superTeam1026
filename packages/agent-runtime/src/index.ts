@@ -1,4 +1,8 @@
 import type { RuntimeKind } from "@pluginmax/contracts";
+import type {
+  ExternalRuntimeExecutionMetadata,
+  ExternalRuntimeProcessDiagnostics,
+} from "./external-runtime-types.js";
 
 export interface RuntimeTaskInput {
   readonly runId: string;
@@ -46,8 +50,18 @@ export type AgentRuntimeEvent =
       readonly name: string;
     }
   | {
+      readonly type: "warning";
+      readonly summary: string;
+    }
+  | {
+      readonly type: "error";
+      readonly summary: string;
+    }
+  | {
       readonly type: "completed";
       readonly output: string;
+      readonly execution?: ExternalRuntimeExecutionMetadata;
+      readonly diagnostics?: ExternalRuntimeProcessDiagnostics;
     };
 
 export interface AgentRuntimeAdapter {
@@ -155,3 +169,31 @@ export {
   mapDshNotification,
   type DshSdkAdapterOptions,
 } from "./dsh-sdk.js";
+export {
+  CodexJsonlAdapter,
+  parseCodexJsonl,
+  type CodexJsonlAdapterOptions,
+  type CodexJsonlParseResult,
+} from "./codex-jsonl.js";
+export {
+  PlainTextAdapter,
+  type PlainTextAdapterOptions,
+} from "./plain-text.js";
+export {
+  ExternalProcessFailure,
+  boundedDiagnostic,
+  externalProcessDiagnostics,
+  runExternalProcess,
+  type ExternalProcessFailureCode,
+  type ExternalProcessOptions,
+  type ExternalProcessResult,
+} from "./external-process.js";
+export {
+  ExternalRuntimeAdapterFailure,
+  type ExternalRuntimeAdapterFailureCode,
+} from "./external-adapter-error.js";
+export type {
+  ExternalRuntimeExecutionMetadata,
+  ExternalRuntimeLimitOptions,
+  ExternalRuntimeProcessDiagnostics,
+} from "./external-runtime-types.js";

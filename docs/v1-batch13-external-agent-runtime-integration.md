@@ -1,6 +1,6 @@
 # V1 Batch 13: External Agent Runtime Integration
 
-> 状态：Batch 13A 已实现；Adapter、绑定和外部执行待后续阶段
+> 状态：Batch 13A 与 13B Adapter Core 已实现；绑定和外部执行待后续阶段
 >
 > 分支：`feat/v1-batch13-external-agent-runtime`
 >
@@ -103,7 +103,7 @@ Pluginmax Platform V1 **尚未完成外部 Agent Runtime 接入**：
 
 退出条件：API/Repository 测试通过，审计与状态机可回放。
 
-### Phase 2: V1 Runtime Adapter
+### Phase 2: V1 Runtime Adapter（Batch 13B 已完成）
 
 依赖：Phase 0、Phase 1。
 
