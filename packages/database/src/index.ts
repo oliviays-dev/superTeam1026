@@ -58,3 +58,7 @@ export {
   type WorkflowIdempotencyBeginResult,
 } from "./workflow-idempotency-repository.js";
 export { DEFAULT_AGENT_ID, DSH_AGENT_ID } from "./schema.js";
+export {
+  WorkbenchReportsRepository,
+  todayInShanghai,
+} from "./workbench-reports-repository.js";

@@ -15,6 +15,8 @@ import {
   createProjectMemberInputSchema,
   createProjectInputSchema,
   createProjectRoleInputSchema,
+  createSupplyExceptionInputSchema,
+  createSupplierRiskInputSchema,
   createTaskMessageInputSchema,
   createTaskInputSchema,
   createWorkflowInputSchema,
@@ -22,13 +24,18 @@ import {
   convertMeetingActionItemInputSchema,
   cosignWorkflowApprovalInputSchema,
   decideWorkflowApprovalInputSchema,
+  generateProjectReportInputSchema,
   importWorkflowMarkdownInputSchema,
   idempotencyCleanupInputSchema,
   jobListQuerySchema,
   jobRecoveryInputSchema,
+  markReportReadInputSchema,
+  projectReportQuerySchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
+  refreshWorkbenchBriefInputSchema,
   reviewMemoryClaimsInputSchema,
+  setWorkbenchFollowInputSchema,
   taskReviewInputSchema,
   traceIdSchema,
   transferTaskInputSchema,
@@ -44,6 +51,7 @@ import {
   updateProjectInputSchema,
   updateProjectRoleInputSchema,
   updateTaskInputSchema,
+  updateWorkbenchBriefSettingsInputSchema,
   transferWorkflowApprovalInputSchema,
   validateWorkflowMarkdownInputSchema,
   workflowAuditQuerySchema,
@@ -95,6 +103,12 @@ const meetingActionItemParamsSchema = meetingParamsSchema.extend({
   actionItemId: z.string().uuid(),
 });
 const projectParamsSchema = z.object({ projectId: z.string().uuid() });
+const projectReportParamsSchema = projectParamsSchema.extend({
+  reportId: z.string().uuid(),
+});
+const workbenchBriefParamsSchema = z.object({
+  briefId: z.string().uuid(),
+});
 const projectMemberParamsSchema = z.object({
   projectId: z.string().uuid(),
   memberId: z.string().uuid(),
@@ -201,7 +215,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 16;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 17;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -522,6 +536,71 @@ export function buildApi(options: BuildApiOptions): {
     const input = updateProjectInputSchema.parse(request.body);
     return reply.send(await application.updateProject(projectId, input));
   });
+
+  app.get("/api/v1/projects/:projectId/reports", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const query = projectReportQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listProjectReports(projectId, query, actorId),
+    });
+  });
+
+  app.post(
+    "/api/v1/projects/:projectId/reports/generate",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = generateProjectReportInputSchema.parse(request.body ?? {});
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `project:${projectId}:reports`,
+        operation: "project.report.generate",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.generateProjectReport(
+            projectId,
+            input.reportDate,
+            actorId,
+          ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/reports/:reportId",
+    async (request, reply) => {
+      const { projectId, reportId } = projectReportParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.getProjectReport(projectId, reportId, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/reports/:reportId/read",
+    async (request, reply) => {
+      const { projectId, reportId } = projectReportParamsSchema.parse(
+        request.params,
+      );
+      const input = markReportReadInputSchema.parse(request.body ?? {});
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.markProjectReportRead(
+          projectId,
+          reportId,
+          actorId,
+          input.read,
+        ),
+      );
+    },
+  );
 
   app.get("/api/v1/projects/:projectId/roles", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);
@@ -1024,6 +1103,123 @@ export function buildApi(options: BuildApiOptions): {
         .send(await application.createAgentEpisode(projectId, input, actorId));
     },
   );
+
+  app.get("/api/v1/workbench/dashboard", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getWorkbenchDashboard(actorId));
+  });
+
+  app.post("/api/v1/workbench/brief/refresh", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = refreshWorkbenchBriefInputSchema.parse(request.body ?? {});
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `workbench:${actorId}:brief`,
+      operation: "workbench.brief.refresh",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () =>
+        application.refreshWorkbenchBrief(actorId, input.briefDate),
+    });
+  });
+
+  app.get("/api/v1/workbench/brief", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getLatestWorkbenchBrief(actorId));
+  });
+
+  app.post("/api/v1/workbench/brief/:briefId/read", async (request, reply) => {
+    const { briefId } = workbenchBriefParamsSchema.parse(request.params);
+    const input = markReportReadInputSchema.parse(request.body ?? {});
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.markWorkbenchBriefRead(actorId, briefId, input.read),
+    );
+  });
+
+  app.get("/api/v1/workbench/brief/settings", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getWorkbenchBriefSettings(actorId));
+  });
+
+  app.patch("/api/v1/workbench/brief/settings", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = updateWorkbenchBriefSettingsInputSchema.parse(request.body);
+    return reply.send(
+      await application.updateWorkbenchBriefSettings(actorId, input),
+    );
+  });
+
+  app.get("/api/v1/workbench/follows", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listWorkbenchFollows(actorId),
+    });
+  });
+
+  app.post("/api/v1/workbench/follows", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = setWorkbenchFollowInputSchema.parse(request.body);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `workbench:${actorId}:follows`,
+      operation: "workbench.follow.set",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.setWorkbenchFollow(actorId, input),
+    });
+  });
+
+  const projectRiskQuerySchema = z.object({ projectId: z.string().uuid() });
+  app.get("/api/v1/workbench/supply-exceptions", async (request, reply) => {
+    const { projectId } = projectRiskQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listSupplyExceptions(projectId, actorId),
+    });
+  });
+
+  app.post("/api/v1/workbench/supply-exceptions", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = createSupplyExceptionInputSchema.parse(request.body);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `project:${input.projectId}:supply-exceptions`,
+      operation: "workbench.supply-exception.create",
+      actorId,
+      payload: input,
+      statusCode: 201,
+      execute: () => application.createSupplyException(input, actorId),
+    });
+  });
+
+  app.get("/api/v1/workbench/supplier-risks", async (request, reply) => {
+    const { projectId } = projectRiskQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listSupplierRisks(projectId, actorId),
+    });
+  });
+
+  app.post("/api/v1/workbench/supplier-risks", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = createSupplierRiskInputSchema.parse(request.body);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `project:${input.projectId}:supplier-risks`,
+      operation: "workbench.supplier-risk.create",
+      actorId,
+      payload: input,
+      statusCode: 201,
+      execute: () => application.createSupplierRisk(input, actorId),
+    });
+  });
 
   app.get("/api/v1/workbench", async (_request, reply) => {
     return reply.send(await application.getWorkbench());

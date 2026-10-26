@@ -1380,3 +1380,175 @@ CREATE TABLE IF NOT EXISTS agent_episodes (
 CREATE INDEX IF NOT EXISTS agent_episodes_scope_idx
   ON agent_episodes(project_id, agent_id, visibility, created_at DESC);
 `;
+
+export const WORKBENCH_REPORTS_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS project_reports (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  report_date DATE NOT NULL,
+  version INTEGER NOT NULL CHECK (version > 0),
+  content_hash TEXT NOT NULL,
+  snapshot JSONB NOT NULL,
+  generated_by TEXT NOT NULL,
+  generated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, report_date, version),
+  UNIQUE (project_id, report_date, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS project_reports_project_idx
+  ON project_reports(project_id, report_date DESC, version DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_project_report_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'project reports are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_reports_immutable ON project_reports;
+
+CREATE TRIGGER project_reports_immutable
+BEFORE UPDATE OR DELETE ON project_reports
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_report_mutation();
+
+CREATE TABLE IF NOT EXISTS project_report_sources (
+  report_id UUID NOT NULL
+    REFERENCES project_reports(id) ON DELETE CASCADE,
+  source_kind TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  label TEXT NOT NULL DEFAULT '',
+  route TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (report_id, source_kind, source_id)
+);
+
+CREATE INDEX IF NOT EXISTS project_report_sources_project_idx
+  ON project_report_sources(project_id, source_kind, source_id);
+
+CREATE TABLE IF NOT EXISTS project_report_reads (
+  report_id UUID NOT NULL
+    REFERENCES project_reports(id) ON DELETE CASCADE,
+  actor_id TEXT NOT NULL,
+  read_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (report_id, actor_id)
+);
+
+CREATE TABLE IF NOT EXISTS workbench_briefs (
+  id UUID PRIMARY KEY,
+  actor_id TEXT NOT NULL,
+  brief_date DATE NOT NULL,
+  version INTEGER NOT NULL CHECK (version > 0),
+  content_hash TEXT NOT NULL,
+  snapshot JSONB NOT NULL,
+  generated_by TEXT NOT NULL,
+  generated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (actor_id, brief_date, version),
+  UNIQUE (actor_id, brief_date, content_hash)
+);
+
+CREATE INDEX IF NOT EXISTS workbench_briefs_actor_idx
+  ON workbench_briefs(actor_id, brief_date DESC, version DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_workbench_brief_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'workbench briefs are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS workbench_briefs_immutable ON workbench_briefs;
+
+CREATE TRIGGER workbench_briefs_immutable
+BEFORE UPDATE OR DELETE ON workbench_briefs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_workbench_brief_mutation();
+
+CREATE TABLE IF NOT EXISTS workbench_brief_reads (
+  brief_id UUID NOT NULL
+    REFERENCES workbench_briefs(id) ON DELETE CASCADE,
+  actor_id TEXT NOT NULL,
+  read_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (brief_id, actor_id)
+);
+
+CREATE TABLE IF NOT EXISTS workbench_brief_settings (
+  actor_id TEXT PRIMARY KEY,
+  frequency TEXT NOT NULL DEFAULT 'daily-0800'
+    CHECK (frequency IN (
+      'daily-0800',
+      'daily-0800-1300',
+      'every-4-hours',
+      'weekly-monday-0800'
+    )),
+  silent_start TIME,
+  silent_end TIME,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS workbench_follows (
+  actor_id TEXT NOT NULL,
+  target_type TEXT NOT NULL
+    CHECK (target_type IN ('task', 'workflow', 'project', 'meeting')),
+  target_id UUID NOT NULL,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (actor_id, target_type, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS workbench_follows_project_idx
+  ON workbench_follows(project_id, target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS supply_exceptions (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('high', 'medium', 'watch')),
+  suggested_action TEXT NOT NULL DEFAULT '',
+  owner_actor_id TEXT NOT NULL,
+  due_at TIMESTAMPTZ,
+  impact_scope TEXT NOT NULL DEFAULT '',
+  source_task_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
+  source_workflow_instance_id UUID
+    REFERENCES workflow_instances(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'open'
+    CHECK (status IN ('open', 'acknowledged', 'resolved')),
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS supply_exceptions_project_idx
+  ON supply_exceptions(project_id, status, due_at);
+
+CREATE TABLE IF NOT EXISTS supplier_risks (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  supplier_name TEXT NOT NULL,
+  risk_type TEXT NOT NULL,
+  risk_score INTEGER NOT NULL CHECK (risk_score BETWEEN 0 AND 100),
+  commitment_rate NUMERIC(5, 2)
+    CHECK (commitment_rate IS NULL OR commitment_rate BETWEEN 0 AND 100),
+  quality_metric TEXT NOT NULL DEFAULT '',
+  purchase_share NUMERIC(5, 2)
+    CHECK (purchase_share IS NULL OR purchase_share BETWEEN 0 AND 100),
+  suggested_action TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'monitoring'
+    CHECK (status IN ('open', 'monitoring', 'closed')),
+  source_note TEXT NOT NULL DEFAULT '',
+  data_updated_at TIMESTAMPTZ NOT NULL,
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS supplier_risks_project_idx
+  ON supplier_risks(project_id, status, risk_score DESC);
+`;

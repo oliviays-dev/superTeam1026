@@ -21,6 +21,8 @@ import type {
   CreateTaskInput,
   CreateTaskMessageInput,
   CreateWorkflowInput,
+  CreateSupplyExceptionInput,
+  CreateSupplierRiskInput,
   CompleteWorkflowNodeInput,
   DecideWorkflowApprovalInput,
   ImportWorkflowMarkdownInput,
@@ -46,6 +48,10 @@ import type {
   Project,
   ProjectMember,
   ProjectRole,
+  ProjectReportDetail,
+  ProjectReportGenerationResult,
+  ProjectReportQuery,
+  ProjectReportSummary,
   PublishMemoryTruthInput,
   PublishMeetingMinutesInput,
   ReviewMemoryClaimsInput,
@@ -69,8 +75,17 @@ import type {
   UpdateProjectInput,
   UpdateProjectRoleInput,
   UpdateTaskInput,
+  UpdateWorkbenchBriefSettingsInput,
   ValidateWorkflowMarkdownInput,
   WorkbenchSummary,
+  WorkbenchBriefGenerationResult,
+  WorkbenchDashboard,
+  WorkbenchFollow,
+  WorkbenchBrief,
+  WorkbenchBriefSettings,
+  SupplyException,
+  SupplierRisk,
+  SetWorkbenchFollowInput,
   WorkflowDefinition,
   WorkflowAuditPage,
   WorkflowAuditQuery,
@@ -108,6 +123,7 @@ import {
   MemoryReviewConflictError,
   type PlatformRepositories,
   type TaskAttachment,
+  todayInShanghai,
 } from "@pluginmax/database";
 import type { FileRef, FileStore } from "@pluginmax/files";
 
@@ -1414,6 +1430,302 @@ export class PlatformApplication {
     } catch (error) {
       throw this.memoryClosureError(error);
     }
+  }
+
+  async listProjectReports(
+    projectId: string,
+    query: ProjectReportQuery,
+    actorId: string,
+  ): Promise<ProjectReportSummary[]> {
+    const access = await this.requireProjectAccess(projectId, actorId);
+    return this.repositories.workbenchReports.listProjectReports({
+      projectId,
+      actorId,
+      query,
+      readOnly: access.project.status === "archived",
+      canGenerate: access.canManage && access.project.status === "active",
+    });
+  }
+
+  async generateProjectReport(
+    projectId: string,
+    reportDate: string | undefined,
+    actorId: string,
+  ): Promise<ProjectReportGenerationResult> {
+    const access = await this.requireProjectAccess(projectId, actorId);
+    if (access.project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Reports cannot be generated for an archived project",
+        409,
+      );
+    }
+    if (!access.canManage) {
+      throw new ApplicationError(
+        "forbidden",
+        "Project owner permission is required to generate reports",
+        403,
+      );
+    }
+    const result =
+      await this.repositories.workbenchReports.generateProjectReport({
+        projectId,
+        reportDate: reportDate ?? todayInShanghai(),
+        actorId,
+      });
+    return {
+      ...result,
+      report: {
+        ...result.report,
+        readOnly: false,
+        canGenerate: true,
+      },
+    };
+  }
+
+  async getProjectReport(
+    projectId: string,
+    reportId: string,
+    actorId: string,
+  ): Promise<ProjectReportDetail> {
+    const access = await this.requireProjectAccess(projectId, actorId);
+    const report = await this.repositories.workbenchReports.getProjectReport(
+      projectId,
+      reportId,
+      actorId,
+    );
+    if (report === undefined) {
+      throw new ApplicationError(
+        "project_report_not_found",
+        "Project report not found",
+        404,
+      );
+    }
+    return {
+      ...report,
+      readOnly: access.project.status === "archived",
+      canGenerate: access.canManage && access.project.status === "active",
+    };
+  }
+
+  async markProjectReportRead(
+    projectId: string,
+    reportId: string,
+    actorId: string,
+    read: boolean,
+  ): Promise<{ readonly reportId: string; readonly read: boolean }> {
+    await this.requireProjectAccess(projectId, actorId);
+    const updated =
+      await this.repositories.workbenchReports.markProjectReportRead({
+        projectId,
+        reportId,
+        actorId,
+        read,
+      });
+    if (!updated) {
+      throw new ApplicationError(
+        "project_report_not_found",
+        "Project report not found",
+        404,
+      );
+    }
+    return { reportId, read };
+  }
+
+  async getWorkbenchDashboard(actorId: string): Promise<WorkbenchDashboard> {
+    return this.repositories.workbenchReports.dashboard(actorId);
+  }
+
+  async refreshWorkbenchBrief(
+    actorId: string,
+    briefDate?: string,
+  ): Promise<WorkbenchBriefGenerationResult> {
+    return this.repositories.workbenchReports.generateWorkbenchBrief({
+      actorId,
+      briefDate: briefDate ?? todayInShanghai(),
+    });
+  }
+
+  async getLatestWorkbenchBrief(actorId: string): Promise<WorkbenchBrief> {
+    const brief =
+      await this.repositories.workbenchReports.getLatestBrief(actorId);
+    if (brief === null) {
+      const generated =
+        await this.repositories.workbenchReports.generateWorkbenchBrief({
+          actorId,
+          briefDate: todayInShanghai(),
+        });
+      return generated.brief;
+    }
+    return brief;
+  }
+
+  async markWorkbenchBriefRead(
+    actorId: string,
+    briefId: string,
+    read: boolean,
+  ): Promise<{ readonly briefId: string; readonly read: boolean }> {
+    const updated = await this.repositories.workbenchReports.markBriefRead({
+      actorId,
+      briefId,
+      read,
+    });
+    if (!updated) {
+      throw new ApplicationError(
+        "workbench_brief_not_found",
+        "Workbench brief not found",
+        404,
+      );
+    }
+    return { briefId, read };
+  }
+
+  async getWorkbenchBriefSettings(
+    actorId: string,
+  ): Promise<WorkbenchBriefSettings> {
+    return this.repositories.workbenchReports.getBriefSettings(actorId);
+  }
+
+  async updateWorkbenchBriefSettings(
+    actorId: string,
+    input: UpdateWorkbenchBriefSettingsInput,
+  ): Promise<WorkbenchBriefSettings> {
+    return this.repositories.workbenchReports.updateBriefSettings(
+      actorId,
+      input,
+    );
+  }
+
+  async listWorkbenchFollows(actorId: string): Promise<WorkbenchFollow[]> {
+    return this.repositories.workbenchReports.listFollows(actorId);
+  }
+
+  async setWorkbenchFollow(
+    actorId: string,
+    input: SetWorkbenchFollowInput,
+  ): Promise<{ readonly followed: boolean }> {
+    const access = await this.requireProjectAccess(input.projectId, actorId);
+    const belongs =
+      await this.repositories.workbenchReports.resourceBelongsToProject(
+        input.projectId,
+        input.targetType,
+        input.targetId,
+      );
+    if (!belongs) {
+      throw new ApplicationError(
+        "follow_target_not_found",
+        "The follow target does not belong to this project",
+        404,
+      );
+    }
+    if (input.followed && access.project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Follows cannot be added in an archived project",
+        409,
+      );
+    }
+    const followed = await this.repositories.workbenchReports.setFollow(
+      actorId,
+      input,
+    );
+    return { followed };
+  }
+
+  async listSupplyExceptions(
+    projectId: string,
+    actorId: string,
+  ): Promise<SupplyException[]> {
+    await this.requireProjectAccess(projectId, actorId);
+    return this.repositories.workbenchReports.listSupplyExceptions([projectId]);
+  }
+
+  async createSupplyException(
+    input: CreateSupplyExceptionInput,
+    actorId: string,
+  ): Promise<SupplyException> {
+    const access = await this.requireProjectAccess(input.projectId, actorId);
+    if (access.project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Supply exceptions cannot be created in an archived project",
+        409,
+      );
+    }
+    if (!access.canManage) {
+      throw new ApplicationError(
+        "forbidden",
+        "Project owner permission is required to create supply exceptions",
+        403,
+      );
+    }
+    if (
+      input.sourceTaskId !== undefined &&
+      input.sourceTaskId !== null &&
+      !(await this.repositories.workbenchReports.resourceBelongsToProject(
+        input.projectId,
+        "task",
+        input.sourceTaskId,
+      ))
+    ) {
+      throw new ApplicationError(
+        "supply_source_not_found",
+        "The source task does not belong to this project",
+        404,
+      );
+    }
+    if (
+      input.sourceWorkflowInstanceId !== undefined &&
+      input.sourceWorkflowInstanceId !== null &&
+      !(await this.repositories.workbenchReports.resourceBelongsToProject(
+        input.projectId,
+        "workflow",
+        input.sourceWorkflowInstanceId,
+      ))
+    ) {
+      throw new ApplicationError(
+        "supply_source_not_found",
+        "The source workflow does not belong to this project",
+        404,
+      );
+    }
+    return this.repositories.workbenchReports.createSupplyException(
+      actorId,
+      input,
+    );
+  }
+
+  async listSupplierRisks(
+    projectId: string,
+    actorId: string,
+  ): Promise<SupplierRisk[]> {
+    await this.requireProjectAccess(projectId, actorId);
+    return this.repositories.workbenchReports.listSupplierRisks([projectId]);
+  }
+
+  async createSupplierRisk(
+    input: CreateSupplierRiskInput,
+    actorId: string,
+  ): Promise<SupplierRisk> {
+    const access = await this.requireProjectAccess(input.projectId, actorId);
+    if (access.project.status !== "active") {
+      throw new ApplicationError(
+        "project_archived",
+        "Supplier risks cannot be created in an archived project",
+        409,
+      );
+    }
+    if (!access.canManage) {
+      throw new ApplicationError(
+        "forbidden",
+        "Project owner permission is required to create supplier risks",
+        403,
+      );
+    }
+    return this.repositories.workbenchReports.createSupplierRisk(
+      actorId,
+      input,
+    );
   }
 
   async getWorkbench(): Promise<WorkbenchSummary> {

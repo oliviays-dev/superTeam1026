@@ -3,6 +3,7 @@ import type {
   Meeting,
   MeetingDetail,
   Project,
+  WorkbenchSourceRef,
   WorkflowDefinition,
   WorkflowInstanceDetail,
   WorkflowRuntimeNode,
@@ -12,12 +13,15 @@ import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
-  BookOpen,
   CalendarClock,
-  CircleAlert,
+  Factory,
+  FileText,
   MessageSquare,
+  PackageX,
   Plus,
   RefreshCw,
+  Star,
+  TriangleAlert,
   Workflow,
 } from "lucide-react";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
@@ -32,21 +36,24 @@ import {
   getWorkflowInstanceDetail,
   importWorkflowMarkdown,
   getMeeting,
-  getWorkbench,
+  getWorkbenchDashboard,
   listMeetings,
-  listMemory,
   listProjectMembers,
   listProjectRoles,
-  listTasks,
+  listWorkbenchFollows,
   listWorkflowInstances,
   listWorkflows,
+  markWorkbenchBriefRead,
   pauseWorkflow,
   postMeetingMessage,
   reconcileWorkflow,
+  refreshWorkbenchBrief,
   resumeWorkflow,
   retryWorkflowNode,
+  setWorkbenchFollow,
   startWorkflow,
   transferWorkflowApproval,
+  updateWorkbenchBriefSettings,
   validateWorkflowMarkdown,
 } from "./api.js";
 import { MeetingDecisionsPanel } from "./MeetingDecisionsPanel.js";
@@ -64,20 +71,24 @@ const workbenchModuleMeta = {
   brief: 6,
   todo: 4,
   focus: 2,
-  "meeting-minutes": 4,
-  control: 2,
-  supplier: 4,
+  "meeting-minutes": 3,
+  control: 3,
+  supply: 3,
+  supplier: 3,
+  reports: 6,
 } as const;
 
 function WorkbenchCard({
   module,
   title,
   meta,
+  actions,
   children,
 }: {
   module: keyof typeof workbenchModuleMeta;
   title: string;
   meta?: string;
+  actions?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -90,290 +101,517 @@ function WorkbenchCard({
       }
     >
       <header className="workbench-card-head">
-        <h2>{title}</h2>
-        {meta !== undefined && <span>{meta}</span>}
+        <div>
+          <h2>{title}</h2>
+          {meta !== undefined && <span>{meta}</span>}
+        </div>
+        {actions !== undefined && (
+          <div className="workbench-card-actions">{actions}</div>
+        )}
       </header>
       <div className="workbench-card-body">{children}</div>
     </section>
   );
 }
 
+function isNavigableSource(source: WorkbenchSourceRef): boolean {
+  return !["supply-exception", "supplier-risk"].includes(source.route);
+}
+
 export function WorkbenchView({
-  projects,
-  agents,
-  projectId,
-  onProjectChange,
-  onOpenTask,
+  onOpenSource,
 }: ProjectViewProps & {
-  onOpenTask: (taskId: string, projectId: string) => void;
+  onOpenSource: (source: WorkbenchSourceRef) => void;
 }) {
-  const selectedProjectId = projectId || projects[0]?.id || "";
-  const summaryQuery = useQuery({
-    queryKey: ["workbench-summary"],
-    queryFn: getWorkbench,
-    refetchInterval: 5_000,
+  const queryClient = useQueryClient();
+  const [mode, setMode] = useState<"personal" | "cockpit">("personal");
+  const dashboardQuery = useQuery({
+    queryKey: ["workbench-dashboard"],
+    queryFn: getWorkbenchDashboard,
+    refetchInterval: 15_000,
   });
-  const memoryQuery = useQuery({
-    queryKey: ["memory", selectedProjectId],
-    queryFn: () => listMemory(selectedProjectId),
-    enabled: selectedProjectId !== "",
+  const dashboard = dashboardQuery.data;
+  const refreshMutation = useMutation({
+    mutationFn: () => refreshWorkbenchBrief(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["workbench-dashboard"] });
+    },
   });
-  const tasksQuery = useQuery({
-    queryKey: ["tasks", selectedProjectId],
-    queryFn: () => listTasks(selectedProjectId),
-    enabled: selectedProjectId !== "",
-    refetchInterval: 5_000,
+  const readMutation = useMutation({
+    mutationFn: (briefId: string) => markWorkbenchBriefRead(briefId, true),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["workbench-dashboard"] });
+    },
   });
-  const meetingsQuery = useQuery({
-    queryKey: ["meetings", selectedProjectId],
-    queryFn: () => listMeetings(selectedProjectId),
-    enabled: selectedProjectId !== "",
+  const settingsMutation = useMutation({
+    mutationFn: updateWorkbenchBriefSettings,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["workbench-dashboard"] });
+    },
   });
-  const summary = summaryQuery.data;
-  const tasks = tasksQuery.data ?? [];
-  const pendingTasks = tasks.filter(
-    (task) => task.status === "queued" || task.status === "in_progress",
-  );
-  const reviewTasks = tasks.filter((task) => task.status === "review");
-  const memory = memoryQuery.data?.items ?? [];
-  const meetings = meetingsQuery.data ?? [];
-  const metrics = [
-    ["项目", summary?.projects, "个"],
-    ["执行中任务", summary?.activeTasks, "项"],
-    ["待验收", summary?.reviewTasks, "项"],
-    ["运行中 Run", summary?.activeRuns, "个"],
-    ["项目记忆", summary?.memoryTopics, "条"],
-    ["未结束会议", summary?.meetings, "场"],
-  ] as const;
+  const followMutation = useMutation({
+    mutationFn: setWorkbenchFollow,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["workbench-dashboard"] });
+    },
+  });
+
+  useEffect(() => {
+    const brief = dashboard?.brief;
+    if (brief !== null && brief !== undefined && !brief.read) {
+      readMutation.mutate(brief.id);
+    }
+  }, [dashboard?.brief?.id, dashboard?.brief?.read]);
+
+  const openSource = (source: WorkbenchSourceRef) => {
+    if (source.available) onOpenSource(source);
+  };
+  const taskSource = (input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly title: string;
+  }): WorkbenchSourceRef => ({
+    kind: "task",
+    id: input.id,
+    projectId: input.projectId,
+    label: input.title,
+    route: "task",
+    targetId: input.id,
+    available: true,
+  });
+  const followSource = (input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly title: string;
+    readonly type: "task" | "workflow";
+  }): WorkbenchSourceRef => ({
+    kind: input.type,
+    id: input.id,
+    projectId: input.projectId,
+    label: input.title,
+    route: input.type,
+    targetId: input.id,
+    available: true,
+  });
+  const busy = dashboardQuery.isFetching || refreshMutation.isPending;
+  const error = dashboardQuery.error ?? refreshMutation.error;
 
   return (
     <main className="pm-page workbench-page">
       <header className="pm-page-head workbench-head">
-        <div>
-          <h1>工作台</h1>
-          <p>项目状态、待办、风险和 AI 协作进展的统一视图。</p>
+        <div className="workbench-mode" role="group" aria-label="工作台模式">
+          <button
+            type="button"
+            aria-pressed={mode === "personal"}
+            className={mode === "personal" ? "active" : ""}
+            onClick={() => setMode("personal")}
+          >
+            我的工作台
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === "cockpit"}
+            className={mode === "cockpit" ? "active" : ""}
+            onClick={() => setMode("cockpit")}
+          >
+            管理驾驶舱
+          </button>
         </div>
         <div className="pm-head-actions">
-          <select
-            className="pm-compact-select"
-            aria-label="工作台项目"
-            value={selectedProjectId}
-            onChange={(event) => onProjectChange(event.target.value)}
-          >
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
+          <span className="workbench-updated">
+            {dashboard === undefined
+              ? "正在读取工作台"
+              : `更新于 ${formatDateTime(dashboard.generatedAt)}`}
+          </span>
           <button
             className="pm-icon-btn"
             type="button"
-            title="刷新工作台"
-            onClick={() => {
-              void summaryQuery.refetch();
-              void tasksQuery.refetch();
-              void memoryQuery.refetch();
-            }}
+            title="刷新每日简报"
+            aria-label="刷新每日简报"
+            disabled={mode !== "personal" || busy || dashboard?.readOnly}
+            onClick={() => refreshMutation.mutate()}
           >
-            <RefreshCw
-              size={14}
-              className={summaryQuery.isFetching ? "spin" : undefined}
-            />
+            <RefreshCw size={14} className={busy ? "spin" : undefined} />
           </button>
         </div>
       </header>
 
-      <div className="workbench-canvas">
-        <WorkbenchCard
-          module="metrics"
-          title="核心指标"
-          meta={`更新于 ${formatDateTime(new Date().toISOString())}`}
-        >
-          <div className="workbench-metric-grid">
-            {metrics.map(([label, value, unit]) => (
-              <div className="workbench-metric" key={label}>
-                <span>{label}</span>
-                <strong>
-                  {value ?? "-"}
-                  <small>{unit}</small>
-                </strong>
-              </div>
-            ))}
-          </div>
-        </WorkbenchCard>
-
-        <WorkbenchCard
-          module="brief"
-          title="每日简报"
-          meta={`${agents.filter((agent) => agent.status === "active").length} 位 AI 伙伴可用`}
-        >
-          <div className="workbench-brief">
-            <div className="workbench-brief-mark">
-              <BookOpen size={17} />
+      {mode === "cockpit" ? (
+        <section className="workbench-cockpit-placeholder">
+          <strong>管理驾驶舱</strong>
+          <p>全局经营与组织分析将在后续批次接入。</p>
+        </section>
+      ) : (
+        <>
+          {dashboardQuery.isLoading && (
+            <div className="workbench-loading-grid" aria-busy="true">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div className="workbench-skeleton" key={index} />
+              ))}
             </div>
-            <div>
-              <strong>
-                {reviewTasks.length > 0
-                  ? `${reviewTasks.length} 项任务等待验收`
-                  : pendingTasks.length > 0
-                    ? `${pendingTasks.length} 项任务正在推进`
-                    : "当前项目运行平稳"}
-              </strong>
-              <p>
-                工作台数据直接来自平台 API。任务派发、Agent 事件和输出会通过 Run
-                事件流持续更新。
-              </p>
+          )}
+          {error !== null && (
+            <div className="pm-error workbench-error">
+              {error instanceof Error
+                ? `工作台刷新失败：${error.message}。已保留上次成功内容。`
+                : "工作台刷新失败，已保留上次成功内容。"}
+              <button
+                className="pm-btn secondary"
+                type="button"
+                onClick={() => void dashboardQuery.refetch()}
+              >
+                重试
+              </button>
             </div>
-          </div>
-        </WorkbenchCard>
-
-        <WorkbenchCard
-          module="todo"
-          title="我的待办"
-          meta={`${pendingTasks.length} 项`}
-        >
-          <div className="workbench-list">
-            {pendingTasks.slice(0, 5).map((task) => (
-              <button
-                className="workbench-item"
-                type="button"
-                key={task.id}
-                onClick={() => onOpenTask(task.id, selectedProjectId)}
+          )}
+          {dashboard !== undefined && (
+            <div className="workbench-canvas" aria-busy={busy}>
+              <WorkbenchCard
+                module="brief"
+                title="每日简报"
+                meta={
+                  dashboard.brief === null
+                    ? "尚未生成"
+                    : `v${dashboard.brief.version} · ${dashboard.brief.read ? "已读" : "未读"}`
+                }
+                actions={
+                  <select
+                    className="pm-compact-select workbench-frequency"
+                    aria-label="简报更新频次"
+                    value={dashboard.settings.frequency}
+                    disabled={settingsMutation.isPending || dashboard.readOnly}
+                    onChange={(event) =>
+                      settingsMutation.mutate({
+                        frequency: event.target.value as
+                          | "daily-0800"
+                          | "daily-0800-1300"
+                          | "every-4-hours"
+                          | "weekly-monday-0800",
+                      })
+                    }
+                  >
+                    <option value="daily-0800">每天 08:00</option>
+                    <option value="daily-0800-1300">每天 08:00 / 13:00</option>
+                    <option value="every-4-hours">每 4 小时</option>
+                    <option value="weekly-monday-0800">周一 08:00</option>
+                  </select>
+                }
               >
-                <span>
-                  <strong>{task.title}</strong>
-                  <small>{task.description}</small>
-                </span>
-                <i
-                  className={`pm-pill ${task.status === "queued" ? "neutral" : "progress"}`}
-                >
-                  {task.status === "queued" ? "待处理" : "进行中"}
-                </i>
-              </button>
-            ))}
-            {pendingTasks.length === 0 && (
-              <div className="pm-empty compact">当前没有待办任务</div>
-            )}
-          </div>
-        </WorkbenchCard>
+                {dashboard.readOnly && (
+                  <div className="pm-readonly-notice">
+                    当前账号没有可访问的活动项目，工作台为只读空态。
+                  </div>
+                )}
+                {dashboard.brief?.snapshot.items.length ? (
+                  <div className="workbench-brief-list">
+                    {dashboard.brief.snapshot.items.slice(0, 6).map((item) => {
+                      const source = item.sourceRefs.find(isNavigableSource);
+                      return (
+                        <article
+                          className={`workbench-brief-item ${item.severity}`}
+                          key={item.id}
+                        >
+                          <div>
+                            <strong>{item.title}</strong>
+                            <p>{item.body}</p>
+                          </div>
+                          {source !== undefined && (
+                            <button
+                              className="source-link"
+                              type="button"
+                              onClick={() => openSource(source)}
+                            >
+                              来源
+                            </button>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="pm-empty compact">当前周期没有新增简报</div>
+                )}
+              </WorkbenchCard>
 
-        <WorkbenchCard
-          module="focus"
-          title="重点关注"
-          meta={`${reviewTasks.length} 项`}
-        >
-          <div className="workbench-list">
-            {reviewTasks.slice(0, 4).map((task) => (
-              <button
-                className="workbench-focus-item"
-                type="button"
-                key={task.id}
-                onClick={() => onOpenTask(task.id, selectedProjectId)}
+              <WorkbenchCard
+                module="todo"
+                title="我的待办"
+                meta={`${dashboard.todos.length} 项`}
               >
-                <CircleAlert size={14} />
-                <span>{task.title}</span>
-                <ArrowRight size={13} />
-              </button>
-            ))}
-            {reviewTasks.length === 0 && (
-              <div className="preview-empty">暂无待验收事项</div>
-            )}
-          </div>
-        </WorkbenchCard>
+                <div className="workbench-list">
+                  {dashboard.todos.slice(0, 6).map((todo) => (
+                    <button
+                      className="workbench-item"
+                      type="button"
+                      key={todo.taskId}
+                      onClick={() =>
+                        openSource(
+                          taskSource({
+                            id: todo.taskId,
+                            projectId: todo.projectId,
+                            title: todo.title,
+                          }),
+                        )
+                      }
+                    >
+                      <span>
+                        <strong>{todo.title}</strong>
+                        <small>
+                          {todo.projectName} · {todo.priority}
+                        </small>
+                      </span>
+                      <i
+                        className={`pm-pill ${
+                          todo.status === "review" ? "review" : "progress"
+                        }`}
+                      >
+                        {todo.status === "review" ? "待验收" : "待处理"}
+                      </i>
+                    </button>
+                  ))}
+                  {dashboard.todos.length === 0 && (
+                    <div className="pm-empty compact">
+                      当前没有待处理或待验收事项
+                    </div>
+                  )}
+                </div>
+              </WorkbenchCard>
 
-        <WorkbenchCard
-          module="meeting-minutes"
-          title="会议纪要"
-          meta={`${meetings.length} 场会议`}
-        >
-          <div className="workbench-list">
-            {meetings.slice(0, 4).map((meeting) => (
-              <div className="workbench-minutes" key={meeting.id}>
-                <span>
-                  <strong>{meeting.title}</strong>
-                  <small>
-                    {meeting.summary || meeting.agenda || "纪要待补充"}
-                  </small>
-                </span>
-                <span
-                  className={`pm-pill ${meeting.status === "open" ? "progress" : "done"}`}
-                >
-                  {meeting.status === "open" ? "进行中" : "已结束"}
-                </span>
-              </div>
-            ))}
-            {meetings.length === 0 && (
-              <div className="pm-empty compact">当前项目暂无会议</div>
-            )}
-          </div>
-        </WorkbenchCard>
+              <WorkbenchCard
+                module="focus"
+                title="重点关注"
+                meta={`${dashboard.focus.length} 项`}
+              >
+                <div className="workbench-list">
+                  {dashboard.focus.slice(0, 6).map((item) => (
+                    <div
+                      className="workbench-focus-row"
+                      key={`${item.type}:${item.id}`}
+                    >
+                      <button
+                        className="workbench-focus-open"
+                        type="button"
+                        onClick={() => openSource(followSource(item))}
+                      >
+                        <Star
+                          size={14}
+                          fill={item.directFollow ? "currentColor" : "none"}
+                        />
+                        <span>
+                          <strong>{item.title}</strong>
+                          <small>{item.followReason}</small>
+                        </span>
+                        <ArrowRight size={13} />
+                      </button>
+                      {item.directFollow && (
+                        <button
+                          className="pm-icon-btn"
+                          type="button"
+                          title={`取消关注${item.title}`}
+                          aria-label={`取消关注${item.title}`}
+                          aria-pressed="true"
+                          disabled={
+                            followMutation.isPending || dashboard.readOnly
+                          }
+                          onClick={() =>
+                            followMutation.mutate({
+                              targetType: item.type,
+                              targetId: item.id,
+                              projectId: item.projectId,
+                              followed: false,
+                            })
+                          }
+                        >
+                          <Star size={13} fill="currentColor" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  {dashboard.focus.length === 0 && (
+                    <div className="pm-empty compact">
+                      在任务或工作流详情中点击星标即可关注
+                    </div>
+                  )}
+                </div>
+              </WorkbenchCard>
 
-        <WorkbenchCard
-          module="control"
-          title="运行关注"
-          meta={`${summary?.activeRuns ?? 0} 个`}
-        >
-          <div className="workbench-control">
-            <ActivityMini
-              label="执行中 Run"
-              value={summary?.activeRuns ?? 0}
-              tone="progress"
-            />
-            <ActivityMini
-              label="待验收任务"
-              value={summary?.reviewTasks ?? 0}
-              tone={reviewTasks.length > 0 ? "warn" : "done"}
-            />
-            <ActivityMini
-              label="运行中流程"
-              value={summary?.workflows ?? 0}
-              tone="neutral"
-            />
-          </div>
-        </WorkbenchCard>
+              <WorkbenchCard
+                module="meeting-minutes"
+                title="会议结论"
+                meta={`${dashboard.meetingConclusions.length} 场`}
+              >
+                <div className="workbench-list">
+                  {dashboard.meetingConclusions.slice(0, 5).map((meeting) => (
+                    <button
+                      className="workbench-minutes"
+                      type="button"
+                      key={meeting.meetingId}
+                      onClick={() =>
+                        openSource({
+                          kind: "meeting",
+                          id: meeting.meetingId,
+                          projectId: meeting.projectId,
+                          label: meeting.title,
+                          route: "meeting",
+                          targetId: meeting.meetingId,
+                          available: true,
+                        })
+                      }
+                    >
+                      <span>
+                        <strong>{meeting.title}</strong>
+                        <small>{meeting.conclusion}</small>
+                      </span>
+                      <ArrowRight size={13} />
+                    </button>
+                  ))}
+                  {dashboard.meetingConclusions.length === 0 && (
+                    <div className="pm-empty compact">暂无会议结论</div>
+                  )}
+                </div>
+              </WorkbenchCard>
 
-        <WorkbenchCard
-          module="supplier"
-          title="项目记忆"
-          meta={`${memory.length} 条`}
-        >
-          <div className="workbench-list">
-            {memory.slice(0, 4).map((topic) => (
-              <div className="workbench-memory" key={topic.id}>
-                <span>
-                  <strong>{topic.title}</strong>
-                  <small>{topic.currentTruth?.content ?? "尚未发布结论"}</small>
-                </span>
-                <em>v{topic.currentTruth?.version ?? "-"}</em>
-              </div>
-            ))}
-            {memory.length === 0 && (
-              <div className="pm-empty compact">
-                任务验收通过后会沉淀项目记忆
-              </div>
-            )}
-          </div>
-        </WorkbenchCard>
-      </div>
+              <WorkbenchCard
+                module="control"
+                title="运行异常"
+                meta={`${dashboard.runExceptions.length} 个`}
+              >
+                <div className="workbench-list">
+                  {dashboard.runExceptions.slice(0, 5).map((run) => (
+                    <button
+                      className="workbench-focus-item"
+                      type="button"
+                      key={run.runId}
+                      onClick={() =>
+                        openSource(
+                          taskSource({
+                            id: run.taskId,
+                            projectId: run.projectId,
+                            title: run.title,
+                          }),
+                        )
+                      }
+                    >
+                      <TriangleAlert size={14} />
+                      <span>
+                        <strong>{run.title}</strong>
+                        <small>
+                          {run.projectName} · {run.status}
+                        </small>
+                      </span>
+                      <ArrowRight size={13} />
+                    </button>
+                  ))}
+                  {dashboard.runExceptions.length === 0 && (
+                    <div className="pm-empty compact">当前没有运行异常</div>
+                  )}
+                </div>
+              </WorkbenchCard>
+
+              <WorkbenchCard
+                module="supply"
+                title="供给例外"
+                meta={`${dashboard.supplyExceptions.length} 项`}
+              >
+                <div className="workbench-list">
+                  {dashboard.supplyExceptions.slice(0, 5).map((exception) => (
+                    <article
+                      className={`workbench-risk ${exception.severity}`}
+                      key={exception.id}
+                    >
+                      <PackageX size={15} />
+                      <span>
+                        <strong>{exception.title}</strong>
+                        <small>
+                          {exception.impactScope || "影响范围待确认"}
+                        </small>
+                        {exception.suggestedAction !== "" && (
+                          <em>{exception.suggestedAction}</em>
+                        )}
+                      </span>
+                    </article>
+                  ))}
+                  {dashboard.supplyExceptions.length === 0 && (
+                    <div className="pm-empty compact">
+                      当前没有持久化供给例外
+                    </div>
+                  )}
+                </div>
+              </WorkbenchCard>
+
+              <WorkbenchCard
+                module="supplier"
+                title="供应商风险"
+                meta={`${dashboard.supplierRisks.length} 项`}
+              >
+                <div className="workbench-list">
+                  {dashboard.supplierRisks.slice(0, 5).map((risk) => (
+                    <article className="workbench-risk" key={risk.id}>
+                      <Factory size={15} />
+                      <span>
+                        <strong>{risk.supplierName}</strong>
+                        <small>
+                          {risk.riskType} · 评分 {risk.riskScore}
+                        </small>
+                        {risk.suggestedAction !== "" && (
+                          <em>{risk.suggestedAction}</em>
+                        )}
+                      </span>
+                    </article>
+                  ))}
+                  {dashboard.supplierRisks.length === 0 && (
+                    <div className="pm-empty compact">
+                      当前没有持久化供应商风险
+                    </div>
+                  )}
+                </div>
+              </WorkbenchCard>
+
+              <WorkbenchCard
+                module="reports"
+                title="项目日报"
+                meta={`${dashboard.projectReports.length} 份`}
+              >
+                <div className="workbench-report-grid">
+                  {dashboard.projectReports.slice(0, 8).map((report) => (
+                    <button
+                      className="workbench-report-link"
+                      type="button"
+                      key={report.id}
+                      onClick={() =>
+                        openSource({
+                          kind: "project",
+                          id: report.id,
+                          projectId: report.projectId,
+                          label: report.projectName,
+                          route: "report",
+                          targetId: report.id,
+                          available: true,
+                        })
+                      }
+                    >
+                      <FileText size={15} />
+                      <span>
+                        <strong>{report.projectName}</strong>
+                        <small>
+                          {report.reportDate} · v{report.version}
+                        </small>
+                      </span>
+                      <ArrowRight size={13} />
+                    </button>
+                  ))}
+                  {dashboard.projectReports.length === 0 && (
+                    <div className="pm-empty compact">
+                      项目内生成日报后会汇总到这里
+                    </div>
+                  )}
+                </div>
+              </WorkbenchCard>
+            </div>
+          )}
+        </>
+      )}
     </main>
-  );
-}
-
-function ActivityMini({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: string;
-}) {
-  return (
-    <div className={`activity-mini ${tone}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
   );
 }
 
@@ -381,7 +619,10 @@ export function WorkflowsView({
   projects,
   projectId,
   onProjectChange,
-}: ProjectViewProps) {
+  initialInstanceId,
+}: ProjectViewProps & {
+  initialInstanceId?: string;
+}) {
   const queryClient = useQueryClient();
   const selectedProjectId = projectId || projects[0]?.id || "";
   const [name, setName] = useState("");
@@ -391,7 +632,7 @@ export function WorkflowsView({
   const [validation, setValidation] = useState<WorkflowValidationResult | null>(
     null,
   );
-  const [instanceId, setInstanceId] = useState("");
+  const [instanceId, setInstanceId] = useState(initialInstanceId ?? "");
   const workflowsQuery = useQuery({
     queryKey: ["workflows", selectedProjectId],
     queryFn: () => listWorkflows(selectedProjectId),
@@ -409,6 +650,11 @@ export function WorkflowsView({
     enabled: instanceId !== "",
     refetchInterval: 2_000,
   });
+  useEffect(() => {
+    if (initialInstanceId !== undefined) {
+      setInstanceId(initialInstanceId);
+    }
+  }, [initialInstanceId, selectedProjectId]);
   const rolesQuery = useQuery({
     queryKey: ["project-roles", selectedProjectId],
     queryFn: () => listProjectRoles(selectedProjectId),
@@ -556,6 +802,35 @@ export function WorkflowsView({
     void queryClient.invalidateQueries({ queryKey: ["workbench-summary"] });
   }
   const detail: WorkflowInstanceDetail | undefined = detailQuery.data;
+  const followsQuery = useQuery({
+    queryKey: ["workbench-follows"],
+    queryFn: listWorkbenchFollows,
+  });
+  const workflowFollowed =
+    detail !== undefined &&
+    (followsQuery.data?.some(
+      (follow) =>
+        follow.targetType === "workflow" &&
+        follow.targetId === detail.instance.id,
+    ) ??
+      false);
+  const workflowFollowMutation = useMutation({
+    mutationFn: (input: {
+      readonly projectId: string;
+      readonly workflowId: string;
+      readonly followed: boolean;
+    }) =>
+      setWorkbenchFollow({
+        targetType: "workflow",
+        targetId: input.workflowId,
+        projectId: input.projectId,
+        followed: input.followed,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["workbench-follows"] });
+      void queryClient.invalidateQueries({ queryKey: ["workbench-dashboard"] });
+    },
+  });
   const panelError =
     detailQuery.error ??
     completeMutation.error ??
@@ -767,9 +1042,35 @@ export function WorkflowsView({
               <h2>运行实例</h2>
               <p>节点状态、分支、审批和运行审计集中展示。</p>
             </div>
-            <span className="pm-pill">
-              {instancesQuery.data?.length ?? 0} 个实例
-            </span>
+            <div className="workflow-runtime-head-actions">
+              <span className="pm-pill">
+                {instancesQuery.data?.length ?? 0} 个实例
+              </span>
+              {detail !== undefined && (
+                <button
+                  className="pm-icon-btn follow-toggle"
+                  type="button"
+                  title={workflowFollowed ? "取消关注工作流" : "关注工作流"}
+                  aria-label={
+                    workflowFollowed ? "取消关注工作流" : "关注工作流"
+                  }
+                  aria-pressed={workflowFollowed}
+                  disabled={workflowFollowMutation.isPending}
+                  onClick={() =>
+                    workflowFollowMutation.mutate({
+                      projectId: detail.instance.projectId,
+                      workflowId: detail.instance.id,
+                      followed: !workflowFollowed,
+                    })
+                  }
+                >
+                  <Star
+                    size={14}
+                    fill={workflowFollowed ? "currentColor" : "none"}
+                  />
+                </button>
+              )}
+            </div>
           </div>
           {detail === undefined ? (
             <div className="pm-empty workflow-empty">

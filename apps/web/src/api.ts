@@ -15,6 +15,8 @@ import type {
   CreateMemoryTopicInput,
   CreateProjectMemberInput,
   CreateProjectRoleInput,
+  CreateSupplyExceptionInput,
+  CreateSupplierRiskInput,
   CreateTaskMessageInput,
   CompleteWorkflowNodeInput,
   DecideWorkflowApprovalInput,
@@ -46,6 +48,9 @@ import type {
   Project,
   ProjectMember,
   ProjectRole,
+  ProjectReportDetail,
+  ProjectReportGenerationResult,
+  ProjectReportSummary,
   PublishMemoryTruthInput,
   ReadinessResponse,
   ReviewMemoryClaimsInput,
@@ -66,8 +71,13 @@ import type {
   UpdateProjectInput,
   UpdateProjectRoleInput,
   UpdateTaskInput,
+  UpdateWorkbenchBriefSettingsInput,
   ValidateWorkflowMarkdownInput,
   WorkbenchSummary,
+  WorkbenchBriefGenerationResult,
+  WorkbenchBriefSettings,
+  WorkbenchDashboard,
+  WorkbenchFollow,
   WorkflowDefinition,
   WorkflowAuditPage,
   WorkflowAuditKind,
@@ -519,6 +529,128 @@ export async function listAgentEpisodes(
 
 export function getWorkbench(): Promise<WorkbenchSummary> {
   return request("/workbench");
+}
+
+export function getWorkbenchDashboard(): Promise<WorkbenchDashboard> {
+  return request("/workbench/dashboard");
+}
+
+export function refreshWorkbenchBrief(
+  briefDate?: string,
+): Promise<WorkbenchBriefGenerationResult> {
+  return request("/workbench/brief/refresh", {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(briefDate === undefined ? {} : { briefDate }),
+  });
+}
+
+export function markWorkbenchBriefRead(
+  briefId: string,
+  read: boolean,
+): Promise<{ briefId: string; read: boolean }> {
+  return request(`/workbench/brief/${briefId}/read`, {
+    method: "POST",
+    body: JSON.stringify({ read }),
+  });
+}
+
+export function getWorkbenchBriefSettings(): Promise<WorkbenchBriefSettings> {
+  return request("/workbench/brief/settings");
+}
+
+export function updateWorkbenchBriefSettings(
+  input: UpdateWorkbenchBriefSettingsInput,
+): Promise<WorkbenchBriefSettings> {
+  return request("/workbench/brief/settings", {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listWorkbenchFollows(): Promise<WorkbenchFollow[]> {
+  return (await request<{ items: WorkbenchFollow[] }>("/workbench/follows"))
+    .items;
+}
+
+export function setWorkbenchFollow(input: {
+  readonly targetType: WorkbenchFollow["targetType"];
+  readonly targetId: string;
+  readonly projectId: string;
+  readonly followed: boolean;
+}): Promise<{ followed: boolean }> {
+  return request("/workbench/follows", {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listProjectReports(
+  projectId: string,
+  query: { from?: string; to?: string; query?: string } = {},
+): Promise<ProjectReportSummary[]> {
+  const params = new URLSearchParams();
+  if (query.from !== undefined) params.set("from", query.from);
+  if (query.to !== undefined) params.set("to", query.to);
+  if (query.query !== undefined && query.query.trim() !== "") {
+    params.set("query", query.query.trim());
+  }
+  const suffix = params.size === 0 ? "" : `?${params.toString()}`;
+  return (
+    await request<{ items: ProjectReportSummary[] }>(
+      `/projects/${projectId}/reports${suffix}`,
+    )
+  ).items;
+}
+
+export function generateProjectReport(
+  projectId: string,
+  reportDate?: string,
+): Promise<ProjectReportGenerationResult> {
+  return request(`/projects/${projectId}/reports/generate`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(reportDate === undefined ? {} : { reportDate }),
+  });
+}
+
+export function getProjectReport(
+  projectId: string,
+  reportId: string,
+): Promise<ProjectReportDetail> {
+  return request(`/projects/${projectId}/reports/${reportId}`);
+}
+
+export function markProjectReportRead(
+  projectId: string,
+  reportId: string,
+  read: boolean,
+): Promise<{ reportId: string; read: boolean }> {
+  return request(`/projects/${projectId}/reports/${reportId}/read`, {
+    method: "POST",
+    body: JSON.stringify({ read }),
+  });
+}
+
+export function createSupplyException(
+  input: CreateSupplyExceptionInput,
+): Promise<unknown> {
+  return request("/workbench/supply-exceptions", {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function createSupplierRisk(
+  input: CreateSupplierRiskInput,
+): Promise<unknown> {
+  return request("/workbench/supplier-risks", {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
 }
 
 export function getOperationsSnapshot(): Promise<OperationsSnapshot> {

@@ -5,6 +5,7 @@ import type {
   ProjectRole,
   Task,
   TaskMessage,
+  WorkbenchSourceRef,
 } from "@pluginmax/contracts";
 import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -26,6 +27,7 @@ import {
   RotateCcw,
   Search,
   Send,
+  Star,
   Undo2,
   UsersRound,
   X,
@@ -43,9 +45,11 @@ import {
   listProjectRoles,
   listTaskRuns,
   listTasks,
+  listWorkbenchFollows,
   postTaskMessage,
   publishMemoryTruth,
   reviewTask,
+  setWorkbenchFollow,
   taskAttachmentDownloadUrl,
   updateProject,
   updateTask,
@@ -58,6 +62,7 @@ import {
   MemoryReviewQueuePanel,
 } from "./MemoryClosurePanels.js";
 import { RunView } from "./RunView.js";
+import { ProjectReportsPanel } from "./ProjectReportsPanel.js";
 
 interface SharedViewProps {
   projects: Project[];
@@ -289,14 +294,20 @@ export function ProjectsView({
   onProjectChange,
   onOpenTask,
   onOpenMeeting,
+  onOpenSource,
+  initialReportId,
+  initialTab,
 }: SharedViewProps & {
   onOpenTask: (taskId: string, projectId: string) => void;
   onOpenMeeting: (meetingId: string, projectId: string) => void;
+  onOpenSource: (source: WorkbenchSourceRef, reportId?: string) => void;
+  initialReportId?: string;
+  initialTab?: "overview" | "tasks" | "memory" | "members" | "reports";
 }) {
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<"tasks" | "memory" | "members" | "overview">(
-    "overview",
-  );
+  const [tab, setTab] = useState<
+    "tasks" | "memory" | "members" | "overview" | "reports"
+  >(initialReportId === undefined ? (initialTab ?? "overview") : "reports");
   const [editOpen, setEditOpen] = useState(false);
   const selectedProjectId = projectId || projects[0]?.id || "";
   const tasksQuery = useQuery({
@@ -312,6 +323,13 @@ export function ProjectsView({
   const project = projects.find((item) => item.id === selectedProjectId);
   const tasks = tasksQuery.data ?? [];
   const memory = memoryQuery.data?.items ?? [];
+  useEffect(() => {
+    if (initialReportId !== undefined) {
+      setTab("reports");
+    } else if (initialTab !== undefined) {
+      setTab(initialTab);
+    }
+  }, [initialReportId, initialTab, selectedProjectId]);
   const filteredProjects = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     if (query === "") return projects;
@@ -474,6 +492,14 @@ export function ProjectsView({
                   <UsersRound size={13} />
                   成员与角色
                 </button>
+                <button
+                  className={tab === "reports" ? "active" : ""}
+                  type="button"
+                  onClick={() => setTab("reports")}
+                >
+                  <FileText size={13} />
+                  项目日报
+                </button>
               </div>
 
               {tab === "overview" && (
@@ -549,6 +575,15 @@ export function ProjectsView({
                 <ProjectMembershipPanel
                   projectId={project.id}
                   agents={agents}
+                />
+              )}
+              {tab === "reports" && (
+                <ProjectReportsPanel
+                  project={project}
+                  {...(initialReportId === undefined
+                    ? {}
+                    : { initialReportId })}
+                  onOpenSource={onOpenSource}
                 />
               )}
             </>
@@ -1360,6 +1395,27 @@ function TaskDetailDrawer({
     queryKey: ["task-detail", task.id],
     queryFn: () => getTaskDetail(task.id),
   });
+  const followsQuery = useQuery({
+    queryKey: ["workbench-follows"],
+    queryFn: listWorkbenchFollows,
+  });
+  const followed =
+    followsQuery.data?.some(
+      (follow) => follow.targetType === "task" && follow.targetId === task.id,
+    ) ?? false;
+  const followMutation = useMutation({
+    mutationFn: () =>
+      setWorkbenchFollow({
+        targetType: "task",
+        targetId: task.id,
+        projectId: task.projectId,
+        followed: !followed,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["workbench-follows"] });
+      void queryClient.invalidateQueries({ queryKey: ["workbench-dashboard"] });
+    },
+  });
   const runsQuery = useQuery({
     queryKey: ["task-runs", task.id],
     queryFn: () => listTaskRuns(task.id),
@@ -1499,14 +1555,27 @@ function TaskDetailDrawer({
             <h2>{task.title}</h2>
             <p>{task.description}</p>
           </div>
-          <button
-            className="pm-icon-btn"
-            type="button"
-            title="关闭任务详情"
-            onClick={onClose}
-          >
-            <X size={16} />
-          </button>
+          <div className="task-detail-head-actions">
+            <button
+              className="pm-icon-btn follow-toggle"
+              type="button"
+              title={followed ? "取消关注任务" : "关注任务"}
+              aria-label={followed ? "取消关注任务" : "关注任务"}
+              aria-pressed={followed}
+              disabled={followMutation.isPending}
+              onClick={() => followMutation.mutate()}
+            >
+              <Star size={14} fill={followed ? "currentColor" : "none"} />
+            </button>
+            <button
+              className="pm-icon-btn"
+              type="button"
+              title="关闭任务详情"
+              onClick={onClose}
+            >
+              <X size={16} />
+            </button>
+          </div>
         </header>
 
         <div className="task-acceptance">

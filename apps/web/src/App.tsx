@@ -22,6 +22,7 @@ import {
 } from "./OperationsViews.js";
 import { ProjectsView, TasksView } from "./WorkspaceViews.js";
 import { listAllAgents, listProjects } from "./api.js";
+import type { WorkbenchSourceRef } from "@pluginmax/contracts";
 
 type AppView =
   | "workbench"
@@ -65,7 +66,14 @@ export function App() {
   const [projectId, setProjectId] = useState("");
   const [taskId, setTaskId] = useState("");
   const [meetingId, setMeetingId] = useState("");
+  const [workflowInstanceId, setWorkflowInstanceId] = useState("");
+  const [projectReportId, setProjectReportId] = useState<string>();
+  const [projectTab, setProjectTab] = useState<
+    "overview" | "tasks" | "memory" | "members" | "reports"
+  >("overview");
   const [view, setView] = useState<AppView>("workbench");
+  const [returnView, setReturnView] = useState<AppView | null>(null);
+  const [returnProjectId, setReturnProjectId] = useState("");
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [leftOpen, setLeftOpen] = useState(() => window.innerWidth >= 760);
   const selectedProjectId = projectId || projectsQuery.data?.[0]?.id || "";
@@ -87,14 +95,76 @@ export function App() {
   }, []);
 
   const openTask = (nextTaskId: string, nextProjectId: string) => {
+    if (view !== "tasks") {
+      setReturnView(view);
+      setReturnProjectId(selectedProjectId);
+    }
     setProjectId(nextProjectId);
     setTaskId(nextTaskId);
     setView("tasks");
   };
   const openMeeting = (nextMeetingId: string, nextProjectId: string) => {
+    if (view !== "meetings") {
+      setReturnView(view);
+      setReturnProjectId(selectedProjectId);
+    }
     setProjectId(nextProjectId);
     setMeetingId(nextMeetingId);
     setView("meetings");
+  };
+  const openSource = (source: WorkbenchSourceRef, reportId?: string) => {
+    if (!source.available) return;
+    setProjectId(source.projectId);
+    setTaskId("");
+    setMeetingId("");
+    setWorkflowInstanceId("");
+    if (reportId !== undefined) {
+      setProjectReportId(reportId);
+    }
+    if (
+      source.route === "task" ||
+      source.route === "run" ||
+      source.route === "review"
+    ) {
+      setTaskId(source.targetId);
+      if (view !== "tasks") {
+        setReturnView(view);
+        setReturnProjectId(selectedProjectId);
+      }
+      setView("tasks");
+      return;
+    }
+    if (source.route === "workflow") {
+      setWorkflowInstanceId(source.targetId);
+      if (view !== "workflows") {
+        setReturnView(view);
+        setReturnProjectId(selectedProjectId);
+      }
+      setView("workflows");
+      return;
+    }
+    if (source.route === "meeting") {
+      setMeetingId(source.targetId);
+      if (view !== "meetings") {
+        setReturnView(view);
+        setReturnProjectId(selectedProjectId);
+      }
+      setView("meetings");
+      return;
+    }
+    if (source.route === "report") {
+      setProjectReportId(source.targetId);
+      setProjectTab("reports");
+      setReturnView(null);
+      setView("projects");
+      return;
+    }
+    if (source.route === "memory") {
+      setProjectReportId(undefined);
+      setProjectTab("memory");
+      setReturnView(null);
+      setView("projects");
+    }
   };
 
   return (
@@ -140,7 +210,10 @@ export function App() {
                 type="button"
                 key={item.key}
                 title={item.label}
-                onClick={() => setView(item.key)}
+                onClick={() => {
+                  setView(item.key);
+                  setReturnView(null);
+                }}
               >
                 <Icon size={15} />
                 <span>{item.label}</span>
@@ -168,6 +241,8 @@ export function App() {
                 onClick={() => {
                   setProjectId(project.id);
                   setTaskId("");
+                  setProjectReportId(undefined);
+                  setProjectTab("overview");
                   setView("projects");
                 }}
               >
@@ -215,6 +290,19 @@ export function App() {
       </aside>
 
       <div className="app-stage">
+        {returnView !== null && (
+          <button
+            className="return-context-bar"
+            type="button"
+            onClick={() => {
+              setProjectId(returnProjectId);
+              setView(returnView);
+              setReturnView(null);
+            }}
+          >
+            返回{returnView === "workbench" ? "工作台" : "项目"}
+          </button>
+        )}
         {view === "workbench" && (
           <WorkbenchView
             projects={projectsQuery.data ?? []}
@@ -224,7 +312,7 @@ export function App() {
               setProjectId(nextProjectId);
               setTaskId("");
             }}
-            onOpenTask={openTask}
+            onOpenSource={openSource}
           />
         )}
         {view === "projects" && (
@@ -239,6 +327,11 @@ export function App() {
             }}
             onOpenTask={openTask}
             onOpenMeeting={openMeeting}
+            onOpenSource={openSource}
+            {...(projectReportId === undefined
+              ? {}
+              : { initialReportId: projectReportId })}
+            initialTab={projectTab}
           />
         )}
         {view === "tasks" && (
@@ -249,6 +342,7 @@ export function App() {
             onProjectChange={(nextProjectId) => {
               setProjectId(nextProjectId);
               setTaskId("");
+              setWorkflowInstanceId("");
             }}
             initialTaskId={taskId}
             onInitialTaskConsumed={consumeInitialTask}
@@ -263,6 +357,9 @@ export function App() {
               setProjectId(nextProjectId);
               setTaskId("");
             }}
+            {...(workflowInstanceId === ""
+              ? {}
+              : { initialInstanceId: workflowInstanceId })}
           />
         )}
         {view === "meetings" && (

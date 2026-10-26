@@ -15,6 +15,7 @@ import {
   WORKFLOW_GOVERNANCE_SCHEMA_SQL,
   WORKFLOW_MARKDOWN_SCHEMA_SQL,
   WORKFLOW_RUNTIME_SCHEMA_SQL,
+  WORKBENCH_REPORTS_SCHEMA_SQL,
 } from "./schema.js";
 import type { Database } from "./database.js";
 
@@ -35,6 +36,7 @@ const migrations = [
   { version: 14, sql: PRODUCTION_READINESS_SCHEMA_SQL },
   { version: 15, sql: MEETING_DECISIONS_SCHEMA_SQL },
   { version: 16, sql: MEMORY_CLOSURE_SCHEMA_SQL },
+  { version: 17, sql: WORKBENCH_REPORTS_SCHEMA_SQL },
 ] as const;
 
 export async function migrate(

@@ -61,6 +61,7 @@ import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
 import { RuntimeTraceRepository } from "./runtime-trace-repository.js";
 import { MeetingDecisionsRepository } from "./meeting-decisions-repository.js";
 import { MemoryClosureRepository } from "./memory-closure-repository.js";
+import { WorkbenchReportsRepository } from "./workbench-reports-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -1583,6 +1584,7 @@ export class PlatformRepositories {
   readonly meetings: MeetingRepository;
   readonly meetingDecisions: MeetingDecisionsRepository;
   readonly workbench: WorkbenchRepository;
+  readonly workbenchReports: WorkbenchReportsRepository;
   readonly runtimeReliability: RuntimeReliabilityRepository;
   readonly runtimeEffects: RuntimeEffectRepository;
   readonly traces: RuntimeTraceRepository;
@@ -1606,6 +1608,7 @@ export class PlatformRepositories {
     this.meetings = new MeetingRepository(database);
     this.meetingDecisions = new MeetingDecisionsRepository(database);
     this.workbench = new WorkbenchRepository(database);
+    this.workbenchReports = new WorkbenchReportsRepository(database);
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
     this.runtimeEffects = new RuntimeEffectRepository(database);
     this.traces = new RuntimeTraceRepository(database);
