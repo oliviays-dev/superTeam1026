@@ -1,4 +1,20 @@
 export { Database } from "./database.js";
+export {
+  AUTHORIZATION_PERMISSIONS,
+  AuthorizationRepository,
+  AuthorizationRepositoryError,
+  type AuthorizationAuditInput,
+  type AuthorizationDenialReason,
+  type AuthorizationPermission,
+  type AuthorizationPrincipal,
+  type AuthorizationResourceType,
+  type PrincipalResolution,
+  type ProjectAuthorizationReport,
+  type ProjectMemberAuthorizationReport,
+  type ProjectOwnerSourceReport,
+  type ScopeAuthorizationDecision,
+  type ScopedAuthorizationPermission,
+} from "./authorization-repository.js";
 export { ContextRepository } from "./context-repository.js";
 export {
   ArtifactRepository,

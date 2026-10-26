@@ -8,6 +8,7 @@ import type {
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import type { Database } from "./database.js";
+import { AuthorizationRepository } from "./authorization-repository.js";
 
 interface ProjectRoleRow {
   id: string;
@@ -27,6 +28,7 @@ interface ProjectMemberRow {
   project_id: string;
   kind: ProjectMember["kind"];
   actor_id: string;
+  principal_id: string | null;
   name: string;
   responsibility: string;
   status: ProjectMember["status"];
@@ -42,6 +44,7 @@ interface ProjectMemberRoleRow extends ProjectRoleRow {
 export interface ResolvedCreateProjectMemberInput {
   readonly kind: ProjectMember["kind"];
   readonly actorId: string;
+  readonly principalId: string;
   readonly name: string;
   readonly responsibility: string;
   readonly roleIds: readonly string[];
@@ -50,7 +53,14 @@ export interface ResolvedCreateProjectMemberInput {
 export type DeleteProjectRoleResult = "deleted" | "assigned" | "not_found";
 
 export class ProjectMembershipRepository {
-  constructor(private readonly database: Database) {}
+  private readonly authorization: AuthorizationRepository;
+
+  constructor(
+    private readonly database: Database,
+    authorization?: AuthorizationRepository,
+  ) {
+    this.authorization = authorization ?? new AuthorizationRepository(database);
+  }
 
   async listRoles(projectId: string): Promise<ProjectRole[]> {
     const result = await this.database.query<ProjectRoleRow>(
@@ -89,32 +99,42 @@ export class ProjectMembershipRepository {
     projectId: string,
     roleId: string,
     input: UpdateProjectRoleInput,
+    actorPrincipalId: string | null = null,
   ): Promise<ProjectRole | undefined> {
-    const result = await this.database.query<ProjectRoleRow>(
-      `UPDATE project_roles
-       SET
-         code = COALESCE($3, code),
-         name = COALESCE($4, name),
-         category = COALESCE($5, category),
-         description = COALESCE($6, description),
-         permissions = COALESCE($7::jsonb, permissions),
-         updated_at = NOW()
-       WHERE project_id = $1 AND id = $2
-       RETURNING *`,
-      [
+    return this.database.transaction(async (client) => {
+      const result = await client.query<ProjectRoleRow>(
+        `UPDATE project_roles
+         SET
+           code = COALESCE($3, code),
+           name = COALESCE($4, name),
+           category = COALESCE($5, category),
+           description = COALESCE($6, description),
+           permissions = COALESCE($7::jsonb, permissions),
+           updated_at = NOW()
+         WHERE project_id = $1 AND id = $2
+         RETURNING *`,
+        [
+          projectId,
+          roleId,
+          input.code ?? null,
+          input.name ?? null,
+          input.category ?? null,
+          input.description ?? null,
+          input.permissions === undefined
+            ? null
+            : JSON.stringify(input.permissions),
+        ],
+      );
+      const row = result.rows[0];
+      if (row === undefined) return undefined;
+      await this.authorization.syncProjectRoleGrantsWithClient(
+        client,
         projectId,
         roleId,
-        input.code ?? null,
-        input.name ?? null,
-        input.category ?? null,
-        input.description ?? null,
-        input.permissions === undefined
-          ? null
-          : JSON.stringify(input.permissions),
-      ],
-    );
-    const row = result.rows[0];
-    return row === undefined ? undefined : projectRoleFromRow(row);
+        actorPrincipalId,
+      );
+      return projectRoleFromRow(row);
+    });
   }
 
   async deleteRole(
@@ -183,24 +203,32 @@ export class ProjectMembershipRepository {
   async createMember(
     projectId: string,
     input: ResolvedCreateProjectMemberInput,
+    actorPrincipalId: string | null = null,
   ): Promise<ProjectMember> {
     const memberId = randomUUID();
     await this.database.transaction(async (client) => {
       await client.query(
         `INSERT INTO project_members (
-           id, project_id, kind, actor_id, name, responsibility,
+           id, project_id, kind, actor_id, principal_id, name, responsibility,
            status, is_owner, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, 'active', FALSE, NOW(), NOW())`,
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', FALSE, NOW(), NOW())`,
         [
           memberId,
           projectId,
           input.kind,
           input.actorId,
+          input.principalId,
           input.name,
           input.responsibility,
         ],
       );
       await this.replaceMemberRoles(client, projectId, memberId, input.roleIds);
+      await this.authorization.syncProjectMemberGrantsWithClient(
+        client,
+        projectId,
+        memberId,
+        actorPrincipalId,
+      );
     });
     const member = await this.getMember(projectId, memberId);
     if (member === undefined) throw new Error("created project member missing");
@@ -211,6 +239,7 @@ export class ProjectMembershipRepository {
     projectId: string,
     memberId: string,
     input: UpdateProjectMemberInput,
+    actorPrincipalId: string | null = null,
   ): Promise<ProjectMember | undefined> {
     const updated = await this.database.transaction(async (client) => {
       const result = await client.query<ProjectMemberRow>(
@@ -239,19 +268,46 @@ export class ProjectMembershipRepository {
           input.roleIds,
         );
       }
+      if (input.status === "inactive") {
+        await this.authorization.revokeProjectMemberGrantsWithClient(
+          client,
+          projectId,
+          memberId,
+          actorPrincipalId,
+        );
+      } else if (input.roleIds !== undefined) {
+        await this.authorization.syncProjectMemberGrantsWithClient(
+          client,
+          projectId,
+          memberId,
+          actorPrincipalId,
+        );
+      }
       return true;
     });
     return updated ? this.getMember(projectId, memberId) : undefined;
   }
 
-  async deleteMember(projectId: string, memberId: string): Promise<boolean> {
-    const result = await this.database.query(
-      `DELETE FROM project_members
-       WHERE project_id = $1 AND id = $2
-       RETURNING id`,
-      [projectId, memberId],
-    );
-    return (result.rowCount ?? 0) > 0;
+  async deleteMember(
+    projectId: string,
+    memberId: string,
+    actorPrincipalId: string | null = null,
+  ): Promise<boolean> {
+    return this.database.transaction(async (client) => {
+      await this.authorization.revokeProjectMemberGrantsWithClient(
+        client,
+        projectId,
+        memberId,
+        actorPrincipalId,
+      );
+      const result = await client.query(
+        `DELETE FROM project_members
+         WHERE project_id = $1 AND id = $2
+         RETURNING id`,
+        [projectId, memberId],
+      );
+      return (result.rowCount ?? 0) > 0;
+    });
   }
 
   private async replaceMemberRoles(
@@ -315,6 +371,7 @@ function projectMemberFromRow(
     projectId: row.project_id,
     kind: row.kind,
     actorId: row.actor_id,
+    principalId: row.principal_id,
     name: row.name,
     responsibility: row.responsibility,
     status: row.status,

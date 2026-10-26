@@ -76,9 +76,17 @@ import { WorkbenchReportsRepository } from "./workbench-reports-repository.js";
 import { ProjectTemplatesRepository } from "./project-templates-repository.js";
 import { ExternalRuntimeRepository } from "./external-runtime-repository.js";
 import { AgentRuntimeBindingRepository } from "./agent-runtime-binding-repository.js";
+import { AuthorizationRepository } from "./authorization-repository.js";
 
 export class ProjectRepository {
-  constructor(private readonly database: Database) {}
+  private readonly authorization: AuthorizationRepository;
+
+  constructor(
+    private readonly database: Database,
+    authorization?: AuthorizationRepository,
+  ) {
+    this.authorization = authorization ?? new AuthorizationRepository(database);
+  }
 
   async list(): Promise<Project[]> {
     const result = await this.database.query<ProjectRow>(
@@ -115,6 +123,14 @@ export class ProjectRepository {
       const roleId = randomUUID();
       const memberId = randomUUID();
       const responsibility = "负责项目目标、范围、成员和最终验收。";
+      const principal = await client.query<{ id: string }>(
+        "SELECT id FROM principals WHERE id = $1",
+        [actorId],
+      );
+      const principalId = principal.rows[0]?.id ?? null;
+      if (principalId === null) {
+        throw new Error("project creator Principal does not exist");
+      }
       await client.query(
         `INSERT INTO project_roles (
            id, project_id, code, name, category, description, permissions,
@@ -128,16 +144,22 @@ export class ProjectRepository {
       );
       await client.query(
         `INSERT INTO project_members (
-           id, project_id, kind, actor_id, name, responsibility,
+           id, project_id, kind, actor_id, principal_id, name, responsibility,
            status, is_owner, created_at, updated_at
-         ) VALUES ($1, $2, 'human', $4, $5, $3,
+         ) VALUES ($1, $2, 'human', $4, $6, $5, $3,
                    'active', TRUE, NOW(), NOW())`,
-        [memberId, id, responsibility, actorId, actorName],
+        [memberId, id, responsibility, actorId, actorName, principalId],
       );
       await client.query(
         `INSERT INTO project_member_roles (project_member_id, role_id)
          VALUES ($1, $2)`,
         [memberId, roleId],
+      );
+      await this.authorization.syncProjectMemberGrantsWithClient(
+        client,
+        id,
+        memberId,
+        principalId,
       );
       return projectFromRow(result.rows[0]!);
     });
@@ -1722,6 +1744,7 @@ async function appendRunEventWithClient(
 }
 
 export class PlatformRepositories {
+  readonly authorization: AuthorizationRepository;
   readonly projects: ProjectRepository;
   readonly agents: AgentRepository;
   readonly tasks: TaskRepository;
@@ -1751,15 +1774,22 @@ export class PlatformRepositories {
   readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
 
   constructor(database: Database) {
-    this.projects = new ProjectRepository(database);
+    this.authorization = new AuthorizationRepository(database);
+    this.projects = new ProjectRepository(database, this.authorization);
     this.agents = new AgentRepository(database);
     this.tasks = new TaskRepository(database);
     this.taskCollaboration = new TaskCollaborationRepository(database);
     this.runs = new RunRepository(database);
     this.jobs = new JobRepository(database);
     this.contexts = new ContextRepository(database);
-    this.projectMemberships = new ProjectMembershipRepository(database);
-    this.projectTemplates = new ProjectTemplatesRepository(database);
+    this.projectMemberships = new ProjectMembershipRepository(
+      database,
+      this.authorization,
+    );
+    this.projectTemplates = new ProjectTemplatesRepository(
+      database,
+      this.authorization,
+    );
     this.artifacts = new ArtifactRepository(database);
     this.memory = new MemoryRepository(database);
     this.memoryClosure = new MemoryClosureRepository(database, this.memory);

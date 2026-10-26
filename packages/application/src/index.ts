@@ -163,6 +163,7 @@ import {
   workflowRetryDelayMs,
 } from "@pluginmax/domain";
 import {
+  AuthorizationRepositoryError,
   DirectChatPreconditionError,
   MeetingAiPreconditionError,
   MemoryReviewConflictError,
@@ -176,6 +177,13 @@ import {
   AgentRuntimePreflightService,
   type AgentRuntimePreflightEvaluation,
 } from "./agent-runtime-preflight.js";
+
+export {
+  AuthorizationService,
+  type AuthorizedRequestPrincipal,
+  type RouteAuthorizationInput,
+  type RouteAuthorizationResult,
+} from "./authorization.js";
 
 export class ApplicationError extends Error {
   constructor(
@@ -506,6 +514,7 @@ export class PlatformApplication {
   async createProjectRole(
     projectId: string,
     input: CreateProjectRoleInput,
+    _actorPrincipalId: string | null = null,
   ): Promise<ProjectRole> {
     await this.requireProject(projectId);
     try {
@@ -529,6 +538,7 @@ export class PlatformApplication {
     projectId: string,
     roleId: string,
     input: UpdateProjectRoleInput,
+    actorPrincipalId: string | null = null,
   ): Promise<ProjectRole> {
     await this.requireProject(projectId);
     try {
@@ -536,6 +546,7 @@ export class PlatformApplication {
         projectId,
         roleId,
         input,
+        actorPrincipalId,
       );
       if (role === undefined) {
         throw new ApplicationError(
@@ -587,6 +598,7 @@ export class PlatformApplication {
   async createProjectMember(
     projectId: string,
     input: CreateProjectMemberInput,
+    actorPrincipalId: string | null = null,
   ): Promise<ProjectMember> {
     await this.requireProject(projectId);
     const roles =
@@ -598,6 +610,7 @@ export class PlatformApplication {
 
     let actorId = input.actorId ?? "local-admin";
     let name = input.name ?? "Local Admin";
+    let principalId: string;
     if (input.kind === "agent") {
       if (input.agentId === undefined) {
         throw new ApplicationError(
@@ -616,6 +629,29 @@ export class PlatformApplication {
       }
       actorId = agent.id;
       name = agent.name;
+      principalId =
+        agent.principalId ??
+        (await this.repositories.authorization.ensureAgentPrincipal(
+          agent.id,
+          agent.name,
+        ));
+    } else {
+      try {
+        const resolved = await this.repositories.authorization.requirePrincipal(
+          actorId,
+          "human",
+        );
+        principalId = resolved.principal.id;
+      } catch (error) {
+        if (error instanceof AuthorizationRepositoryError) {
+          throw new ApplicationError(
+            `principal_${error.code}`,
+            error.message,
+            error.code === "principal_not_found" ? 404 : 403,
+          );
+        }
+        throw error;
+      }
     }
 
     try {
@@ -624,10 +660,12 @@ export class PlatformApplication {
         {
           kind: input.kind,
           actorId,
+          principalId,
           name,
           responsibility: input.responsibility,
           roleIds,
         },
+        actorPrincipalId,
       );
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -655,6 +693,7 @@ export class PlatformApplication {
     projectId: string,
     memberId: string,
     input: UpdateProjectMemberInput,
+    actorPrincipalId: string | null = null,
   ): Promise<ProjectMember> {
     await this.requireProject(projectId);
     const member = await this.repositories.projectMemberships.getMember(
@@ -684,6 +723,7 @@ export class PlatformApplication {
         projectId,
         memberId,
         { ...input, ...(roleIds === undefined ? {} : { roleIds }) },
+        actorPrincipalId,
       );
       if (updated === undefined) {
         throw new ApplicationError(
@@ -711,6 +751,7 @@ export class PlatformApplication {
   async deleteProjectMember(
     projectId: string,
     memberId: string,
+    actorPrincipalId: string | null = null,
   ): Promise<void> {
     await this.requireProject(projectId);
     const member = await this.repositories.projectMemberships.getMember(
@@ -728,6 +769,7 @@ export class PlatformApplication {
     await this.repositories.projectMemberships.deleteMember(
       projectId,
       memberId,
+      actorPrincipalId,
     );
   }
 
@@ -799,11 +841,20 @@ export class PlatformApplication {
     };
   }
 
-  createAgent(
+  async createAgent(
     input: CreateAgentInput,
     actorId = "local-admin",
   ): Promise<Agent> {
-    return this.repositories.agents.create(input, actorId, actorId);
+    const agent = await this.repositories.agents.create(
+      input,
+      actorId,
+      actorId,
+    );
+    await this.repositories.authorization.ensureAgentPrincipal(
+      agent.id,
+      agent.name,
+    );
+    return (await this.repositories.agents.get(agent.id, true)) ?? agent;
   }
 
   async updateAgent(
@@ -1178,8 +1229,9 @@ export class PlatformApplication {
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
   }): Promise<ExternalRunExecutionSnapshot | undefined> {
-    const binding =
-      await this.repositories.agentRuntimeBindings.getCurrent(input.agent.id);
+    const binding = await this.repositories.agentRuntimeBindings.getCurrent(
+      input.agent.id,
+    );
     if (
       binding?.status !== "active" &&
       !externalRuntimeKinds.has(input.agent.runtimeKind)
@@ -1249,8 +1301,7 @@ export class PlatformApplication {
   private async requireExternalRuntime(
     runtimeId: string,
   ): Promise<ExternalRuntime> {
-    const runtime =
-      await this.repositories.externalRuntimes.get(runtimeId);
+    const runtime = await this.repositories.externalRuntimes.get(runtimeId);
     if (runtime === undefined) {
       throw new ApplicationError(
         "runtime_not_found",

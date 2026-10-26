@@ -17,6 +17,7 @@ import type {
   WorkflowTemplate,
   WorkflowTemplateDefinition,
 } from "@pluginmax/contracts";
+import { AuthorizationRepository } from "./authorization-repository.js";
 import { workflowTemplateDefinitionSchema } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import type { Database } from "./database.js";
@@ -149,7 +150,14 @@ export class ProjectTemplateRepositoryError extends Error {
 }
 
 export class ProjectTemplatesRepository {
-  constructor(private readonly database: Database) {}
+  private readonly authorization: AuthorizationRepository;
+
+  constructor(
+    private readonly database: Database,
+    authorization?: AuthorizationRepository,
+  ) {
+    this.authorization = authorization ?? new AuthorizationRepository(database);
+  }
 
   async listTemplateRoles(includeArchived = false): Promise<TemplateRole[]> {
     const result = await this.database.query<TemplateRoleRow>(
@@ -838,21 +846,45 @@ export class ProjectTemplatesRepository {
         roleIdByCode.set("PROJECT_OWNER", ownerRoleId);
       }
       const ownerMemberId = randomUUID();
+      const ownerPrincipal = await client.query<{ id: string }>(
+        "SELECT id FROM principals WHERE id = $1",
+        [input.actorId],
+      );
+      const ownerPrincipalId = ownerPrincipal.rows[0]?.id ?? null;
+      if (ownerPrincipalId === null) {
+        throw new ProjectTemplateRepositoryError(
+          "template_forbidden",
+          "Project creator Principal does not exist",
+          403,
+        );
+      }
       await client.query(
         `INSERT INTO project_members (
-           id, project_id, kind, actor_id, name, responsibility,
+           id, project_id, kind, actor_id, principal_id, name, responsibility,
            status, is_owner, created_at, updated_at
          ) VALUES (
-           $1, $2, 'human', $3, $4,
+           $1, $2, 'human', $3, $5, $4,
            '负责项目目标、范围、成员和最终验收。',
            'active', TRUE, NOW(), NOW()
          )`,
-        [ownerMemberId, projectId, input.actorId, input.actorName],
+        [
+          ownerMemberId,
+          projectId,
+          input.actorId,
+          input.actorName,
+          ownerPrincipalId,
+        ],
       );
       await client.query(
         `INSERT INTO project_member_roles (project_member_id, role_id)
          VALUES ($1, $2)`,
         [ownerMemberId, ownerRoleId],
+      );
+      await this.authorization.syncProjectMemberGrantsWithClient(
+        client,
+        projectId,
+        ownerMemberId,
+        ownerPrincipalId,
       );
 
       for (const ref of snapshot.workflowTemplates) {

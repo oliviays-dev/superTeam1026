@@ -194,6 +194,27 @@ integration("external runtime execution", () => {
       [projectId, `EXT-${projectId.slice(0, 8)}`],
     );
     await database.query(
+      `INSERT INTO principals (
+         id, kind, display_name, status, status_authority, source,
+         version, created_at, updated_at
+       ) VALUES (
+         'local-admin', 'human', 'Local Admin', 'active', 'system', 'local',
+         1, NOW(), NOW()
+       )
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await database.query(
+      `INSERT INTO project_members (
+         id, project_id, kind, actor_id, principal_id, name, responsibility,
+         status, is_owner, created_at, updated_at
+       ) VALUES (
+         $1, $2, 'human', 'local-admin', 'local-admin', 'Local Admin', '',
+         'active', TRUE, NOW(), NOW()
+       )
+       ON CONFLICT (project_id, kind, actor_id) DO NOTHING`,
+      [randomUUID(), projectId],
+    );
+    await database.query(
       `INSERT INTO tasks (
          id, project_id, title, description, acceptance, status,
          agent_id, created_at, updated_at

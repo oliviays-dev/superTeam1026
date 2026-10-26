@@ -19,6 +19,16 @@ integration("runtime operations API contract", () => {
   beforeAll(async () => {
     database = new Database(databaseUrl!);
     await migrate(database);
+    await database.query(
+      `INSERT INTO principals (
+         id, kind, display_name, status, status_authority, source,
+         version, created_at, updated_at
+       ) VALUES (
+         'local-admin', 'human', 'Local Admin', 'active', 'system', 'local',
+         1, NOW(), NOW()
+       )
+       ON CONFLICT (id) DO NOTHING`,
+    );
     repositories = new PlatformRepositories(database);
     const fileStoreRoot = await mkdtemp(join(tmpdir(), "pluginmax-api-test-"));
     const built = buildApi({
@@ -44,6 +54,7 @@ integration("runtime operations API contract", () => {
        ) VALUES ($1, 'API contract', $2, '', 'active', NOW(), NOW())`,
       [projectId, `API-${stamp.slice(0, 8)}`],
     );
+    await insertLocalOwner(projectId);
     await database.query(
       `INSERT INTO tasks (
          id, project_id, title, description, acceptance, status,
@@ -130,6 +141,7 @@ integration("runtime operations API contract", () => {
           input.projectStatus ?? "active",
         ],
       );
+      await insertLocalOwner(projectId);
     }
     await database.query(
       `INSERT INTO tasks (
@@ -146,6 +158,20 @@ integration("runtime operations API contract", () => {
       ],
     );
     return { projectId, taskId };
+  }
+
+  async function insertLocalOwner(projectId: string): Promise<void> {
+    await database.query(
+      `INSERT INTO project_members (
+         id, project_id, kind, actor_id, principal_id, name, responsibility,
+         status, is_owner, created_at, updated_at
+       ) VALUES (
+         $1, $2, 'human', 'local-admin', 'local-admin', 'Local Admin', '',
+         'active', TRUE, NOW(), NOW()
+       )
+       ON CONFLICT (project_id, kind, actor_id) DO NOTHING`,
+      [randomUUID(), projectId],
+    );
   }
 
   async function createAgent(

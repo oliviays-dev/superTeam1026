@@ -61,6 +61,7 @@ export const projectMemberSchema = z.object({
   projectId: z.string().uuid(),
   kind: projectMemberKindSchema,
   actorId: z.string().trim().min(1).max(180),
+  principalId: z.string().trim().min(1).max(180).nullable().optional(),
   name: z.string().trim().min(1).max(160),
   responsibility: z.string().trim().max(2_000),
   status: projectMemberStatusSchema,

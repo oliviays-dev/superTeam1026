@@ -33,6 +33,7 @@ export interface AgentRow {
   status: Agent["status"];
   source: Agent["source"];
   owner_id: string;
+  principal_id?: string | null;
   version: number;
   created_at: Date;
   updated_at: Date;
@@ -154,6 +155,7 @@ export function agentFromRow(row: AgentRow): Agent {
     status: row.status,
     source: row.source,
     ownerId: row.owner_id,
+    principalId: row.principal_id ?? null,
     version: row.version,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),

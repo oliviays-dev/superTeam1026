@@ -23,6 +23,16 @@ integration("approval SLA lifecycle", () => {
   });
 
   it("reminds, escalates and expires with concurrent idempotent sweeps", async () => {
+    await database.query(
+      `INSERT INTO principals (
+         id, kind, display_name, status, status_authority, source,
+         version, created_at, updated_at
+       ) VALUES (
+         'local-admin', 'human', 'Local Admin', 'active', 'system', 'local',
+         1, NOW(), NOW()
+       )
+       ON CONFLICT (id) DO NOTHING`,
+    );
     const project = await application.createProject({
       name: `SLA ${randomUUID().slice(0, 8)}`,
       description: "approval SLA integration",
@@ -31,9 +41,20 @@ integration("approval SLA lifecycle", () => {
       name: `SLA escalation ${randomUUID().slice(0, 5)}`,
       description: "fallback reviewers",
     });
+    await database.query(
+      `INSERT INTO principals (
+         id, kind, display_name, status, status_authority, source,
+         version, created_at, updated_at
+       ) VALUES (
+         'principal-human-escalation-user', 'human', 'Escalation User',
+         'active', 'account', 'local', 1, NOW(), NOW()
+       )
+       ON CONFLICT (id) DO NOTHING`,
+    );
     await repositories.projectMemberships.createMember(project.id, {
       kind: "human",
       actorId: "escalation-user",
+      principalId: "principal-human-escalation-user",
       name: "Escalation User",
       responsibility: "SLA escalation reviewer",
       roleIds: [escalationRole.id],

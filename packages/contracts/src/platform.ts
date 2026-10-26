@@ -244,6 +244,7 @@ export const agentSchema = z.object({
   status: z.enum(["active", "disabled"]),
   source: z.enum(["platform", "personal"]).default("personal"),
   ownerId: z.string(),
+  principalId: z.string().trim().min(1).max(180).nullable().optional(),
   version: z.number().int().positive(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),

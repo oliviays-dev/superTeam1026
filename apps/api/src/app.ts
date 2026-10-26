@@ -1,7 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ApiError,
-  type AuthenticatedPrincipal,
   agentRuntimePreflightInputSchema,
   agentStatusInputSchema,
   accountStatusInputSchema,
@@ -86,8 +85,10 @@ import {
 } from "@pluginmax/contracts";
 import {
   ApplicationError,
+  AuthorizationService,
   PlatformApplication,
   renderRuntimePrometheusMetrics,
+  type AuthorizedRequestPrincipal,
 } from "@pluginmax/application";
 import {
   Database,
@@ -238,6 +239,12 @@ const AUTHENTICATED_ACTOR_HEADER = "x-pluginmax-authenticated-actor";
 const AUTHENTICATED_NAME_HEADER = "x-pluginmax-authenticated-name";
 const AUTHENTICATED_ADMIN_HEADER = "x-pluginmax-authenticated-admin";
 
+interface RequestPrincipalContext extends AuthorizedRequestPrincipal {
+  readonly loginId: string;
+  readonly platformAdministrator: boolean;
+  readonly expiresAt: string | null;
+}
+
 function headerValue(
   headers: Record<string, unknown>,
   name: string,
@@ -325,6 +332,7 @@ export function buildApi(options: BuildApiOptions): {
   const fileStore = new LocalFileStore(options.fileStoreRoot);
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
+  const authorization = new AuthorizationService(repositories.authorization);
   const localActorId = options.localActorId ?? "local-admin";
   const authMode =
     options.authMode ??
@@ -344,7 +352,7 @@ export function buildApi(options: BuildApiOptions): {
   const requestTraces = new WeakMap<FastifyRequest, TraceContext>();
   const requestPrincipals = new WeakMap<
     FastifyRequest,
-    AuthenticatedPrincipal
+    RequestPrincipalContext
   >();
 
   app.addHook("onRequest", async (request, reply) => {
@@ -380,11 +388,24 @@ export function buildApi(options: BuildApiOptions): {
             ),
           );
       }
+      await repositories.authorization.ensureDevelopmentPrincipal(
+        actorId,
+        actorId === localActorId,
+      );
       request.headers[AUTHENTICATED_ACTOR_HEADER] = actorId;
       request.headers[AUTHENTICATED_NAME_HEADER] =
         actorId === localActorId ? "Local Admin" : actorId;
       request.headers[AUTHENTICATED_ADMIN_HEADER] =
         actorId === localActorId ? "1" : "0";
+      requestPrincipals.set(request, {
+        principalId: actorId,
+        displayName: actorId === localActorId ? "Local Admin" : actorId,
+        kind: "human",
+        authSource: "local-development",
+        loginId: actorId,
+        platformAdministrator: actorId === localActorId,
+        expiresAt: null,
+      });
       return;
     }
     const token = requestBearerToken(request.headers);
@@ -415,7 +436,72 @@ export function buildApi(options: BuildApiOptions): {
     request.headers[AUTHENTICATED_NAME_HEADER] = principal.displayName;
     request.headers[AUTHENTICATED_ADMIN_HEADER] =
       principal.platformAdministrator ? "1" : "0";
-    requestPrincipals.set(request, principal);
+    requestPrincipals.set(request, {
+      ...principal,
+      authSource: "bearer",
+    });
+  });
+  app.addHook("preHandler", async (request, reply) => {
+    const principal = requestPrincipals.get(request);
+    if (principal === undefined) return;
+    const route =
+      request.routeOptions.url ?? request.url.split("?")[0] ?? request.url;
+    const result = await authorization.authorizeRoute({
+      requestId: String(request.id),
+      method: request.method,
+      route,
+      principal,
+      params: (request.params ?? {}) as Record<string, unknown>,
+      body: request.body,
+    });
+    if (!result.required || result.allowed) return;
+    const reason = result.reason ?? "authorization_denied";
+    request.log.info(
+      {
+        requestId: String(request.id),
+        principalId: principal.principalId,
+        route,
+        reason,
+      },
+      "authorization.denied",
+    );
+    if (reason === "project_archived") {
+      return reply
+        .status(409)
+        .send(
+          apiError(
+            String(request.id),
+            "project_archived",
+            "Archived projects cannot be modified",
+            { reason, projectId: result.decision?.scopeId },
+          ),
+        );
+    }
+    if (reason === "project_not_found") {
+      return reply
+        .status(404)
+        .send(
+          apiError(
+            String(request.id),
+            "project_not_found",
+            "Project not found",
+            { reason },
+          ),
+        );
+    }
+    return reply.status(403).send(
+      apiError(
+        String(request.id),
+        "forbidden",
+        "The authenticated Principal is not authorized for this operation",
+        {
+          reason,
+          permission: result.decision?.permission,
+          scopeType: result.decision?.scopeType,
+          scopeId: result.decision?.scopeId,
+        },
+      ),
+    );
   });
   app.addHook("onResponse", async (request, reply) => {
     request.log.info(
@@ -599,7 +685,17 @@ export function buildApi(options: BuildApiOptions): {
   app.get("/api/v1/auth/me", async (request, reply) => {
     const principal = requestPrincipals.get(request);
     if (principal !== undefined) {
-      return reply.send(principal);
+      return reply.send({
+        principalId: principal.principalId,
+        accountId: principal.accountId ?? null,
+        sessionId: principal.sessionId ?? null,
+        loginId: principal.loginId,
+        displayName: principal.displayName,
+        kind: principal.kind,
+        platformAdministrator: principal.platformAdministrator,
+        expiresAt: principal.expiresAt,
+        authSource: principal.authSource,
+      });
     }
     const actorId = requestActorId(request.headers);
     return reply.send({
@@ -1062,9 +1158,14 @@ export function buildApi(options: BuildApiOptions): {
   app.post("/api/v1/projects/:projectId/roles", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);
     const input = createProjectRoleInputSchema.parse(request.body);
+    const actorPrincipalId =
+      requestPrincipals.get(request)?.principalId ??
+      requestActorId(request.headers);
     return reply
       .status(201)
-      .send(await application.createProjectRole(projectId, input));
+      .send(
+        await application.createProjectRole(projectId, input, actorPrincipalId),
+      );
   });
 
   app.patch(
@@ -1074,8 +1175,16 @@ export function buildApi(options: BuildApiOptions): {
         request.params,
       );
       const input = updateProjectRoleInputSchema.parse(request.body);
+      const actorPrincipalId =
+        requestPrincipals.get(request)?.principalId ??
+        requestActorId(request.headers);
       return reply.send(
-        await application.updateProjectRole(projectId, roleId, input),
+        await application.updateProjectRole(
+          projectId,
+          roleId,
+          input,
+          actorPrincipalId,
+        ),
       );
     },
   );
@@ -1098,12 +1207,63 @@ export function buildApi(options: BuildApiOptions): {
     });
   });
 
+  app.get(
+    "/api/v1/projects/:projectId/authorization-report",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const principal = requestPrincipals.get(request);
+      if (principal === undefined) {
+        throw new ApplicationError(
+          "unauthorized",
+          "Authentication is required",
+          401,
+        );
+      }
+      const decision = await authorization.authorizeProject({
+        principal,
+        projectId,
+        permission: "read",
+        action: "authorization.project.report.read",
+        requestId: String(request.id),
+      });
+      if (!decision.allowed) {
+        throw new ApplicationError(
+          "forbidden",
+          "The authenticated Principal is not authorized for this operation",
+          403,
+          { reason: decision.reason, projectId },
+        );
+      }
+      const report =
+        await repositories.authorization.getProjectAuthorizationReport(
+          projectId,
+        );
+      if (report === undefined) {
+        throw new ApplicationError(
+          "project_not_found",
+          "Project not found",
+          404,
+        );
+      }
+      return reply.send(report);
+    },
+  );
+
   app.post("/api/v1/projects/:projectId/members", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);
     const input = createProjectMemberInputSchema.parse(request.body);
+    const actorPrincipalId =
+      requestPrincipals.get(request)?.principalId ??
+      requestActorId(request.headers);
     return reply
       .status(201)
-      .send(await application.createProjectMember(projectId, input));
+      .send(
+        await application.createProjectMember(
+          projectId,
+          input,
+          actorPrincipalId,
+        ),
+      );
   });
 
   app.patch(
@@ -1113,8 +1273,16 @@ export function buildApi(options: BuildApiOptions): {
         request.params,
       );
       const input = updateProjectMemberInputSchema.parse(request.body);
+      const actorPrincipalId =
+        requestPrincipals.get(request)?.principalId ??
+        requestActorId(request.headers);
       return reply.send(
-        await application.updateProjectMember(projectId, memberId, input),
+        await application.updateProjectMember(
+          projectId,
+          memberId,
+          input,
+          actorPrincipalId,
+        ),
       );
     },
   );
@@ -1125,7 +1293,14 @@ export function buildApi(options: BuildApiOptions): {
       const { projectId, memberId } = projectMemberParamsSchema.parse(
         request.params,
       );
-      await application.deleteProjectMember(projectId, memberId);
+      const actorPrincipalId =
+        requestPrincipals.get(request)?.principalId ??
+        requestActorId(request.headers);
+      await application.deleteProjectMember(
+        projectId,
+        memberId,
+        actorPrincipalId,
+      );
       return reply.status(204).send();
     },
   );
