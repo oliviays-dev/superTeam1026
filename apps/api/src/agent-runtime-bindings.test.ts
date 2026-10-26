@@ -62,9 +62,7 @@ integration("agent runtime binding and preflight API", () => {
     repositories = new PlatformRepositories(database);
     const testRoot = join(process.cwd(), ".tmp");
     await mkdir(testRoot, { recursive: true });
-    workspaceRoot = await mkdtemp(
-      join(testRoot, "pluginmax-binding-api-"),
-    );
+    workspaceRoot = await mkdtemp(join(testRoot, "pluginmax-binding-api-"));
     app = buildApi({
       databaseUrl: databaseUrl!,
       database,
@@ -216,6 +214,19 @@ integration("agent runtime binding and preflight API", () => {
       runtimeId: privateRuntime.id,
       status: "active",
       revision: 1,
+    });
+    const runtimeProjection = await app.inject({
+      method: "GET",
+      url: `/api/v1/runtimes/${privateRuntime.id}`,
+      headers: { "x-pluginmax-actor": ownerA },
+    });
+    expect(runtimeProjection.statusCode).toBe(200);
+    expect(runtimeProjection.json()).toMatchObject({
+      runtime: {
+        id: privateRuntime.id,
+        bindingCount: 1,
+        activeBindingCount: 1,
+      },
     });
 
     const forbiddenGet = await app.inject({

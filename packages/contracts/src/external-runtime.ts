@@ -471,6 +471,8 @@ export const externalRuntimeSchema = z.object({
   commandDigest: z.string().length(64),
   argsDigest: z.string().length(64),
   lastProbe: externalRuntimeProbeSummarySchema.nullable(),
+  bindingCount: z.number().int().nonnegative().default(0),
+  activeBindingCount: z.number().int().nonnegative().default(0),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
   archivedAt: z.string().datetime({ offset: true }).nullable(),

@@ -1,7 +1,10 @@
 import type {
   Agent,
   AgentDetail,
+  AgentRuntimePreflightResult,
   CreateAgentInput,
+  ExternalRuntime,
+  ExternalRuntimeCapabilityName,
   RuntimeKind,
   UpdateAgentInput,
 } from "@pluginmax/contracts";
@@ -11,19 +14,35 @@ import {
   Bot,
   CirclePause,
   CirclePlay,
+  Link2,
   LoaderCircle,
   Plus,
   Save,
+  ScanSearch,
+  ShieldCheck,
   Sparkles,
+  TriangleAlert,
+  Unlink,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  ApiRequestError,
   createAgent,
   getAgent,
+  getAgentRuntimeBinding,
   listAllAgents,
+  listExternalRuntimes,
+  preflightAgentRuntime,
+  removeAgentRuntimeBinding,
   setAgentStatus,
+  setAgentRuntimeBinding,
   updateAgent,
 } from "./api.js";
+import {
+  PreflightFeedback,
+  RuntimeBindingSummary,
+  runtimeCapabilityLabels,
+} from "./ExternalRuntimeObservability.js";
 
 interface AgentFormState {
   name: string;
@@ -78,6 +97,64 @@ function inputFromForm(form: AgentFormState): CreateAgentInput {
     runtimeKind: form.runtimeKind,
     source: form.source,
   };
+}
+
+export interface RuntimePreflightFailureView {
+  readonly code: string;
+  readonly message: string;
+  readonly remediation: string;
+}
+
+export function runtimePreflightFailure(
+  error: unknown,
+): RuntimePreflightFailureView | null {
+  if (error === null || error === undefined) return null;
+  if (!(error instanceof ApiRequestError) && !(error instanceof Error)) {
+    return {
+      code: "request_failed",
+      message: "Runtime Preflight failed",
+      remediation: "Reload the current binding and retry.",
+    };
+  }
+  const details =
+    error instanceof ApiRequestError &&
+    typeof error.details === "object" &&
+    error.details !== null
+      ? (error.details as Record<string, unknown>)
+      : {};
+  const code =
+    typeof details.preflightCode === "string"
+      ? details.preflightCode
+      : error instanceof ApiRequestError
+        ? error.code
+        : "request_failed";
+  const remediation =
+    typeof details.remediation === "string"
+      ? details.remediation
+      : "Review the Runtime status, Probe and Capability requirements, then retry.";
+  return {
+    code,
+    message: error.message,
+    remediation,
+  };
+}
+
+function runtimeReadyForBinding(runtime: ExternalRuntime): boolean {
+  return runtime.status === "active" && runtime.lastProbe?.status === "passed";
+}
+
+function runtimeOptionLabel(runtime: ExternalRuntime): string {
+  const state =
+    runtime.status === "archived"
+      ? "已归档"
+      : runtime.status === "disabled"
+        ? "已停用"
+        : runtime.lastProbe?.status === "failed"
+          ? "Probe 失败"
+          : runtime.lastProbe?.status === "passed"
+            ? "可用"
+            : "待 Probe";
+  return `${runtime.name} · ${runtime.protocol} · ${state} · r${runtime.revision}`;
 }
 
 function AgentDirectory({
@@ -174,11 +251,44 @@ export function AgentsView() {
     queryFn: () => getAgent(selectedAgentId),
     enabled: selectedAgentId !== "" && !creating,
   });
+  const bindingQuery = useQuery({
+    queryKey: ["agent-runtime-binding", selectedAgentId],
+    queryFn: () => getAgentRuntimeBinding(selectedAgentId),
+    enabled: selectedAgentId !== "" && !creating,
+  });
+  const runtimeOptionsQuery = useQuery({
+    queryKey: ["external-runtimes", "binding-options"],
+    queryFn: () => listExternalRuntimes(true),
+    enabled: !creating,
+  });
   const detail = creating ? undefined : detailQuery.data;
+  const bindingDetail = creating ? undefined : bindingQuery.data;
+  const [bindingRuntimeId, setBindingRuntimeId] = useState("");
+  const [bindingModel, setBindingModel] = useState("");
+  const [preflightWorkspaceId, setPreflightWorkspaceId] =
+    useState("agent/preflight");
+  const [requiredCapabilities, setRequiredCapabilities] = useState<
+    ExternalRuntimeCapabilityName[]
+  >([]);
+  const [preflightResult, setPreflightResult] =
+    useState<AgentRuntimePreflightResult | null>(null);
+  const [preflightError, setPreflightError] = useState<unknown>(null);
 
   useEffect(() => {
     if (detail !== undefined) setForm(formFromAgent(detail.agent));
   }, [detail]);
+
+  useEffect(() => {
+    if (bindingDetail === undefined) return;
+    setBindingRuntimeId(bindingDetail.runtime?.id ?? "");
+    setBindingModel(
+      bindingDetail.runtime?.defaultModel ??
+        bindingDetail.runtime?.supportedModels[0] ??
+        "",
+    );
+    setPreflightResult(null);
+    setPreflightError(null);
+  }, [bindingDetail]);
 
   useEffect(() => {
     if (!creating && selectedId === "" && agentsQuery.data?.[0] !== undefined) {
@@ -217,14 +327,142 @@ export function AgentsView() {
       ),
     onSuccess: (updated: AgentDetail) => refresh(updated.agent),
   });
+  const bindMutation = useMutation({
+    mutationFn: () => {
+      if (selectedAgent === undefined) {
+        throw new Error("没有可绑定的 AI 伙伴");
+      }
+      if (bindingRuntimeId === "") {
+        throw new Error("请选择外部 Runtime");
+      }
+      const expectedRevision =
+        bindingDetail?.binding?.status === "active"
+          ? bindingDetail.binding.revision
+          : 0;
+      return setAgentRuntimeBinding(selectedAgent.id, {
+        runtimeId: bindingRuntimeId,
+        expectedRevision,
+      });
+    },
+    onSuccess: async () => {
+      setPreflightResult(null);
+      setPreflightError(null);
+      await queryClient.invalidateQueries({
+        queryKey: ["agent-runtime-binding", selectedAgentId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["external-runtimes"] });
+    },
+  });
+  const unbindMutation = useMutation({
+    mutationFn: () => {
+      if (selectedAgent === undefined) {
+        throw new Error("没有可解绑的 AI 伙伴");
+      }
+      if (bindingDetail?.binding?.status !== "active") {
+        throw new Error("当前没有活动的 Runtime Binding");
+      }
+      return removeAgentRuntimeBinding(
+        selectedAgent.id,
+        bindingDetail.binding.revision,
+      );
+    },
+    onSuccess: async () => {
+      setPreflightResult(null);
+      setPreflightError(null);
+      await queryClient.invalidateQueries({
+        queryKey: ["agent-runtime-binding", selectedAgentId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["external-runtimes"] });
+    },
+  });
+  const preflightMutation = useMutation({
+    mutationFn: () => {
+      if (selectedAgent === undefined) {
+        throw new Error("没有可检查的 AI 伙伴");
+      }
+      const currentRuntime =
+        bindingDetail?.runtime?.id === bindingRuntimeId
+          ? bindingDetail.runtime
+          : runtimeOptionsQuery.data?.find(
+              (runtime) => runtime.id === bindingRuntimeId,
+            );
+      return preflightAgentRuntime(selectedAgent.id, {
+        expectedRevision: bindingDetail?.binding?.revision ?? 1,
+        workspaceId: preflightWorkspaceId.trim() || "agent/preflight",
+        ...(bindingModel.trim() === "" ? {} : { model: bindingModel.trim() }),
+        requiredCapabilities,
+        ...(currentRuntime === undefined
+          ? {}
+          : {
+              requiredSandboxMode: currentRuntime.sandboxMode,
+              requiredNetworkMode: currentRuntime.networkMode,
+            }),
+      });
+    },
+    onMutate: () => {
+      setPreflightResult(null);
+      setPreflightError(null);
+    },
+    onSuccess: (result) => {
+      setPreflightResult(result);
+      setPreflightError(null);
+    },
+    onError: (error) => {
+      setPreflightResult(null);
+      setPreflightError(error);
+    },
+  });
 
   const busy =
     createMutation.isPending ||
     updateMutation.isPending ||
-    statusMutation.isPending;
+    statusMutation.isPending ||
+    bindMutation.isPending ||
+    unbindMutation.isPending ||
+    preflightMutation.isPending;
   const error =
     createMutation.error ?? updateMutation.error ?? statusMutation.error;
   const selectedAgent = detail?.agent;
+  const allRuntimes = runtimeOptionsQuery.data ?? [];
+  const currentBindingRuntime = bindingDetail?.runtime;
+  const availableRuntimeChoices = allRuntimes.filter(
+    (runtime) =>
+      runtimeReadyForBinding(runtime) ||
+      runtime.id === currentBindingRuntime?.id,
+  );
+  const selectedRuntime = allRuntimes.find(
+    (runtime) => runtime.id === bindingRuntimeId,
+  );
+  const selectedRuntimeReady =
+    selectedRuntime !== undefined && runtimeReadyForBinding(selectedRuntime);
+  const currentBindingActive = bindingDetail?.binding?.status === "active";
+  const sameRuntimeActive =
+    currentBindingActive &&
+    bindingDetail?.binding?.runtimeId === bindingRuntimeId;
+  const preflightFailure = runtimePreflightFailure(preflightError);
+  const bindingActionError =
+    bindMutation.error ?? unbindMutation.error ?? bindingQuery.error;
+
+  useEffect(() => {
+    if (
+      bindingRuntimeId === "" &&
+      bindingDetail !== undefined &&
+      bindingDetail.binding === null
+    ) {
+      const first = allRuntimes.find(runtimeReadyForBinding);
+      if (first !== undefined) setBindingRuntimeId(first.id);
+    }
+  }, [allRuntimes, bindingDetail, bindingRuntimeId]);
+
+  useEffect(() => {
+    const models = selectedRuntime?.supportedModels ?? [];
+    if (models.length > 0 && !models.includes(bindingModel)) {
+      setBindingModel(selectedRuntime?.defaultModel ?? models[0] ?? "");
+    }
+    if (models.length === 0 && bindingModel !== "") {
+      setBindingModel("");
+    }
+  }, [bindingModel, selectedRuntime]);
 
   return (
     <main className="pm-page">
@@ -436,6 +674,215 @@ export function AgentsView() {
                 </button>
               </div>
             </form>
+          )}
+
+          {!creating && selectedAgent !== undefined && (
+            <section
+              className="agent-runtime-binding"
+              aria-label="AI 伙伴外部 Runtime"
+            >
+              <div className="pm-section-head agent-runtime-binding-head">
+                <div>
+                  <h3>外部 Runtime Binding</h3>
+                  <span>
+                    Binding、revision 与 Preflight 独立于 Agent.runtime_kind
+                  </span>
+                </div>
+                <ShieldCheck size={16} />
+              </div>
+
+              {bindingQuery.isLoading ? (
+                <div className="pm-empty">
+                  <LoaderCircle className="spin" size={16} />
+                  加载 Runtime Binding...
+                </div>
+              ) : bindingDetail === undefined ? (
+                <div className="runtime-binding-reason">
+                  无法读取 Binding。请检查 Runtime 可见范围与当前操作者权限。
+                </div>
+              ) : (
+                <>
+                  <RuntimeBindingSummary
+                    detail={bindingDetail}
+                    runtimeKind={selectedAgent.runtimeKind}
+                  />
+                  {bindingActionError !== null && (
+                    <div className="pm-error" role="alert">
+                      <TriangleAlert size={14} />
+                      {bindingActionError instanceof Error
+                        ? bindingActionError.message
+                        : "Runtime Binding 操作失败"}
+                    </div>
+                  )}
+                  <div className="agent-runtime-binding-controls">
+                    <label className="pm-field">
+                      <span>外部 Runtime</span>
+                      <select
+                        aria-label="外部 Runtime"
+                        value={bindingRuntimeId}
+                        onChange={(event) =>
+                          setBindingRuntimeId(event.target.value)
+                        }
+                      >
+                        <option value="">
+                          选择 active 且 Probe 通过的 Runtime
+                        </option>
+                        {availableRuntimeChoices.map((runtime) => (
+                          <option value={runtime.id} key={runtime.id}>
+                            {runtimeOptionLabel(runtime)}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="pm-field">
+                      <span>模型</span>
+                      {(selectedRuntime?.supportedModels.length ?? 0) > 0 ? (
+                        <select
+                          aria-label="外部 Runtime 模型"
+                          value={bindingModel}
+                          onChange={(event) =>
+                            setBindingModel(event.target.value)
+                          }
+                        >
+                          {selectedRuntime?.supportedModels.map((model) => (
+                            <option value={model} key={model}>
+                              {model}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          aria-label="外部 Runtime 模型"
+                          value="plain-text 无模型参数"
+                          readOnly
+                        />
+                      )}
+                    </label>
+                    <div className="agent-runtime-binding-actions">
+                      <button
+                        className="pm-btn primary"
+                        type="button"
+                        disabled={
+                          busy ||
+                          selectedAgent.status !== "active" ||
+                          bindingRuntimeId === "" ||
+                          !selectedRuntimeReady ||
+                          sameRuntimeActive
+                        }
+                        onClick={() => bindMutation.mutate()}
+                      >
+                        {bindMutation.isPending ? (
+                          <LoaderCircle className="spin" size={14} />
+                        ) : (
+                          <Link2 size={14} />
+                        )}
+                        {currentBindingActive ? "重新绑定" : "绑定 Runtime"}
+                      </button>
+                      <button
+                        className="pm-btn secondary"
+                        type="button"
+                        disabled={busy || !currentBindingActive}
+                        onClick={() => unbindMutation.mutate()}
+                      >
+                        {unbindMutation.isPending ? (
+                          <LoaderCircle className="spin" size={14} />
+                        ) : (
+                          <Unlink size={14} />
+                        )}
+                        解绑
+                      </button>
+                    </div>
+                  </div>
+                  {availableRuntimeChoices.length === 0 &&
+                    bindingDetail.binding === null && (
+                      <p className="runtime-capability-note">
+                        暂无其他可用于绑定的 Runtime。请先在运行时页面完成 Probe
+                        并启用。
+                      </p>
+                    )}
+
+                  <div className="agent-preflight">
+                    <div className="pm-section-head">
+                      <div>
+                        <h3>Preflight</h3>
+                        <span>只读检查，不创建 Run、Job 或外部进程</span>
+                      </div>
+                      <ScanSearch size={15} />
+                    </div>
+                    <div className="agent-preflight-grid">
+                      <label className="pm-field pm-field-wide">
+                        <span>Workspace 标识</span>
+                        <input
+                          aria-label="Preflight Workspace"
+                          value={preflightWorkspaceId}
+                          onChange={(event) =>
+                            setPreflightWorkspaceId(event.target.value)
+                          }
+                          placeholder="agent/preflight"
+                        />
+                      </label>
+                      <fieldset className="agent-preflight-capabilities pm-field-wide">
+                        <legend>要求 Capability</legend>
+                        {(
+                          Object.entries(runtimeCapabilityLabels) as Array<
+                            [ExternalRuntimeCapabilityName, string]
+                          >
+                        ).map(([name, label]) => (
+                          <label key={name}>
+                            <input
+                              type="checkbox"
+                              aria-label={`要求 ${label}`}
+                              checked={requiredCapabilities.includes(name)}
+                              onChange={(event) => {
+                                setRequiredCapabilities(
+                                  event.target.checked
+                                    ? [...requiredCapabilities, name]
+                                    : requiredCapabilities.filter(
+                                        (candidate) => candidate !== name,
+                                      ),
+                                );
+                                setPreflightResult(null);
+                                setPreflightError(null);
+                              }}
+                            />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </fieldset>
+                      <div className="agent-preflight-actions pm-field-wide">
+                        <span>
+                          {selectedRuntime === undefined
+                            ? "未选择 Runtime"
+                            : `${selectedRuntime.sandboxMode} · ${selectedRuntime.networkMode} · ${selectedRuntime.protocol}`}
+                        </span>
+                        <button
+                          className="pm-btn secondary"
+                          type="button"
+                          disabled={
+                            busy ||
+                            selectedAgent.status !== "active" ||
+                            selectedRuntime === undefined ||
+                            !selectedRuntimeReady
+                          }
+                          onClick={() => preflightMutation.mutate()}
+                        >
+                          {preflightMutation.isPending ? (
+                            <LoaderCircle className="spin" size={14} />
+                          ) : (
+                            <ScanSearch size={14} />
+                          )}
+                          运行 Preflight
+                        </button>
+                      </div>
+                    </div>
+                    <PreflightFeedback
+                      result={preflightResult}
+                      failure={preflightFailure}
+                    />
+                  </div>
+                </>
+              )}
+            </section>
           )}
 
           {detail !== undefined && detail.events.length > 0 && (

@@ -2,15 +2,12 @@ import type { Artifact, PlatformRunEvent } from "@pluginmax/contracts";
 import { formatDateTime, shortId } from "@pluginmax/ui";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity,
   Bot,
-  CheckCircle2,
   CircleStop,
   Download,
   FileText,
   LoaderCircle,
   RefreshCw,
-  Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -22,6 +19,11 @@ import {
   listArtifacts,
   subscribeToRun,
 } from "./api.js";
+import {
+  RunEventBadge,
+  RunExternalRuntimePanel,
+  RuntimeProgressHeading,
+} from "./ExternalRuntimeObservability.js";
 
 const terminalStatuses = new Set([
   "completed",
@@ -141,6 +143,11 @@ export function RunView({ runId }: { runId: string }) {
   const hasDetailedProgress =
     run.observability.planVisibility !== "opaque" ||
     run.observability.toolEventCompleteness !== "none";
+  const externalProtocol =
+    run.executionSnapshot?.runtime.protocol ??
+    run.externalRuntimeProtocol ??
+    null;
+  const plainTextExternal = externalProtocol === "plain-text";
 
   return (
     <div className="run-view">
@@ -178,7 +185,7 @@ export function RunView({ runId }: { runId: string }) {
             <strong>{run.inputSnapshot.agentName}</strong>
           </div>
           <div>
-            <span>Runtime</span>
+            <span>Runtime 定义</span>
             <strong>{run.inputSnapshot.runtimeKind}</strong>
           </div>
           <div>
@@ -214,15 +221,26 @@ export function RunView({ runId }: { runId: string }) {
         )}
       </section>
 
+      <RunExternalRuntimePanel run={run} events={events} />
+
       <section className="run-section">
-        <div className="section-title">
-          <Activity size={15} />
-          <h3>执行进展</h3>
-        </div>
-        {!hasDetailedProgress && (
+        <RuntimeProgressHeading protocol={externalProtocol ?? "builtin"} />
+        {plainTextExternal ? (
+          <p className="runtime-capability-note">
+            当前 Runtime 仅提供最终文本；不展示伪造的 plan、tool 或 step
+            事件，Run 生命周期与最终状态来自平台事件。
+          </p>
+        ) : !hasDetailedProgress ? (
           <p className="runtime-capability-note">
             当前 Runtime 只提供有限进度，最终状态仍以 Run 事件为准。
           </p>
+        ) : (
+          run.observability.toolEventCompleteness !== "none" && (
+            <p className="runtime-capability-note">
+              仅展示归一化 progress 与 tool 摘要；reasoning 正文、完整
+              stdout/stderr 不在此公开。
+            </p>
+          )
         )}
         {plan !== undefined && plan.length > 0 && (
           <ol className="plan-list">
@@ -239,18 +257,15 @@ export function RunView({ runId }: { runId: string }) {
             )
             .map((event) => (
               <div className="timeline-row" key={event.id}>
-                <span className={`event-icon event-${event.type}`}>
-                  {event.type.startsWith("tool.") ? (
-                    <Wrench size={13} />
-                  ) : event.type === "run.completed" ? (
-                    <CheckCircle2 size={13} />
-                  ) : (
-                    <Activity size={13} />
-                  )}
-                </span>
+                <RunEventBadge type={event.type} />
                 <div>
                   <div className="timeline-meta">
                     <span>{event.type}</span>
+                    {(event.type === "tool.call" ||
+                      event.type === "tool.result") &&
+                      typeof event.data?.tool === "string" && (
+                        <code>{event.data.tool}</code>
+                      )}
                     <time>{formatDateTime(event.createdAt)}</time>
                   </div>
                   <p>{event.summary}</p>

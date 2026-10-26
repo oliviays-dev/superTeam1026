@@ -16,7 +16,6 @@ import { useEffect, useState } from "react";
 import type {
   CreateExternalRuntimeInput,
   ExternalRuntime,
-  ExternalRuntimeCapabilityName,
   ExternalRuntimeCapabilitySet,
   ExternalRuntimeNetworkMode,
   ExternalRuntimeProtocol,
@@ -28,6 +27,10 @@ import type {
 } from "@pluginmax/contracts";
 import { externalRuntimeCapabilityNames } from "@pluginmax/contracts";
 import { formatDateTime } from "@pluginmax/ui";
+import {
+  RuntimeAvailabilityNotice,
+  runtimeCapabilityLabels,
+} from "./ExternalRuntimeObservability.js";
 import {
   createExternalRuntime,
   getExternalRuntime,
@@ -71,20 +74,6 @@ const runtimeTools: ReadonlyArray<{
   { value: "structured_tool_events", label: "结构化工具事件" },
   { value: "structured_subagent", label: "子 Agent" },
 ];
-
-const capabilityLabels: Record<ExternalRuntimeCapabilityName, string> = {
-  search: "搜索",
-  network: "网络",
-  fileRead: "读取文件",
-  fileWrite: "写入文件",
-  shell: "命令",
-  browser: "浏览器",
-  mcp: "MCP",
-  sessionResume: "会话恢复",
-  structuredPlan: "结构化计划",
-  structuredToolEvents: "工具事件",
-  structuredSubagent: "子 Agent",
-};
 
 const emptyForm: RuntimeFormState = {
   name: "",
@@ -147,9 +136,7 @@ function formFromRuntime(runtime: ExternalRuntime): RuntimeFormState {
   };
 }
 
-function inputFromForm(
-  form: RuntimeFormState,
-): CreateExternalRuntimeInput {
+function inputFromForm(form: RuntimeFormState): CreateExternalRuntimeInput {
   return {
     name: form.name.trim(),
     provider: form.provider,
@@ -212,7 +199,7 @@ function CapabilityGrid({
           className={`runtime-capability ${capabilityTone(profile[name])}`}
           key={name}
         >
-          <span>{capabilityLabels[name]}</span>
+          <span>{runtimeCapabilityLabels[name]}</span>
           <strong>
             {profile[name] === "supported"
               ? "支持"
@@ -281,26 +268,27 @@ function RuntimeDirectory({
             <span className="runtime-list-copy">
               <strong>{runtime.name}</strong>
               <small>
-                {runtime.provider} · {runtime.protocol}
+                {runtime.provider} · {runtime.protocol} ·{" "}
+                {runtime.activeBindingCount}/{runtime.bindingCount} 绑定
               </small>
             </span>
             <span className={`runtime-state ${runtime.status}`}>
               {statusLabel(runtime.status)}
             </span>
-            <span className={`runtime-probe-state ${capabilityTone(
-              runtime.lastProbe?.status === "passed"
-                ? "supported"
-                : runtime.lastProbe?.status === "failed"
-                  ? "unsupported"
-                  : "unknown",
-            )}`}>
+            <span
+              className={`runtime-probe-state ${capabilityTone(
+                runtime.lastProbe?.status === "passed"
+                  ? "supported"
+                  : runtime.lastProbe?.status === "failed"
+                    ? "unsupported"
+                    : "unknown",
+              )}`}
+            >
               {probeLabel(runtime)}
             </span>
           </button>
         ))}
-        {runtimes.length === 0 && (
-          <div className="pm-empty">暂无运行时</div>
-        )}
+        {runtimes.length === 0 && <div className="pm-empty">暂无运行时</div>}
       </div>
     </aside>
   );
@@ -316,8 +304,7 @@ export function RuntimesView() {
     queryKey: ["external-runtimes", includeArchived],
     queryFn: () => listExternalRuntimes(includeArchived),
   });
-  const selectedRuntimeId =
-    selectedId || runtimesQuery.data?.[0]?.id || "";
+  const selectedRuntimeId = selectedId || runtimesQuery.data?.[0]?.id || "";
   const detailQuery = useQuery({
     queryKey: ["external-runtime", selectedRuntimeId],
     queryFn: () => getExternalRuntime(selectedRuntimeId),
@@ -359,11 +346,7 @@ export function RuntimesView() {
     void queryClient.invalidateQueries({
       queryKey: ["external-runtime-capabilities", selectedRuntimeId],
     });
-  }, [
-    detail?.latestProbe?.status,
-    queryClient,
-    selectedRuntimeId,
-  ]);
+  }, [detail?.latestProbe?.status, queryClient, selectedRuntimeId]);
 
   useEffect(() => {
     if (
@@ -413,17 +396,12 @@ export function RuntimesView() {
       if (selectedRuntime === undefined) {
         throw new Error("没有可探测的运行时");
       }
-      return probeExternalRuntime(
-        selectedRuntime.id,
-        selectedRuntime.revision,
-      );
+      return probeExternalRuntime(selectedRuntime.id, selectedRuntime.revision);
     },
     onSuccess: (result) => refresh(result.runtime),
   });
   const transitionMutation = useMutation({
-    mutationFn: (
-      transition: "enable" | "disable" | "archive" | "restore",
-    ) => {
+    mutationFn: (transition: "enable" | "disable" | "archive" | "restore") => {
       if (selectedRuntime === undefined) {
         throw new Error("没有可操作的运行时");
       }
@@ -496,9 +474,7 @@ export function RuntimesView() {
             </span>
             <div>
               <h2>
-                {creating
-                  ? "新建运行时"
-                  : (selectedRuntime?.name ?? "运行时")}
+                {creating ? "新建运行时" : (selectedRuntime?.name ?? "运行时")}
               </h2>
               <p>
                 {creating
@@ -515,7 +491,11 @@ export function RuntimesView() {
                     className="pm-btn secondary"
                     type="button"
                     title="运行异步 Probe"
-                    disabled={busy}
+                    disabled={
+                      busy ||
+                      selectedRuntime.lastProbe?.status === "requested" ||
+                      selectedRuntime.lastProbe?.status === "running"
+                    }
                     onClick={() => probeMutation.mutate()}
                   >
                     {probeMutation.isPending ? (
@@ -531,7 +511,15 @@ export function RuntimesView() {
                     className="pm-btn secondary"
                     type="button"
                     disabled={busy}
-                    onClick={() => transitionMutation.mutate("disable")}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          "停用会立即阻止新 Preflight，并停用当前绑定。继续？",
+                        )
+                      ) {
+                        transitionMutation.mutate("disable");
+                      }
+                    }}
                   >
                     <CirclePause size={14} />
                     停用
@@ -563,7 +551,15 @@ export function RuntimesView() {
                     type="button"
                     title="归档运行时"
                     disabled={busy}
-                    onClick={() => transitionMutation.mutate("archive")}
+                    onClick={() => {
+                      if (
+                        window.confirm(
+                          "归档会停用当前绑定并阻止新派发，历史 Run 仍可读。继续？",
+                        )
+                      ) {
+                        transitionMutation.mutate("archive");
+                      }
+                    }}
                   >
                     <Archive size={14} />
                   </button>
@@ -577,6 +573,49 @@ export function RuntimesView() {
               <TriangleAlert size={14} />
               {error instanceof Error ? error.message : "操作失败"}
             </div>
+          )}
+
+          {!creating && selectedRuntime !== undefined && (
+            <>
+              <div
+                className="runtime-governance-facts"
+                aria-label="运行时状态摘要"
+              >
+                <div>
+                  <span>当前状态</span>
+                  <strong>{statusLabel(selectedRuntime.status)}</strong>
+                </div>
+                <div>
+                  <span>Runtime revision</span>
+                  <strong>r{selectedRuntime.revision}</strong>
+                </div>
+                <div>
+                  <span>Probe revision</span>
+                  <strong>
+                    {latestProbe === null
+                      ? "-"
+                      : `r${latestProbe.runtimeRevision}`}
+                  </strong>
+                </div>
+                <div>
+                  <span>绑定</span>
+                  <strong>
+                    {selectedRuntime.activeBindingCount} active /{" "}
+                    {selectedRuntime.bindingCount} total
+                  </strong>
+                </div>
+                <div>
+                  <span>Probe 状态</span>
+                  <strong>{probeLabel(selectedRuntime)}</strong>
+                </div>
+              </div>
+              <RuntimeAvailabilityNotice
+                runtime={selectedRuntime}
+                {...(latestCapabilities === undefined
+                  ? {}
+                  : { capability: latestCapabilities })}
+              />
+            </>
           )}
 
           {!creating && detailQuery.isLoading ? (
@@ -634,8 +673,7 @@ export function RuntimesView() {
                     onChange={(event) =>
                       setForm({
                         ...form,
-                        protocol: event.target
-                          .value as ExternalRuntimeProtocol,
+                        protocol: event.target.value as ExternalRuntimeProtocol,
                       })
                     }
                   >
@@ -849,6 +887,14 @@ export function RuntimesView() {
                   <strong>{latestProbe?.status ?? "未探测"}</strong>
                 </div>
                 <div>
+                  <span>Probe revision</span>
+                  <strong>
+                    {latestProbe?.runtimeRevision === undefined
+                      ? "-"
+                      : `r${latestProbe.runtimeRevision}`}
+                  </strong>
+                </div>
+                <div>
                   <span>退出码</span>
                   <strong>{latestProbe?.exitCode ?? "-"}</strong>
                 </div>
@@ -887,9 +933,7 @@ export function RuntimesView() {
                     {formatDateTime(latestCapabilities.capturedAt)}
                   </span>
                 </div>
-                <CapabilityGrid
-                  profile={latestCapabilities.effectiveProfile}
-                />
+                <CapabilityGrid profile={latestCapabilities.effectiveProfile} />
               </section>
             )}
 

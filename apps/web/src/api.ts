@@ -2,6 +2,9 @@ import type {
   Agent,
   AgentDetail,
   AgentEpisode,
+  AgentRuntimeBindingDetail,
+  AgentRuntimePreflightInput,
+  AgentRuntimePreflightResult,
   ApprovalSlaSweepResult,
   Artifact,
   ConfirmHandoffCardInput,
@@ -434,6 +437,46 @@ export function setAgentStatus(
   return request(`/agents/${id}/status`, {
     method: "POST",
     body: JSON.stringify({ status }),
+  });
+}
+
+export function getAgentRuntimeBinding(
+  agentId: string,
+): Promise<AgentRuntimeBindingDetail> {
+  return request(`/agents/${agentId}/runtime-binding`);
+}
+
+export function setAgentRuntimeBinding(
+  agentId: string,
+  input: { readonly runtimeId: string; readonly expectedRevision: number },
+  idempotencyKey = crypto.randomUUID(),
+): Promise<AgentRuntimeBindingDetail> {
+  return request(`/agents/${agentId}/runtime-binding`, {
+    method: "PUT",
+    headers: { "idempotency-key": idempotencyKey },
+    body: JSON.stringify(input),
+  });
+}
+
+export function removeAgentRuntimeBinding(
+  agentId: string,
+  expectedRevision: number,
+  idempotencyKey = crypto.randomUUID(),
+): Promise<AgentRuntimeBindingDetail> {
+  return request(`/agents/${agentId}/runtime-binding`, {
+    method: "DELETE",
+    headers: { "idempotency-key": idempotencyKey },
+    body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+export function preflightAgentRuntime(
+  agentId: string,
+  input: AgentRuntimePreflightInput,
+): Promise<AgentRuntimePreflightResult> {
+  return request(`/agents/${agentId}/runtime-preflight`, {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }
 

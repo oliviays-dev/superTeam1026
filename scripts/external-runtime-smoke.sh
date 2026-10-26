@@ -14,7 +14,7 @@ DATABASE_NAME="pluginmax_batch13_smoke_$STAMP"
 DATABASE_URL="${DATABASE_URL_INPUT%/*}/$DATABASE_NAME"
 API_BASE="http://127.0.0.1:$API_PORT/api/v1"
 WEB_BASE="http://127.0.0.1:$WEB_PORT"
-LOG_DIR="${LOG_DIR:-$ROOT/.tmp/batch13a}"
+LOG_DIR="${LOG_DIR:-$ROOT/.tmp/batch13e}"
 DSH_HOME_VALUE="${DSH_HOME:-$(cd "$ROOT/.." && pwd)/dsh-home-batch13}"
 PIDS=()
 
@@ -223,7 +223,9 @@ if [[ "$capability_count" != "1" ||
 fi
 
 PLUGINMAX_WEB_BASE_URL="$WEB_BASE" \
-  pnpm playwright test e2e/external-runtimes.spec.ts
+  pnpm playwright test \
+    e2e/external-runtimes.spec.ts \
+    e2e/external-runtime-gui.spec.ts
 
 printf 'external_runtime_smoke=ok\n'
 printf 'api=%s\n' "$API_BASE"

@@ -1,6 +1,6 @@
 # V1 Batch 13: External Agent Runtime Integration
 
-> 状态：Batch 13A、13B、13C、13D 已实现；GUI 与发布门禁待后续阶段
+> 状态：Batch 13A、13B、13C、13D、13E 已实现；全量发布门禁待后续阶段
 >
 > 分支：`feat/v1-batch13-external-agent-runtime`
 >
@@ -20,7 +20,7 @@
 - 这些能力通过插件 KV 表 `external_runtimes` 和 `/api/collab/agent/...` 暴露，
   执行结果写回旧 AgentRun 与旧任务执行历史。
 
-Pluginmax Platform V1 已完成 Batch 13A-D：
+Pluginmax Platform V1 已完成 Batch 13A-E：
 
 - PostgreSQL 具备 Runtime、Probe、Capability、治理事件和 Agent Binding；
 - `/api/v1/runtimes` 与 Agent Binding/Preflight API 已交付；
@@ -28,8 +28,9 @@ Pluginmax Platform V1 已完成 Batch 13A-D：
 - Worker 可按快照启动 `codex-jsonl` 或 `plain-text` Adapter；
 - 取消、超时、失败、Session 诊断和既有业务回写使用统一 Run/Effect/Job 链路；
 - spawn marker 阻止启动后的自动重放，reasoning 正文不持久化。
+- Runtime 管理、AI 伙伴 Binding/Preflight 与 Run 外部执行观测 GUI 已接入。
 
-剩余工作集中在 GUI、TaskExecutionPolicy 深化、发布门禁和全量兼容验收。
+剩余工作集中在 TaskExecutionPolicy 深化、发布门禁和全量兼容验收。
 
 ## 2. 目标
 

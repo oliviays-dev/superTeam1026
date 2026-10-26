@@ -44,6 +44,8 @@ interface ExternalRuntimeRow {
   last_probe_at: Date | null;
   last_probe_ok: boolean | null;
   last_probe_message: string | null;
+  binding_count?: number;
+  active_binding_count?: number;
   created_at: Date;
   updated_at: Date;
   archived_at: Date | null;
@@ -214,6 +216,8 @@ function runtimeFromRow(
     commandDigest: row.command_digest,
     argsDigest: row.args_digest,
     lastProbe: latestProbe === undefined ? null : probeSummary(latestProbe),
+    bindingCount: row.binding_count ?? 0,
+    activeBindingCount: row.active_binding_count ?? 0,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     archivedAt: row.archived_at?.toISOString() ?? null,
@@ -421,14 +425,27 @@ export class ExternalRuntimeRepository {
     readonly includeArchived: boolean;
   }): Promise<ExternalRuntime[]> {
     const result = await this.database.query<ExternalRuntimeRow>(
-      `SELECT * FROM external_runtimes
+      `SELECT
+         runtime.*,
+         (
+           SELECT COUNT(*)::int
+           FROM agent_runtime_bindings binding
+           WHERE binding.runtime_id = runtime.id
+         ) AS binding_count,
+         (
+           SELECT COUNT(*)::int
+           FROM agent_runtime_bindings binding
+           WHERE binding.runtime_id = runtime.id
+             AND binding.status = 'active'
+         ) AS active_binding_count
+       FROM external_runtimes runtime
        WHERE (
          $1::boolean
-         OR visibility = 'platform'
-         OR owner_id = $2
+         OR runtime.visibility = 'platform'
+         OR runtime.owner_id = $2
        )
-       AND ($3::boolean OR status <> 'archived')
-       ORDER BY updated_at DESC, name`,
+       AND ($3::boolean OR runtime.status <> 'archived')
+       ORDER BY runtime.updated_at DESC, runtime.name`,
       [input.administrator, input.actorId, input.includeArchived],
     );
     return Promise.all(
@@ -440,7 +457,21 @@ export class ExternalRuntimeRepository {
 
   async get(runtimeId: string): Promise<ExternalRuntime | undefined> {
     const result = await this.database.query<ExternalRuntimeRow>(
-      "SELECT * FROM external_runtimes WHERE id = $1",
+      `SELECT
+         runtime.*,
+         (
+           SELECT COUNT(*)::int
+           FROM agent_runtime_bindings binding
+           WHERE binding.runtime_id = runtime.id
+         ) AS binding_count,
+         (
+           SELECT COUNT(*)::int
+           FROM agent_runtime_bindings binding
+           WHERE binding.runtime_id = runtime.id
+             AND binding.status = 'active'
+         ) AS active_binding_count
+       FROM external_runtimes runtime
+       WHERE runtime.id = $1`,
       [runtimeId],
     );
     const row = result.rows[0];
