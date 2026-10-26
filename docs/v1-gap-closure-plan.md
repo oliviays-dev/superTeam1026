@@ -9,7 +9,7 @@
 
 - 独立 Web、API、Worker 和 PostgreSQL。
 - 项目、任务、Run、ContextPack、文件产物、验收和基础记忆。
-- Fake Runtime 与 DSH SDK Adapter。
+- Fake Runtime 与 DSH SDK Adapter；外部 Agent Runtime 尚未接入 V1。
 - 执行输入快照、ContextPack 来源、Run 事件、实时文本、最终输出和交付物展示。
 - 原项目一致的全局导航与主要页面布局。
 - 工作台六栏模块、项目目录与详情、任务四列看板、工作流、沟通和 AI 伙伴页面。
@@ -78,6 +78,20 @@
 - [x] OpenTelemetry 或等价 Run 追踪。
 - [x] Playwright 浏览器自动化回归。
 
+### 2.8 Agent Runtime
+
+- [ ] 外部 Runtime 注册、探测、启停、归档和审计。
+- [ ] 受控 Command + argv 安全执行边界。
+- [ ] `codex-jsonl` 与 `plain-text` 的 V1 Runtime Adapter。
+- [ ] AI 伙伴绑定外部 Runtime、Preflight、能力降级和不可用原因。
+- [ ] 外部 Runtime 通过 Worker/Run/Outbox 执行、取消、超时、失败和幂等回写。
+- [ ] `/api/v1` 外部 Runtime 管理接口与 GUI。
+
+> 当前结论：旧 DSH 插件仍有外部 Agent 实现，但 Pluginmax Platform V1 尚未完成
+> Runtime 注册、绑定、Adapter 和 Worker 执行链路。因此 V1 任务、会议和私聊目前
+> 不能实际调用 Codex 或通用外部 CLI Runtime。详细计划见
+> `docs/v1-batch13-external-agent-runtime-integration.md`。
+
 ## 3. 下一执行批次
 
 批次 3A 已交付：项目成员与项目角色。
@@ -122,3 +136,20 @@
 - Agent 节点支持 timeout、重试、幂等、暂停恢复和重复请求防护。
 - 实例详情可查询节点迁移、分支、审批、重试和失败原因。
 - Migration 10 可升级旧线性实例，旧 steps 数据保持可读。
+
+批次 13：External Agent Runtime Integration（规划中，尚未开始实现）。
+
+排期位置：Batch 12B 已收口并提交后，Batch 13 才进入实现；不得回写、扩展或重开
+Batch 12B 功能范围。
+
+目标：
+
+- 外部 Runtime 注册、探测、启停、归档、权限和审计进入 `/api/v1`。
+- Command 只允许受控可执行文件与 argv 数组，禁止 shell 拼接、管道、重定向和命令替换。
+- V1 Agent Runtime 新增 `codex-jsonl`、`plain-text` Adapter，所有模型调用仅由 Worker 执行。
+- AI 伙伴可绑定外部 Runtime；停用、归档、探测失败和能力不足必须在派发前拦截。
+- Runtime Capability、Execution Envelope、Provider Session、Run/Trace、取消、超时、
+  重试、失败原因和幂等回写进入统一 Run 视图。
+- 不支持结构化事件的 Runtime 明确降级为 summary/final-only，不伪造计划或工具步骤。
+
+验收与完整阶段清单见 Batch 13 文档。

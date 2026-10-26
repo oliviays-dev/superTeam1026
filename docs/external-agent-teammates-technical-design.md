@@ -1,5 +1,11 @@
 # AI Teammates 外部 Agent 集成设计
 
+> **适用范围说明**：本文记录旧 DSH 插件层的既有外部 Agent 设计与实现事实，
+> 包括 `/api/collab/agent/...`、插件 KV Runtime 和旧 AgentRun 链路。它不能作为
+> Pluginmax Platform V1 已接入外部 Runtime 的证据。V1 的重新适配设计见
+> `docs/v1-external-agent-runtime-technical-design.md` 和
+> `docs/v1-batch13-external-agent-runtime-integration.md`。
+
 ## 1. 目标
 
 把 AI Teammates 从“内置 Task Worker 的管理面”升级为可接入外部 Agent 的统一身份层。Codex、WorkBuddy、Claude Code 或团队自研 Agent CLI 可以作为某一名 AI Teammate 的执行通道，但任务、工作流、审批、交付物和审计仍然留在平台内。
