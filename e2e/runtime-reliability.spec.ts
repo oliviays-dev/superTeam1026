@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 
 const screenshotDir = resolve(
-  process.env.BATCH7_SCREENSHOT_DIR ?? "test-results/batch7",
+  process.env.BATCH8_SCREENSHOT_DIR ?? "test-results/batch8",
 );
 
 test.beforeAll(async () => {
@@ -23,7 +23,9 @@ test.describe("runtime operations desktop", () => {
     await expect(page.getByText("队列深度")).toBeVisible();
     await expect(page.getByText("SLA 超时", { exact: true })).toBeVisible();
     await expect(page.getByText("死信队列", { exact: true })).toBeVisible();
-    await expect(page.getByText("Migration v12 / v12")).toBeVisible();
+    await expect(page.getByText("Migration v13 / v13")).toBeVisible();
+    await expect(page.getByText("租约抖动", { exact: true })).toBeVisible();
+    await expect(page.getByText("SLA 燃尽率", { exact: true })).toBeVisible();
     await page.screenshot({
       path: resolve(screenshotDir, "operations-desktop.png"),
       fullPage: true,

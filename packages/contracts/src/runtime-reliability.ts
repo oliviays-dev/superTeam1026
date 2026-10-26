@@ -89,10 +89,33 @@ export const readinessResponseSchema = z.object({
 });
 export type ReadinessResponse = z.infer<typeof readinessResponseSchema>;
 
+export const runtimeMaintenanceKindSchema = z.enum([
+  "idempotency_cleanup",
+  "approval_sla",
+  "lease_recovery",
+  "effect_recovery",
+]);
+export type RuntimeMaintenanceKind = z.infer<
+  typeof runtimeMaintenanceKindSchema
+>;
+
+export const runtimeMaintenanceTriggerSchema = z.enum([
+  "scheduler",
+  "manual",
+  "api",
+  "legacy",
+]);
+export type RuntimeMaintenanceTrigger = z.infer<
+  typeof runtimeMaintenanceTriggerSchema
+>;
+
 export const runtimeMaintenanceSchema = z.object({
   id: z.string().uuid(),
-  kind: z.enum(["idempotency_cleanup", "approval_sla", "lease_recovery"]),
+  kind: runtimeMaintenanceKindSchema,
   status: z.enum(["completed", "failed"]),
+  triggerSource: runtimeMaintenanceTriggerSchema,
+  scheduledFor: z.string().datetime({ offset: true }).nullable(),
+  durationMs: z.number().int().nonnegative().nullable(),
   processedCount: z.number().int().nonnegative(),
   archivedCount: z.number().int().nonnegative(),
   deletedCount: z.number().int().nonnegative(),
@@ -102,6 +125,71 @@ export const runtimeMaintenanceSchema = z.object({
   completedAt: z.string().datetime({ offset: true }),
 });
 export type RuntimeMaintenance = z.infer<typeof runtimeMaintenanceSchema>;
+
+export const maintenanceScheduleStatusSchema = z.enum([
+  "never",
+  "running",
+  "completed",
+  "failed",
+]);
+export type MaintenanceScheduleStatus = z.infer<
+  typeof maintenanceScheduleStatusSchema
+>;
+
+export const runtimeMaintenanceScheduleSchema = z.object({
+  kind: runtimeMaintenanceKindSchema,
+  enabled: z.boolean(),
+  intervalSeconds: z.number().int().positive(),
+  nextRunAt: z.string().datetime({ offset: true }),
+  leaseOwner: z.string().nullable(),
+  leaseExpiresAt: z.string().datetime({ offset: true }).nullable(),
+  lastStartedAt: z.string().datetime({ offset: true }).nullable(),
+  lastCompletedAt: z.string().datetime({ offset: true }).nullable(),
+  lastStatus: maintenanceScheduleStatusSchema,
+  lastError: z.string().nullable(),
+  consecutiveFailures: z.number().int().nonnegative(),
+});
+export type RuntimeMaintenanceSchedule = z.infer<
+  typeof runtimeMaintenanceScheduleSchema
+>;
+
+export const claimedMaintenanceSchema = z.object({
+  kind: runtimeMaintenanceKindSchema,
+  leaseToken: z.string().uuid(),
+  scheduledFor: z.string().datetime({ offset: true }),
+  intervalSeconds: z.number().int().positive(),
+  consecutiveFailures: z.number().int().nonnegative(),
+});
+export type ClaimedMaintenance = z.infer<typeof claimedMaintenanceSchema>;
+
+export const runtimeEffectStatusSchema = z.enum([
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type RuntimeEffectStatus = z.infer<typeof runtimeEffectStatusSchema>;
+
+export const runtimeEffectReceiptSchema = z.object({
+  id: z.string().uuid(),
+  effectKey: z.string().min(1).max(500),
+  runId: z.string().uuid(),
+  jobId: z.string().uuid().nullable(),
+  operation: z.string(),
+  status: runtimeEffectStatusSchema,
+  attempt: z.number().int().positive(),
+  replayCount: z.number().int().nonnegative(),
+  leaseOwner: z.string().nullable(),
+  leaseExpiresAt: z.string().datetime({ offset: true }).nullable(),
+  result: z.record(z.string(), z.unknown()).nullable(),
+  error: z.string().nullable(),
+  cancelRequestedAt: z.string().datetime({ offset: true }).nullable(),
+  cancelAcknowledgedAt: z.string().datetime({ offset: true }).nullable(),
+  startedAt: z.string().datetime({ offset: true }),
+  completedAt: z.string().datetime({ offset: true }).nullable(),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type RuntimeEffectReceipt = z.infer<typeof runtimeEffectReceiptSchema>;
 
 export const approvalSlaItemSchema = z.object({
   instanceId: z.string().uuid(),
@@ -130,8 +218,21 @@ export const runtimeMetricsSchema = z.object({
   approvalBacklog: z.number().int().nonnegative(),
   approvalSlaOverdue: z.number().int().nonnegative(),
   approvalSlaExpired24h: z.number().int().nonnegative(),
+  approvalSlaBurnRate: z.number().min(0).max(1),
+  approvalSlaOldestOverdueSeconds: z.number().nonnegative(),
   archivedIdempotencyReceipts: z.number().int().nonnegative(),
   archiveBytes: z.number().int().nonnegative(),
+  queueWaitP50Seconds: z.number().nonnegative(),
+  queueWaitP95Seconds: z.number().nonnegative(),
+  leaseJitterP95Seconds: z.number().nonnegative(),
+  maintenanceSuccessRate24h: z.number().min(0).max(1),
+  maintenanceRuns24h: z.number().int().nonnegative(),
+  maintenanceSchedulingLagP95Seconds: z.number().nonnegative(),
+  maintenanceDurationP95Seconds: z.number().nonnegative(),
+  activeRuntimeEffects: z.number().int().nonnegative(),
+  staleRuntimeEffects: z.number().int().nonnegative(),
+  cancelledRuntimeEffects24h: z.number().int().nonnegative(),
+  runtimeEffectReplays: z.number().int().nonnegative(),
   completedJobs24h: z.number().int().nonnegative(),
   failedJobs24h: z.number().int().nonnegative(),
   timedOutRuns24h: z.number().int().nonnegative(),
@@ -145,6 +246,9 @@ export const operationsSnapshotSchema = z.object({
   workers: z.array(workerHeartbeatSchema),
   deadLetters: z.array(jobSchema),
   approvalSlaOverdue: z.array(approvalSlaItemSchema),
+  maintenanceSchedules: z.array(runtimeMaintenanceScheduleSchema),
+  maintenanceTrend: z.array(runtimeMaintenanceSchema),
+  runtimeEffects: z.array(runtimeEffectReceiptSchema),
 });
 export type OperationsSnapshot = z.infer<typeof operationsSnapshotSchema>;
 

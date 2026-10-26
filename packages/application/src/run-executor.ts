@@ -28,16 +28,21 @@ export class RunTimedOutError extends Error {
 }
 
 export class RunLeaseLostError extends Error {
-  constructor() {
-    super("worker lease lost");
+  constructor(message = "worker lease lost") {
+    super(message);
     this.name = "RunLeaseLostError";
   }
+}
+
+export function runtimeEffectKey(runId: string): string {
+  return `run:${runId}:agent.execute:v1`;
 }
 
 export interface RunExecutorOptions {
   readonly workspaceRoot: string;
   readonly fileStoreRoot: string;
   readonly dsh: DshSdkAdapterOptions;
+  readonly runtimeEffectPollIntervalMs?: number;
 }
 
 function runtimeFor(
@@ -68,8 +73,18 @@ export class RunExecutor {
     options: {
       readonly signal?: AbortSignal;
       readonly assertLease?: () => Promise<void>;
+      readonly jobId?: string;
+      readonly owner?: string;
+      readonly leaseSeconds?: number;
+      readonly leaseRenewIntervalMs?: number;
     } = {},
   ): Promise<void> {
+    if (options.jobId === undefined) {
+      throw new Error("runtime execution requires a claimed job id");
+    }
+    const owner = options.owner ?? `run-executor-${process.pid}`;
+    const leaseSeconds = options.leaseSeconds ?? 60;
+    const leaseRenewIntervalMs = options.leaseRenewIntervalMs ?? 10_000;
     const assertLease = async () => {
       await options.assertLease?.();
       if (options.signal?.aborted) {
@@ -83,6 +98,55 @@ export class RunExecutor {
     if (agent === undefined) throw new Error("agent is unavailable");
     const project = await this.repositories.projects.get(run.projectId);
     if (project === undefined) throw new Error("project is unavailable");
+    const effectKey = runtimeEffectKey(runId);
+    const effect = await this.repositories.runtimeEffects.begin({
+      effectKey,
+      runId,
+      jobId: options.jobId,
+      operation: "agent.execute",
+      owner,
+      leaseSeconds,
+    });
+    if (effect.kind === "replay") {
+      const output = effect.receipt.result?.output;
+      if (typeof output !== "string") {
+        throw new Error("runtime effect replay is missing its output");
+      }
+      await this.repositories.runs.markRunning(runId);
+      await this.repositories.runs.appendEventIfAbsent(
+        runId,
+        "runtime.effect_replayed",
+        "复用已持久化的 Runtime effect 回执",
+        {
+          effectKey,
+          attempt: effect.receipt.attempt,
+        },
+      );
+      await this.completeRun(runId, task, output, assertLease);
+      return;
+    }
+    if (effect.kind === "cancelled") {
+      throw new RunCancelledError();
+    }
+    if (effect.kind === "busy") {
+      throw new RunLeaseLostError("runtime effect is leased elsewhere");
+    }
+    const effectLeaseToken = effect.leaseToken;
+    try {
+      await assertLease();
+    } catch (error) {
+      if (
+        error instanceof RunCancelledError ||
+        options.signal?.reason instanceof RunCancelledError
+      ) {
+        await this.repositories.runtimeEffects.acknowledgeCancellation(
+          effectKey,
+          owner,
+          effectLeaseToken,
+        );
+      }
+      throw error;
+    }
     const context = buildTaskContext({ runId, project, task, agent });
     await this.repositories.contexts.save(context.pack, context.receipt);
     const workspacePath = resolve(this.options.workspaceRoot, run.projectId);
@@ -124,11 +188,54 @@ export class RunExecutor {
             () => controller.abort(new RunTimedOutError()),
             Math.max(0, new Date(run.timeoutAt).getTime() - Date.now()),
           );
+    let checkingEffect = false;
+    const effectTimer = setInterval(
+      () => {
+        if (checkingEffect || controller.signal.aborted) return;
+        checkingEffect = true;
+        void this.repositories.runtimeEffects
+          .renew(effectKey, owner, effectLeaseToken, leaseSeconds)
+          .then((renewed) => {
+            if (!renewed && !controller.signal.aborted) {
+              controller.abort(new RunLeaseLostError());
+            }
+          })
+          .catch(() => {
+            // The main execution path reports effect persistence failures.
+          })
+          .finally(() => {
+            checkingEffect = false;
+          });
+      },
+      Math.max(100, leaseRenewIntervalMs),
+    );
+    let controlling = false;
+    const controlTimer = setInterval(() => {
+      if (controlling || controller.signal.aborted) return;
+      controlling = true;
+      void this.repositories.runtimeEffects
+        .control(effectKey, owner, effectLeaseToken)
+        .then((control) => {
+          if (control === undefined || controller.signal.aborted) return;
+          if (control.cancellationRequested) {
+            controller.abort(new RunCancelledError());
+          } else if (control.leaseLost) {
+            controller.abort(new RunLeaseLostError());
+          }
+        })
+        .catch(() => {
+          // Lease renewal remains the authoritative ownership check.
+        })
+        .finally(() => {
+          controlling = false;
+        });
+    }, this.options.runtimeEffectPollIntervalMs ?? 500);
     try {
       const adapter = runtimeFor(agent, this.options);
       for await (const event of adapter.execute(
         {
           runId,
+          effectKey,
           title: task.title,
           description: task.description,
           acceptance: task.acceptance,
@@ -149,58 +256,47 @@ export class RunExecutor {
         if (event.type === "completed") {
           const current = await this.requireRun(runId);
           if (current.status === "cancelled") throw new RunCancelledError();
-          await this.repositories.runs.finish(
-            runId,
-            "completed",
-            event.output,
-            null,
-          );
-          const ref = await this.fileStore.put({
-            workspaceId: run.projectId,
-            name: `${task.title.replace(/[^a-zA-Z0-9._-]+/g, "-")}-result.md`,
-            mimeType: "text/markdown",
-            content: Buffer.from(event.output, "utf8"),
-          });
-          await assertLease();
-          const existingArtifacts =
-            await this.repositories.artifacts.listByRun(runId);
-          const artifact =
-            existingArtifacts.find(
-              (candidate) =>
-                candidate.name === ref.name && candidate.sha256 === ref.sha256,
-            ) ??
-            (await this.repositories.artifacts.save({
-              runId,
-              projectId: run.projectId,
-              ref,
-            }));
-          await this.repositories.runs.appendEvent(
-            runId,
-            "run.completed",
-            "Run 执行完成，等待人工验收",
+          const completed = await this.repositories.runtimeEffects.complete(
+            effectKey,
+            owner,
+            effectLeaseToken,
             { output: event.output },
           );
-          await this.repositories.runs.appendEvent(
-            runId,
-            "artifact.created",
-            "最终交付物已保存",
-            {
-              artifactId: artifact.id,
-              name: artifact.name,
-              size: artifact.size,
-            },
-          );
-          await this.repositories.tasks.setStatus(task.id, "review");
+          if (completed === undefined) throw new RunLeaseLostError();
+          await this.completeRun(runId, task, event.output, assertLease);
+          return;
         }
       }
     } catch (error) {
-      if (error instanceof RunCancelledError) {
-        return;
+      if (
+        error instanceof RunCancelledError ||
+        controller.signal.reason instanceof RunCancelledError
+      ) {
+        await this.repositories.runtimeEffects.acknowledgeCancellation(
+          effectKey,
+          owner,
+          effectLeaseToken,
+        );
+        await this.repositories.runs.appendEventIfAbsent(
+          runId,
+          "runtime.effect_cancelled",
+          "Runtime effect 已跨进程取消并确认",
+          { effectKey },
+        );
+        throw error instanceof RunCancelledError
+          ? error
+          : new RunCancelledError();
       }
       if (
         error instanceof RunTimedOutError ||
         controller.signal.reason instanceof RunTimedOutError
       ) {
+        await this.repositories.runtimeEffects.fail(
+          effectKey,
+          owner,
+          effectLeaseToken,
+          "Run exceeded its timeout",
+        );
         await this.repositories.runs.timeout(runId, "Run exceeded its timeout");
         await this.repositories.tasks.setStatus(task.id, "queued");
         await this.repositories.runs.appendEvent(
@@ -212,18 +308,80 @@ export class RunExecutor {
         return;
       }
       if (options.signal?.aborted) {
+        await this.repositories.runtimeEffects.fail(
+          effectKey,
+          owner,
+          effectLeaseToken,
+          "worker lease lost",
+        );
         throw options.signal.reason ?? new RunLeaseLostError();
       }
       const message =
         error instanceof Error ? error.message : "unknown runtime failure";
+      await this.repositories.runtimeEffects.fail(
+        effectKey,
+        owner,
+        effectLeaseToken,
+        message,
+      );
       await this.repositories.runs.appendEvent(runId, "error", "Run 执行失败", {
         error: message,
       });
       throw error;
     } finally {
+      clearInterval(effectTimer);
+      clearInterval(controlTimer);
       if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
       options.signal?.removeEventListener("abort", relayExternalAbort);
     }
+  }
+
+  private async completeRun(
+    runId: string,
+    task: Task,
+    output: string,
+    assertLease: () => Promise<void>,
+  ): Promise<void> {
+    const run = await this.requireRun(runId);
+    if (run.status === "cancelled") throw new RunCancelledError();
+    if (run.status === "completed") return;
+    await this.repositories.runs.finish(runId, "completed", output, null);
+    const ref = await this.fileStore.put({
+      workspaceId: run.projectId,
+      name: `${task.title.replace(/[^a-zA-Z0-9._-]+/g, "-")}-result.md`,
+      mimeType: "text/markdown",
+      content: Buffer.from(output, "utf8"),
+    });
+    await assertLease();
+    const existingArtifacts =
+      await this.repositories.artifacts.listByRun(runId);
+    const artifact =
+      existingArtifacts.find(
+        (candidate) =>
+          candidate.name === ref.name && candidate.sha256 === ref.sha256,
+      ) ??
+      (await this.repositories.artifacts.save({
+        runId,
+        projectId: run.projectId,
+        ref,
+      }));
+    await this.repositories.runs.appendEventIfAbsent(
+      runId,
+      "run.completed",
+      "Run 执行完成，等待人工验收",
+      { output },
+    );
+    await this.repositories.runs.appendEventIfAbsent(
+      runId,
+      "artifact.created",
+      "最终交付物已保存",
+      {
+        artifactId: artifact.id,
+        name: artifact.name,
+        size: artifact.size,
+      },
+    );
+    await this.repositories.tasks.setStatus(task.id, "review");
   }
 
   private async persistEvent(

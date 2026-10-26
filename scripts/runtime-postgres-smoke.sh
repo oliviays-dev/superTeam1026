@@ -19,7 +19,7 @@ psql_database() {
     exec -T postgres psql -U pluginmax -d "$database" -qAt -v ON_ERROR_STOP=1 -c "$sql"
 }
 
-upgrade_database="pluginmax_v11_to_v12_$STAMP"
+upgrade_database="pluginmax_v11_to_v13_$STAMP"
 upgrade_database_url="${DATABASE_URL_INPUT%/*}/$upgrade_database"
 psql_query "CREATE DATABASE $upgrade_database;"
 
@@ -177,6 +177,15 @@ reliable_tables="$(psql_database "$upgrade_database" "
       'runtime_maintenance_runs'
     );
 ")"
+v13_tables="$(psql_database "$upgrade_database" "
+  SELECT COUNT(*)
+  FROM information_schema.tables
+  WHERE table_schema = 'public'
+    AND table_name IN (
+      'runtime_maintenance_schedules',
+      'runtime_effect_receipts'
+    );
+")"
 psql_database "$upgrade_database" "
   UPDATE jobs SET status = 'dead_letter'
   WHERE id = '20000000-0000-4000-8000-000000000004';
@@ -206,15 +215,16 @@ escalation_count="$(psql_database "$upgrade_database" "
   SELECT COUNT(*) FROM workflow_approvals WHERE kind = 'escalation';
 ")"
 
-if [[ "$version" != "12" ||
+if [[ "$version" != "13" ||
       "$job_shape" != "3:true:queued" ||
       "$approval_sla" != "true:true:true" ||
       "$reliable_tables" != "4" ||
+      "$v13_tables" != "2" ||
       "$dead_letter_status" != "dead_letter" ||
       "$escalation_count" != "1" ]]; then
-  printf 'v11 to v12 smoke failed: version=%s job=%s sla=%s tables=%s dead_letter=%s escalation=%s\n' \
+  printf 'v11 to v13 smoke failed: version=%s job=%s sla=%s tables=%s v13_tables=%s dead_letter=%s escalation=%s\n' \
     "$version" "$job_shape" "$approval_sla" "$reliable_tables" \
-    "$dead_letter_status" "$escalation_count" >&2
+    "$v13_tables" "$dead_letter_status" "$escalation_count" >&2
   exit 1
 fi
 
@@ -224,5 +234,6 @@ printf 'migration_version=%s\n' "$version"
 printf 'job_backfill=%s\n' "$job_shape"
 printf 'approval_sla_backfill=%s\n' "$approval_sla"
 printf 'reliability_tables=%s\n' "$reliable_tables"
+printf 'maintenance_effect_tables=%s\n' "$v13_tables"
 printf 'dead_letter_constraint=%s\n' "$dead_letter_status"
 printf 'escalation_constraint_count=%s\n' "$escalation_count"

@@ -2,6 +2,7 @@ import type { RuntimeKind } from "@pluginmax/contracts";
 
 export interface RuntimeTaskInput {
   readonly runId: string;
+  readonly effectKey: string;
   readonly title: string;
   readonly description: string;
   readonly acceptance: readonly string[];

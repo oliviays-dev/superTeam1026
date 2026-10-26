@@ -1,5 +1,9 @@
 import { hostname } from "node:os";
-import { RunLeaseLostError, type RunExecutor } from "@pluginmax/application";
+import {
+  RunCancelledError,
+  RunLeaseLostError,
+  type RunExecutor,
+} from "@pluginmax/application";
 import type { ClaimedJob, PlatformRepositories } from "@pluginmax/database";
 import type { WorkerStatus } from "@pluginmax/contracts";
 
@@ -23,12 +27,16 @@ export interface WorkerRuntimeOptions {
   readonly heartbeatIntervalMs: number;
   readonly workerHeartbeatStaleAfterSeconds: number;
   readonly sweepIntervalMs: number;
+  readonly maintenanceIntervalMs?: number;
 }
 
 export interface WorkerRuntimeDependencies {
   readonly repositories: PlatformRepositories;
   readonly executor: RunExecutor;
   readonly sweep?: () => Promise<void>;
+  readonly maintenance?: {
+    runOnce(): Promise<number>;
+  };
   readonly log?: (event: string, data?: Record<string, unknown>) => void;
 }
 
@@ -89,6 +97,9 @@ export class WorkerRuntime {
     void this.sweep();
     for (let index = 0; index < this.options.concurrency; index += 1) {
       this.loopPromises.push(this.claimLoop(index));
+    }
+    if (this.dependencies.maintenance !== undefined) {
+      this.loopPromises.push(this.maintenanceLoop());
     }
     await Promise.all(this.loopPromises);
     if (this.sweepTimer !== null) clearInterval(this.sweepTimer);
@@ -180,9 +191,17 @@ export class WorkerRuntime {
           this.options.workerId,
           job.leaseToken,
           this.options.leaseSeconds,
+          { expectedRenewIntervalMs: this.options.leaseRenewIntervalMs },
         )
-        .then((renewed) => {
+        .then(async (renewed) => {
           if (!renewed && !controller.signal.aborted) {
+            const current = await this.dependencies.repositories.jobs.get(
+              job.id,
+            );
+            if (current?.status === "cancelled") {
+              controller.abort(new RunCancelledError());
+              return;
+            }
             this.log("job.lease_lost", {
               jobId: job.id,
               runId: job.runId,
@@ -204,15 +223,31 @@ export class WorkerRuntime {
     try {
       await this.dependencies.executor.execute(job.runId, {
         signal: controller.signal,
+        jobId: job.id,
+        owner: this.options.workerId,
+        leaseSeconds: this.options.leaseSeconds,
+        leaseRenewIntervalMs: this.options.leaseRenewIntervalMs,
         assertLease: async () => {
           const owned = await this.dependencies.repositories.jobs.hasLease(
             job.id,
             this.options.workerId,
             job.leaseToken,
           );
-          if (!owned) throw new RunLeaseLostError();
+          if (!owned) {
+            const current = await this.dependencies.repositories.jobs.get(
+              job.id,
+            );
+            if (current?.status === "cancelled") {
+              throw new RunCancelledError();
+            }
+            throw new RunLeaseLostError();
+          }
         },
       });
+      if (controller.signal.reason instanceof RunCancelledError) {
+        this.log("job.cancelled", { jobId: job.id, runId: job.runId });
+        return;
+      }
       const completed = await this.dependencies.repositories.jobs.complete(
         job.id,
         this.options.workerId,
@@ -228,6 +263,13 @@ export class WorkerRuntime {
       }
     } catch (error) {
       const reason = controller.signal.reason;
+      if (
+        error instanceof RunCancelledError ||
+        reason instanceof RunCancelledError
+      ) {
+        this.log("job.cancelled", { jobId: job.id, runId: job.runId });
+        return;
+      }
       if (reason instanceof WorkerShutdownError) {
         const interrupted = await this.dependencies.repositories.jobs.interrupt(
           job.id,
@@ -286,57 +328,28 @@ export class WorkerRuntime {
   private async sweep(): Promise<void> {
     if (this.sweeping || this.stopping) return;
     this.sweeping = true;
-    const startedAt = new Date();
     try {
-      const recovered =
-        await this.dependencies.repositories.jobs.recoverExpiredLeases(
-          this.options.recoveryBatchSize,
-          {
-            baseBackoffMs: this.options.retryBaseDelayMs,
-            maxBackoffMs: this.options.retryMaxDelayMs,
-          },
-        );
-      if (recovered.length > 0) {
-        this.log("jobs.expired_leases_recovered", {
-          count: recovered.length,
-          retryScheduled: recovered.filter(
-            (job) => job.outcome === "retry_scheduled",
-          ).length,
-          deadLetters: recovered.filter((job) => job.outcome === "dead_letter")
-            .length,
-        });
-      }
-      if (recovered.length > 0) {
-        await this.dependencies.repositories.runtimeReliability.recordMaintenance(
-          {
-            kind: "lease_recovery",
-            status: "completed",
-            processedCount: recovered.length,
-            metrics: { recovered },
-            startedAt,
-          },
-        );
-      }
       if (this.dependencies.sweep !== undefined) {
         await this.dependencies.sweep();
       }
     } catch (error) {
       this.log("worker.sweep_failed", { error: this.message(error) });
-      try {
-        await this.dependencies.repositories.runtimeReliability.recordMaintenance(
-          {
-            kind: "lease_recovery",
-            status: "failed",
-            processedCount: 0,
-            error: this.message(error),
-            startedAt,
-          },
-        );
-      } catch {
-        // The primary sweep error is already logged.
-      }
     } finally {
       this.sweeping = false;
+    }
+  }
+
+  private async maintenanceLoop(): Promise<void> {
+    const intervalMs = this.options.maintenanceIntervalMs ?? 1_000;
+    while (!this.stopping) {
+      try {
+        await this.dependencies.maintenance?.runOnce();
+      } catch (error) {
+        this.log("maintenance.loop_failed", {
+          error: this.message(error),
+        });
+      }
+      await sleep(intervalMs);
     }
   }
 

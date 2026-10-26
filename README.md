@@ -102,3 +102,6 @@ Recovery, idempotency and approval governance are documented in
 
 批次 7 的运行可靠性、审批 SLA、保留策略和运维入口见
 [v1-batch7-runtime-reliability.md](./docs/v1-batch7-runtime-reliability.md).
+
+批次 8 的持久化维护调度、Runtime effect 回执、取消交接、指标与告警见
+[v1-batch8-maintenance-effect-safety.md](./docs/v1-batch8-maintenance-effect-safety.md).

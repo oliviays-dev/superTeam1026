@@ -91,9 +91,19 @@ export function OperationsDashboardView() {
     {
       label: "队列深度",
       value: metrics?.queueDepth ?? "-",
-      detail: "等待领取",
+      detail: `P95 等待 ${(metrics?.queueWaitP95Seconds ?? 0).toFixed(2)}s`,
       icon: Layers3,
       tone: "neutral",
+    },
+    {
+      label: "租约抖动",
+      value: `${(metrics?.leaseJitterP95Seconds ?? 0).toFixed(2)}s`,
+      detail: "24h P95 续租偏差",
+      icon: Activity,
+      tone:
+        metrics !== undefined && metrics.leaseJitterP95Seconds >= 2
+          ? "warning"
+          : "healthy",
     },
     {
       label: "死信",
@@ -143,6 +153,30 @@ export function OperationsDashboardView() {
       tone:
         metrics !== undefined && metrics.approvalSlaOverdue > 0
           ? "danger"
+          : "healthy",
+    },
+    {
+      label: "SLA 燃尽率",
+      value:
+        metrics === undefined ? "-" : percentage(metrics.approvalSlaBurnRate),
+      detail: "24h 已评估审批",
+      icon: AlertTriangle,
+      tone:
+        metrics !== undefined && metrics.approvalSlaBurnRate >= 0.2
+          ? "danger"
+          : "healthy",
+    },
+    {
+      label: "维护成功率",
+      value:
+        metrics === undefined
+          ? "-"
+          : percentage(metrics.maintenanceSuccessRate24h),
+      detail: `${metrics?.maintenanceRuns24h ?? 0} 次 / 24h`,
+      icon: CheckCircle2,
+      tone:
+        metrics !== undefined && metrics.maintenanceSuccessRate24h < 0.95
+          ? "warning"
           : "healthy",
     },
     {
@@ -378,10 +412,24 @@ export function OperationsDashboardView() {
           <header>
             <div>
               <h2>维护记录</h2>
-              <span>回执归档与 SLA 任务</span>
+              <span>{data?.maintenanceSchedules.length ?? 0} 个持久化调度</span>
             </div>
             <Archive size={17} />
           </header>
+          {(data?.maintenanceSchedules ?? []).map((schedule) => (
+            <div className="operations-risk-row" key={schedule.kind}>
+              <span>
+                <strong>{schedule.kind}</strong>
+                <small>
+                  {schedule.lastStatus === "failed"
+                    ? (schedule.lastError ?? "最近执行失败")
+                    : `每 ${schedule.intervalSeconds}s`}
+                </small>
+              </span>
+              <em>{schedule.consecutiveFailures} 次失败</em>
+              <time>{formatDateTime(schedule.nextRunAt)}</time>
+            </div>
+          ))}
           {metrics?.lastMaintenance === null ||
           metrics?.lastMaintenance === undefined ? (
             <div className="pm-empty compact">暂无维护记录</div>

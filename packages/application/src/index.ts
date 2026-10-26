@@ -1001,20 +1001,33 @@ export class PlatformApplication {
     readonly expectedMigrationVersion: number;
     readonly workerHeartbeatStaleAfterSeconds: number;
   }): Promise<OperationsSnapshot> {
-    const [metrics, workers, deadLetters, approvalSlaOverdue] =
-      await Promise.all([
-        this.repositories.runtimeReliability.getMetrics(input),
-        this.repositories.runtimeReliability.listWorkers(
-          input.workerHeartbeatStaleAfterSeconds,
-        ),
-        this.repositories.jobs.list({ status: "dead_letter", limit: 20 }),
-        this.repositories.runtimeReliability.listApprovalSlaOverdue(20),
-      ]);
+    const [
+      metrics,
+      workers,
+      deadLetters,
+      approvalSlaOverdue,
+      maintenanceSchedules,
+      maintenanceTrend,
+      runtimeEffects,
+    ] = await Promise.all([
+      this.repositories.runtimeReliability.getMetrics(input),
+      this.repositories.runtimeReliability.listWorkers(
+        input.workerHeartbeatStaleAfterSeconds,
+      ),
+      this.repositories.jobs.list({ status: "dead_letter", limit: 20 }),
+      this.repositories.runtimeReliability.listApprovalSlaOverdue(20),
+      this.repositories.runtimeReliability.listMaintenanceSchedules(),
+      this.repositories.runtimeReliability.listRecentMaintenance(20),
+      this.repositories.runtimeEffects.listRecent(20),
+    ]);
     return {
       metrics,
       workers,
       deadLetters,
       approvalSlaOverdue,
+      maintenanceSchedules,
+      maintenanceTrend,
+      runtimeEffects,
     };
   }
 
@@ -1056,9 +1069,16 @@ export class PlatformApplication {
     return recovered;
   }
 
-  cleanupIdempotencyReceipts(input: IdempotencyCleanupInput) {
+  cleanupIdempotencyReceipts(
+    input: IdempotencyCleanupInput,
+    options: {
+      readonly triggerSource?: "scheduler" | "manual" | "api" | "legacy";
+      readonly scheduledFor?: Date;
+    } = {},
+  ) {
     return this.repositories.runtimeReliability.cleanupIdempotencyReceipts(
       input,
+      options,
     );
   }
 
@@ -2502,6 +2522,10 @@ export class PlatformApplication {
   async sweepApprovalSla(
     actorId: string,
     batchSize = 100,
+    options: {
+      readonly triggerSource?: "scheduler" | "manual" | "api" | "legacy";
+      readonly scheduledFor?: Date;
+    } = {},
   ): Promise<ApprovalSlaSweepResult> {
     const startedAt = new Date();
     const affectedInstances = new Set<string>();
@@ -2570,6 +2594,10 @@ export class PlatformApplication {
           status: "completed",
           processedCount: reminded + escalated + expired,
           metrics: result,
+          triggerSource: options.triggerSource ?? "manual",
+          ...(options.scheduledFor === undefined
+            ? {}
+            : { scheduledFor: options.scheduledFor }),
           startedAt,
         });
       }
@@ -2586,6 +2614,10 @@ export class PlatformApplication {
           expired,
           affectedInstances: affectedInstances.size,
         },
+        triggerSource: options.triggerSource ?? "manual",
+        ...(options.scheduledFor === undefined
+          ? {}
+          : { scheduledFor: options.scheduledFor }),
         startedAt,
       });
       throw error;
@@ -3038,6 +3070,7 @@ export class PlatformApplication {
       inputSnapshot,
       attempt: node.attempt,
       timeoutAt: deadline,
+      maxAttempts: definition.maxAttempts,
       idempotencyKey: `${instance.id}:${node.nodeId}:${node.visits}:${node.attempt}`,
       workflowInstanceId: instance.id,
       workflowNodeId: node.nodeId,
@@ -3603,3 +3636,4 @@ function instanceStatusAudit(
 }
 
 export * from "./run-executor.js";
+export * from "./runtime-metrics.js";

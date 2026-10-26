@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "feature/**"]
+    branches: [main, "feat/**", "feature/**"]
   pull_request:
 
 jobs:
@@ -65,3 +65,68 @@ jobs:
           name: smoke-diagnostics
           path: .tmp/smoke-diagnostics.txt
           if-no-files-found: error
+
+  database:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install Pluginmax workspace
+        run: pnpm install --frozen-lockfile
+      - name: Build workspace packages
+        run: pnpm run build:packages
+      - name: PostgreSQL v12 to v13 compatibility smoke
+        run: ./scripts/maintenance-effects-postgres-smoke.sh
+      - name: Start isolated PostgreSQL
+        run: |
+          ./scripts/db-compose.sh -p pluginmax-ci -f docker-compose.batch8.yml up -d postgres
+          for attempt in {1..60}; do
+            if ./scripts/db-compose.sh -p pluginmax-ci -f docker-compose.batch8.yml \
+              exec -T postgres pg_isready -U pluginmax -d pluginmax; then
+              break
+            fi
+            sleep 1
+          done
+      - name: Apply migrations
+        env:
+          DATABASE_URL: postgres://pluginmax:pluginmax@127.0.0.1:54389/pluginmax
+        run: pnpm db:migrate
+      - name: Unit and PostgreSQL integration tests
+        env:
+          TEST_DATABASE_URL: postgres://pluginmax:pluginmax@127.0.0.1:54389/pluginmax
+        run: pnpm test
+      - name: PostgreSQL upgrade smoke
+        env:
+          DATABASE_URL: postgres://pluginmax:pluginmax@127.0.0.1:54389/pluginmax
+        run: ./scripts/runtime-postgres-smoke.sh
+
+  runtime-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install Pluginmax workspace
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: API, process recovery, and browser smoke
+        run: pnpm test:ci
+      - name: Upload runtime logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-browser-logs
+          path: .tmp/ci-batch8
+          if-no-files-found: warn

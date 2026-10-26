@@ -35,6 +35,12 @@ export {
   type WorkerHeartbeatInput,
 } from "./runtime-reliability-repository.js";
 export {
+  RuntimeEffectRepository,
+  type BeginRuntimeEffectInput,
+  type BeginRuntimeEffectResult,
+  type RuntimeEffectControl,
+} from "./runtime-effect-repository.js";
+export {
   WorkflowRuntimeRepository,
   type CreateWorkflowRuntimeInstanceInput,
   type SaveWorkflowRuntimeInput,

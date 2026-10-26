@@ -37,7 +37,11 @@ import {
   workflowAuditQuerySchema,
   workflowReasonInputSchema,
 } from "@pluginmax/contracts";
-import { ApplicationError, PlatformApplication } from "@pluginmax/application";
+import {
+  ApplicationError,
+  PlatformApplication,
+  renderRuntimePrometheusMetrics,
+} from "@pluginmax/application";
 import { Database, PlatformRepositories } from "@pluginmax/database";
 import { LocalFileStore, type FileRef } from "@pluginmax/files";
 import Fastify, {
@@ -168,7 +172,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 12;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 13;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -385,6 +389,16 @@ export function buildApi(options: BuildApiOptions): {
     );
   });
 
+  app.get("/api/v1/metrics", async (_request, reply) => {
+    const snapshot = await application.getOperationsSnapshot({
+      expectedMigrationVersion,
+      workerHeartbeatStaleAfterSeconds,
+    });
+    return reply
+      .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+      .send(renderRuntimePrometheusMetrics(snapshot));
+  });
+
   app.get("/api/v1/jobs", async (request, reply) => {
     const query = jobListQuerySchema.parse(request.query);
     return reply.send({ items: await application.listJobs(query) });
@@ -405,7 +419,9 @@ export function buildApi(options: BuildApiOptions): {
     assertAdministrator(actorId);
     const input = approvalSlaSweepInputSchema.parse(request.body ?? {});
     return reply.send(
-      await application.sweepApprovalSla(actorId, input.batchSize),
+      await application.sweepApprovalSla(actorId, input.batchSize, {
+        triggerSource: "api",
+      }),
     );
   });
 
@@ -413,7 +429,11 @@ export function buildApi(options: BuildApiOptions): {
     const actorId = requestActorId(request.headers);
     assertAdministrator(actorId);
     const input = idempotencyCleanupInputSchema.parse(request.body ?? {});
-    return reply.send(await application.cleanupIdempotencyReceipts(input));
+    return reply.send(
+      await application.cleanupIdempotencyReceipts(input, {
+        triggerSource: "api",
+      }),
+    );
   });
 
   app.get("/api/v1/projects", async (_request, reply) => {

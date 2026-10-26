@@ -27,7 +27,7 @@ integration("runtime operations API contract", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 12,
+      expectedMigrationVersion: 13,
       workerHeartbeatStaleAfterSeconds: 30,
     });
     app = built.app;
@@ -84,6 +84,12 @@ integration("runtime operations API contract", () => {
       concurrency: 3,
       status: "running",
     });
+    await database.query(
+      "DELETE FROM workflow_idempotency_keys WHERE scope = 'api-test'",
+    );
+    await database.query(
+      "DELETE FROM workflow_idempotency_archive WHERE scope = 'api-test'",
+    );
     await database.query(
       `INSERT INTO workflow_idempotency_keys (
          id, scope, operation, idempotency_key, request_hash, state,
@@ -154,8 +160,8 @@ integration("runtime operations API contract", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       metrics: {
-        expectedMigrationVersion: 12,
-        migrationVersion: 12,
+        expectedMigrationVersion: 13,
+        migrationVersion: 13,
         activeWorkers: 1,
         deadLetterCount: expect.any(Number),
       },
@@ -165,7 +171,29 @@ integration("runtime operations API contract", () => {
       deadLetters: expect.arrayContaining([
         expect.objectContaining({ id: deadLetterJobId }),
       ]),
+      maintenanceSchedules: expect.arrayContaining([
+        expect.objectContaining({ kind: "approval_sla" }),
+        expect.objectContaining({ kind: "idempotency_cleanup" }),
+      ]),
+      maintenanceTrend: expect.any(Array),
+      runtimeEffects: expect.any(Array),
     });
+  });
+
+  it("renders Prometheus metrics for runtime operations", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics",
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/plain");
+    expect(response.body).toContain(
+      "# TYPE pluginmax_runtime_queue_wait_seconds gauge",
+    );
+    expect(response.body).toContain(
+      'pluginmax_runtime_maintenance_next_run_timestamp_seconds{kind="approval_sla"}',
+    );
+    expect(response.body).toContain("pluginmax_runtime_effects_stale");
   });
 
   it("enforces administrator permission and recoverable job state", async () => {

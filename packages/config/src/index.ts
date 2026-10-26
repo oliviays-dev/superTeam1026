@@ -21,6 +21,10 @@ export interface PlatformConfig {
   readonly workflowSweepBatchSize: number;
   readonly workflowSweepLeaseSeconds: number;
   readonly workflowSweepStaleSeconds: number;
+  readonly maintenancePollIntervalMs: number;
+  readonly maintenanceLeaseSeconds: number;
+  readonly approvalSlaBatchSize: number;
+  readonly runtimeEffectPollIntervalMs: number;
   readonly localActorId: string;
   readonly agentWorkspaceRoot: string;
   readonly dshBin: string | undefined;
@@ -157,6 +161,26 @@ export function loadConfig(
       env.WORKFLOW_SWEEP_STALE_SECONDS,
       2,
       "WORKFLOW_SWEEP_STALE_SECONDS",
+    ),
+    maintenancePollIntervalMs: integer(
+      env.MAINTENANCE_POLL_INTERVAL_MS,
+      1_000,
+      "MAINTENANCE_POLL_INTERVAL_MS",
+    ),
+    maintenanceLeaseSeconds: integer(
+      env.MAINTENANCE_LEASE_SECONDS,
+      30,
+      "MAINTENANCE_LEASE_SECONDS",
+    ),
+    approvalSlaBatchSize: integer(
+      env.APPROVAL_SLA_BATCH_SIZE,
+      100,
+      "APPROVAL_SLA_BATCH_SIZE",
+    ),
+    runtimeEffectPollIntervalMs: integer(
+      env.RUNTIME_EFFECT_POLL_INTERVAL_MS,
+      500,
+      "RUNTIME_EFFECT_POLL_INTERVAL_MS",
     ),
     localActorId: env.LOCAL_ACTOR_ID ?? "local-admin",
     agentWorkspaceRoot: resolve(

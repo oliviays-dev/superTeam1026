@@ -865,3 +865,104 @@ CREATE TABLE IF NOT EXISTS runtime_maintenance_runs (
 CREATE INDEX IF NOT EXISTS runtime_maintenance_kind_idx
   ON runtime_maintenance_runs(kind, completed_at DESC);
 `;
+
+export const RUNTIME_MAINTENANCE_EFFECTS_SCHEMA_SQL = `
+ALTER TABLE runtime_maintenance_runs
+  ADD COLUMN IF NOT EXISTS trigger_source TEXT NOT NULL DEFAULT 'legacy',
+  ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
+
+ALTER TABLE runtime_maintenance_runs
+  DROP CONSTRAINT IF EXISTS runtime_maintenance_trigger_check;
+
+ALTER TABLE runtime_maintenance_runs
+  DROP CONSTRAINT IF EXISTS runtime_maintenance_runs_kind_check;
+
+ALTER TABLE runtime_maintenance_runs
+  ADD CONSTRAINT runtime_maintenance_runs_kind_check
+  CHECK (kind IN (
+    'idempotency_cleanup',
+    'approval_sla',
+    'lease_recovery',
+    'effect_recovery'
+  ));
+
+ALTER TABLE runtime_maintenance_runs
+  ADD CONSTRAINT runtime_maintenance_trigger_check
+  CHECK (trigger_source IN ('scheduler', 'manual', 'api', 'legacy'));
+
+ALTER TABLE job_attempts
+  ADD COLUMN IF NOT EXISTS lease_renew_interval_ms INTEGER,
+  ADD COLUMN IF NOT EXISTS lease_jitter_ms DOUBLE PRECISION;
+
+CREATE TABLE IF NOT EXISTS runtime_maintenance_schedules (
+  kind TEXT PRIMARY KEY
+    CHECK (kind IN (
+      'idempotency_cleanup',
+      'approval_sla',
+      'lease_recovery',
+      'effect_recovery'
+    )),
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  interval_seconds INTEGER NOT NULL
+    CHECK (interval_seconds BETWEEN 5 AND 604800),
+  next_run_at TIMESTAMPTZ NOT NULL,
+  lease_owner TEXT,
+  lease_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  last_started_at TIMESTAMPTZ,
+  last_completed_at TIMESTAMPTZ,
+  last_status TEXT
+    CHECK (last_status IN ('running', 'completed', 'failed')),
+  last_error TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0
+    CHECK (consecutive_failures >= 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+INSERT INTO runtime_maintenance_schedules (
+  kind, enabled, interval_seconds, next_run_at,
+  consecutive_failures, created_at, updated_at
+) VALUES
+  ('lease_recovery', TRUE, 5, NOW(), 0, NOW(), NOW()),
+  ('approval_sla', TRUE, 60, NOW(), 0, NOW(), NOW()),
+  ('idempotency_cleanup', TRUE, 3600, NOW(), 0, NOW(), NOW()),
+  ('effect_recovery', TRUE, 5, NOW(), 0, NOW(), NOW())
+ON CONFLICT (kind) DO NOTHING;
+
+CREATE INDEX IF NOT EXISTS runtime_maintenance_due_idx
+  ON runtime_maintenance_schedules(enabled, next_run_at)
+  WHERE enabled = TRUE;
+
+CREATE TABLE IF NOT EXISTS runtime_effect_receipts (
+  id UUID PRIMARY KEY,
+  effect_key TEXT NOT NULL UNIQUE,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
+  operation TEXT NOT NULL,
+  status TEXT NOT NULL
+    CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+  lease_owner TEXT,
+  lease_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  replay_count INTEGER NOT NULL DEFAULT 0 CHECK (replay_count >= 0),
+  result JSONB,
+  error TEXT,
+  cancel_requested_at TIMESTAMPTZ,
+  cancel_acknowledged_at TIMESTAMPTZ,
+  started_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, operation)
+);
+
+CREATE INDEX IF NOT EXISTS runtime_effect_status_idx
+  ON runtime_effect_receipts(status, lease_expires_at);
+
+CREATE INDEX IF NOT EXISTS runtime_effect_cancel_idx
+  ON runtime_effect_receipts(cancel_requested_at)
+  WHERE cancel_requested_at IS NOT NULL
+    AND status = 'running';
+`;

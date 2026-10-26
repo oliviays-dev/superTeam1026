@@ -8,6 +8,7 @@ describe("FakeRuntimeAdapter", () => {
     for await (const event of adapter.execute(
       {
         runId: "run-1",
+        effectKey: "run:run-1:agent.execute:v1",
         title: "Analyze supplier risk",
         description: "Review current supplier risk.",
         acceptance: ["Provide a conclusion"],

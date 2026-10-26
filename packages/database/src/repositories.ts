@@ -55,6 +55,7 @@ import { TaskCollaborationRepository } from "./task-collaboration-repository.js"
 import { WorkflowIdempotencyRepository } from "./workflow-idempotency-repository.js";
 import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
 import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.js";
+import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
 
 export class ProjectRepository {
   constructor(private readonly database: Database) {}
@@ -504,6 +505,7 @@ export interface EnqueueRunInput {
   readonly attempt?: number;
   readonly timeoutAt?: string;
   readonly idempotencyKey?: string;
+  readonly maxAttempts?: number;
   readonly workflowInstanceId?: string;
   readonly workflowNodeId?: string;
 }
@@ -544,9 +546,12 @@ export class RunRepository {
       );
       await client.query(
         `INSERT INTO jobs (
-           id, run_id, kind, status, available_at, created_at, updated_at
-         ) VALUES ($1, $2, 'agent.run', 'queued', NOW(), NOW(), NOW())`,
-        [randomUUID(), input.runId],
+           id, run_id, kind, status, available_at, max_attempts,
+           created_at, updated_at
+         ) VALUES (
+           $1, $2, 'agent.run', 'queued', NOW(), $3, NOW(), NOW()
+         )`,
+        [randomUUID(), input.runId, input.maxAttempts ?? 3],
       );
       await client.query(
         `INSERT INTO run_events (
@@ -673,6 +678,25 @@ export class RunRepository {
     return runEventFromRow(result.rows[0]!);
   }
 
+  async appendEventIfAbsent(
+    runId: string,
+    type: PlatformRunEventType,
+    summary: string,
+    data: Record<string, unknown> | null = null,
+  ): Promise<boolean> {
+    return this.database.transaction(async (client) => {
+      const existing = await client.query(
+        `SELECT 1 FROM run_events
+         WHERE run_id = $1 AND type = $2
+         LIMIT 1`,
+        [runId, type],
+      );
+      if ((existing.rowCount ?? 0) > 0) return false;
+      await this.appendEvent(runId, type, summary, data, "public", client);
+      return true;
+    });
+  }
+
   async appendDelta(runId: string, text: string): Promise<RunDelta> {
     const result = await this.database.query<RunDeltaRow>(
       `INSERT INTO run_deltas (run_id, seq, text, created_at)
@@ -719,6 +743,14 @@ export class RunRepository {
       await client.query(
         `UPDATE jobs SET status = 'cancelled', updated_at = NOW()
          WHERE run_id = $1 AND status IN ('queued', 'running')`,
+        [id],
+      );
+      await client.query(
+        `UPDATE runtime_effect_receipts
+         SET
+           cancel_requested_at = COALESCE(cancel_requested_at, NOW()),
+           updated_at = NOW()
+         WHERE run_id = $1 AND status = 'running'`,
         [id],
       );
       const run = runFromRow(result.rows[0]!);
@@ -917,6 +949,9 @@ export class JobRepository {
     owner: string,
     leaseToken: string,
     leaseSeconds: number,
+    options: {
+      readonly expectedRenewIntervalMs?: number;
+    } = {},
   ): Promise<boolean> {
     return this.database.transaction(async (client) => {
       const result = await client.query(
@@ -935,9 +970,19 @@ export class JobRepository {
       if ((result.rowCount ?? 0) === 0) return false;
       await client.query(
         `UPDATE job_attempts
-         SET heartbeat_at = NOW()
+         SET
+           heartbeat_at = NOW(),
+           lease_renew_interval_ms =
+             COALESCE($3, lease_renew_interval_ms),
+           lease_jitter_ms =
+             CASE
+               WHEN $3 IS NULL THEN lease_jitter_ms
+               ELSE ABS(
+                 EXTRACT(EPOCH FROM (NOW() - heartbeat_at)) * 1000 - $3
+               )
+             END
          WHERE job_id = $1 AND lease_token = $2 AND status = 'running'`,
-        [id, leaseToken],
+        [id, leaseToken, options.expectedRenewIntervalMs ?? null],
       );
       return true;
     });
@@ -1450,6 +1495,7 @@ export class PlatformRepositories {
   readonly meetings: MeetingRepository;
   readonly workbench: WorkbenchRepository;
   readonly runtimeReliability: RuntimeReliabilityRepository;
+  readonly runtimeEffects: RuntimeEffectRepository;
 
   constructor(database: Database) {
     this.projects = new ProjectRepository(database);
@@ -1469,5 +1515,6 @@ export class PlatformRepositories {
     this.meetings = new MeetingRepository(database);
     this.workbench = new WorkbenchRepository(database);
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
+    this.runtimeEffects = new RuntimeEffectRepository(database);
   }
 }

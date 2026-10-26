@@ -3,6 +3,7 @@ import { PlatformApplication, RunExecutor } from "@pluginmax/application";
 import { loadConfig, loadLocalEnv } from "@pluginmax/config";
 import { Database, PlatformRepositories } from "@pluginmax/database";
 import { WorkerRuntime } from "./worker-runtime.js";
+import { RuntimeMaintenanceService } from "./maintenance-service.js";
 
 loadLocalEnv();
 const config = loadConfig();
@@ -12,6 +13,7 @@ const application = new PlatformApplication(repositories);
 const executor = new RunExecutor(repositories, {
   workspaceRoot: config.agentWorkspaceRoot,
   fileStoreRoot: config.fileStoreRoot,
+  runtimeEffectPollIntervalMs: config.runtimeEffectPollIntervalMs,
   dsh: {
     dshBin: config.dshBin,
     profile: config.dshProfile,
@@ -21,7 +23,6 @@ const executor = new RunExecutor(repositories, {
   },
 });
 const workerId = `worker-${randomUUID()}`;
-let lastIdempotencyCleanupAt = 0;
 
 const log = (event: string, data: Record<string, unknown> = {}) => {
   process.stdout.write(
@@ -36,14 +37,6 @@ const log = (event: string, data: Record<string, unknown> = {}) => {
 };
 
 const sweep = async () => {
-  const approvalSla = await application.sweepApprovalSla(workerId, 100);
-  if (
-    approvalSla.reminded > 0 ||
-    approvalSla.escalated > 0 ||
-    approvalSla.expired > 0
-  ) {
-    log("workflow.approval_sla", approvalSla);
-  }
   const result = await application.sweepWorkflowInstances(workerId, {
     batchSize: config.workflowSweepBatchSize,
     leaseSeconds: config.workflowSweepLeaseSeconds,
@@ -52,21 +45,23 @@ const sweep = async () => {
   if (result.claimed > 0) {
     log("workflow.sweep", result);
   }
-  if (
-    Date.now() - lastIdempotencyCleanupAt >=
-    config.idempotencyCleanupIntervalMs
-  ) {
-    lastIdempotencyCleanupAt = Date.now();
-    const cleanup =
-      await repositories.runtimeReliability.cleanupIdempotencyReceipts({
-        olderThanSeconds: config.idempotencyRetentionSeconds,
-        batchSize: config.idempotencyCleanupBatchSize,
-      });
-    if (cleanup.deletedCount > 0) {
-      log("idempotency.cleanup", cleanup);
-    }
-  }
 };
+
+const maintenance = new RuntimeMaintenanceService(
+  repositories,
+  application,
+  {
+    owner: workerId,
+    claimLeaseSeconds: config.maintenanceLeaseSeconds,
+    approvalSlaBatchSize: config.approvalSlaBatchSize,
+    recoveryBatchSize: config.workerRecoveryBatchSize,
+    retryBaseDelayMs: config.workerRetryBaseDelayMs,
+    retryMaxDelayMs: config.workerRetryMaxDelayMs,
+    idempotencyRetentionSeconds: config.idempotencyRetentionSeconds,
+    idempotencyCleanupBatchSize: config.idempotencyCleanupBatchSize,
+  },
+  log,
+);
 
 const runtime = new WorkerRuntime(
   {
@@ -82,11 +77,13 @@ const runtime = new WorkerRuntime(
     heartbeatIntervalMs: config.workerHeartbeatIntervalMs,
     workerHeartbeatStaleAfterSeconds: config.workerHeartbeatStaleAfterSeconds,
     sweepIntervalMs: config.workflowSweepIntervalMs,
+    maintenanceIntervalMs: config.maintenancePollIntervalMs,
   },
   {
     repositories,
     executor,
     sweep,
+    maintenance,
     log,
   },
 );

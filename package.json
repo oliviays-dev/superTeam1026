@@ -24,6 +24,7 @@
     "test": "vitest run",
     "test:e2e": "./scripts/e2e-smoke.sh",
     "test:e2e:browser": "playwright test",
+    "test:ci": "./scripts/ci-runtime-e2e.sh",
     "test:smoke:collaboration": "./scripts/task-collaboration-smoke.sh",
     "test:smoke:dependencies": "./scripts/dependency-memory-smoke.sh",
     "test:smoke:workflow": "./scripts/workflow-markdown-smoke.sh",
@@ -33,6 +34,8 @@
     "test:smoke:workflow-governance": "./scripts/workflow-governance-smoke.sh",
     "test:smoke:runtime": "./scripts/runtime-reliability-smoke.sh",
     "test:smoke:runtime-postgres": "./scripts/runtime-postgres-smoke.sh",
+    "test:smoke:maintenance-postgres": "./scripts/maintenance-effects-postgres-smoke.sh",
+    "test:smoke:dsh-real": "./scripts/real-dsh-smoke.sh",
     "test:membership": "./scripts/membership-smoke.sh",
     "typecheck": "pnpm run build:packages && pnpm -r typecheck"
   },

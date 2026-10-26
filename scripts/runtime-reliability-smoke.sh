@@ -4,11 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 API_BASE="${API_BASE:-http://127.0.0.1:4450/api/v1}"
-COMPOSE_PROJECT="${COMPOSE_PROJECT:-pluginmax-batch7}"
-COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.batch7.yml}"
-DATABASE_URL_INPUT="${DATABASE_URL:-postgres://pluginmax:pluginmax@127.0.0.1:54379/pluginmax}"
-DSH_HOME_INPUT="${DSH_HOME:-$ROOT/../dsh-home-batch7}"
-LOG_DIR="${LOG_DIR:-$ROOT/.tmp/batch7/runtime-smoke}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-pluginmax-batch8}"
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.batch8.yml}"
+DATABASE_URL_INPUT="${DATABASE_URL:-postgres://pluginmax:pluginmax@127.0.0.1:54389/pluginmax}"
+DSH_HOME_INPUT="${DSH_HOME:-$ROOT/.tmp/dsh-home-batch8}"
+LOG_DIR="${LOG_DIR:-$ROOT/.tmp/batch8/runtime-smoke}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 WORKER_PIDS=()
 WORKER_PID=""
@@ -67,8 +67,9 @@ start_worker() {
     WORKER_HEARTBEAT_INTERVAL_MS=250 \
     WORKER_HEARTBEAT_STALE_AFTER_SECONDS=3 \
     WORKFLOW_SWEEP_INTERVAL_MS=250 \
+    MAINTENANCE_POLL_INTERVAL_MS=250 \
+    MAINTENANCE_LEASE_SECONDS=10 \
     IDEMPOTENCY_RETENTION_SECONDS=60 \
-    IDEMPOTENCY_CLEANUP_INTERVAL_MS=60000 \
     node "$ROOT/apps/worker/lib/index.js" >"$log_file" 2>&1 &
   local pid=$!
   WORKER_PIDS+=("$pid")
@@ -228,6 +229,77 @@ kill -TERM "$worker_a" "$worker_b"
 wait_pid_exit "$worker_a"
 wait_pid_exit "$worker_b"
 
+# A completed effect receipt is replayed without invoking the runtime again.
+replay_run="$(create_dispatched_run "Effect replay")"
+replay_effect_key="run:$replay_run:agent.execute:v1"
+psql_query "
+  INSERT INTO runtime_effect_receipts (
+    id, effect_key, run_id, job_id, operation, status, attempt,
+    result, started_at, completed_at, updated_at
+  ) VALUES (
+    gen_random_uuid(),
+    '$replay_effect_key',
+    '$replay_run',
+    (SELECT id FROM jobs WHERE run_id = '$replay_run'),
+    'agent.execute',
+    'completed',
+    1,
+    '{\"output\":\"replayed output from the durable effect ledger\"}'::jsonb,
+    NOW(),
+    NOW(),
+    NOW()
+  );
+"
+start_worker effect-replay-a 1 3 500 1000
+worker_effect_replay="$WORKER_PID"
+wait_run_status "$replay_run" completed 20
+replay_events="$(psql_query "
+  SELECT COUNT(*) FROM run_events
+  WHERE run_id = '$replay_run' AND type = 'runtime.effect_replayed';
+")"
+replay_output="$(psql_query "
+  SELECT output FROM runs WHERE id = '$replay_run';
+")"
+replay_artifacts="$(psql_query "
+  SELECT COUNT(*) FROM artifacts WHERE run_id = '$replay_run';
+")"
+if [[ "$replay_events" != "1" ||
+      "$replay_output" != "replayed output from the durable effect ledger" ||
+      "$replay_artifacts" != "1" ]]; then
+  printf 'effect replay failed: events=%s output=%s artifacts=%s\n' \
+    "$replay_events" "$replay_output" "$replay_artifacts" >&2
+  exit 1
+fi
+kill -TERM "$worker_effect_replay"
+wait_pid_exit "$worker_effect_replay"
+
+# Cancellation persists in PostgreSQL and aborts an effect owned by another process.
+cancel_run="$(create_dispatched_run "Cross-process cancellation")"
+set_runtime_options "$cancel_run" '{"delayMs":5000}'
+start_worker cancel-a 1 3 500 1000
+worker_cancel="$WORKER_PID"
+wait_log "$LOG_DIR/cancel-a.log" '"event":"job.claimed"' 10
+api POST "/runs/$cancel_run/cancel" >/dev/null
+wait_run_status "$cancel_run" cancelled 10
+for _ in {1..100}; do
+  cancel_state="$(psql_query "
+    SELECT status || ':' || (cancel_acknowledged_at IS NOT NULL)
+    FROM runtime_effect_receipts
+    WHERE run_id = '$cancel_run';
+  ")"
+  if [[ "$cancel_state" == "cancelled:true" ]]; then
+    break
+  fi
+  sleep 0.05
+done
+wait_log "$LOG_DIR/cancel-a.log" '"event":"job.cancelled"' 10
+if [[ "$cancel_state" != "cancelled:true" ]]; then
+  printf 'cross-process cancellation failed: effect=%s\n' "$cancel_state" >&2
+  exit 1
+fi
+kill -TERM "$worker_cancel"
+wait_pid_exit "$worker_cancel"
+
 # SIGKILL a long-running worker, then recover the expired lease in another process.
 crash_run="$(create_dispatched_run "Lease recovery")"
 set_runtime_options "$crash_run" '{"delayMs":2500}'
@@ -352,7 +424,8 @@ wait_pid_exit "$worker_int"
 wait_log "$LOG_DIR/sigint-a.log" '"event":"worker.drained"' 10
 
 metrics="$(api GET /operations)"
-if [[ "$(printf '%s' "$metrics" | jq '.metrics.migrationVersion')" != "12" ]]; then
+if [[ "$(printf '%s' "$metrics" | jq '.metrics.migrationVersion')" != "13" ||
+      "$(printf '%s' "$metrics" | jq '.maintenanceSchedules | length')" != "4" ]]; then
   printf 'operations migration version mismatch\n' >&2
   exit 1
 fi

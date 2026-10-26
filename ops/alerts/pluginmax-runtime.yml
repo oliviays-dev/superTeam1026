@@ -1,0 +1,100 @@
+groups:
+  - name: pluginmax-runtime
+    rules:
+      - alert: PluginmaxWorkerUnavailable
+        expr: pluginmax_runtime_workers_active == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: No Pluginmax worker has a fresh heartbeat.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#worker-unavailable
+
+      - alert: PluginmaxMigrationDrift
+        expr: pluginmax_runtime_migration_version < pluginmax_runtime_migration_expected_version
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The Pluginmax database schema is behind the API expectation.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#migration-drift
+
+      - alert: PluginmaxQueueWaitHigh
+        expr: pluginmax_runtime_queue_wait_seconds{quantile="0.95"} > 60
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: P95 job queue wait has exceeded 60 seconds.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#queue-wait
+
+      - alert: PluginmaxLeaseJitterHigh
+        expr: pluginmax_runtime_lease_jitter_seconds{quantile="0.95"} > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Worker lease renewal jitter is elevated.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#lease-jitter
+
+      - alert: PluginmaxApprovalSlaBurnHigh
+        expr: pluginmax_runtime_approval_sla_burn_rate > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Approval SLA expiry is consuming more than 10 percent of evaluated work.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#approval-sla
+
+      - alert: PluginmaxApprovalSlaBurnCritical
+        expr: pluginmax_runtime_approval_sla_burn_rate > 0.25
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Approval SLA expiry is consuming more than 25 percent of evaluated work.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#approval-sla
+
+      - alert: PluginmaxMaintenanceFailure
+        expr: pluginmax_runtime_maintenance_failures_consecutive > 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: A persistent maintenance schedule has failed repeatedly.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#maintenance-failure
+
+      - alert: PluginmaxMaintenanceSuccessLow
+        expr: pluginmax_runtime_maintenance_success_ratio < 0.95
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Maintenance success over the last 24 hours is below 95 percent.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#maintenance-failure
+
+      - alert: PluginmaxMaintenanceLagHigh
+        expr: pluginmax_runtime_maintenance_scheduling_lag_seconds{quantile="0.95"} > 30
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Maintenance work is being claimed more than 30 seconds after its schedule.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#maintenance-failure
+
+      - alert: PluginmaxRuntimeEffectStale
+        expr: pluginmax_runtime_effects_stale > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: One or more runtime effects have expired leases.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#runtime-effect-recovery
+
+      - alert: PluginmaxRuntimeEffectReplaySpike
+        expr: increase(pluginmax_runtime_effects_replayed_total[15m]) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: Runtime effect replay volume is elevated.
+          runbook: docs/v1-batch8-maintenance-effect-safety.md#runtime-effect-recovery

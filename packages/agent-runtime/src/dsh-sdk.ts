@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   DeepSeekHarness,
   type HarnessNotification,
@@ -174,7 +175,10 @@ export class DshSdkAdapter implements AgentRuntimeAdapter {
 
     void harness
       .run(input.instruction, {
-        sessionId: `platform-${input.runId}`,
+        sessionId: `platform-${createHash("sha256")
+          .update(input.effectKey)
+          .digest("hex")
+          .slice(0, 32)}`,
         onNotification: (notification) => {
           for (const event of mapDshNotification(notification)) {
             queue.push({ kind: "event", event });
