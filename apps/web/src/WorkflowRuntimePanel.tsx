@@ -30,6 +30,8 @@ import { listWorkflowAudit } from "./api.js";
 
 interface WorkflowRuntimePanelProps {
   readonly detail: WorkflowInstanceDetail;
+  readonly canWrite: boolean;
+  readonly canApprove: boolean;
   readonly pending: boolean;
   readonly onComplete: (node: WorkflowRuntimeNode) => void;
   readonly onDispatch: () => void;
@@ -256,6 +258,8 @@ function WorkflowAuditBrowser({
 
 export function WorkflowRuntimePanel({
   detail,
+  canWrite,
+  canApprove,
   pending,
   onComplete,
   onDispatch,
@@ -300,7 +304,7 @@ export function WorkflowRuntimePanel({
             className="pm-icon-btn"
             type="button"
             title="同步运行状态"
-            disabled={pending}
+            disabled={!canWrite || pending}
             onClick={onReconcile}
           >
             <RefreshCw size={14} className={pending ? "spin" : undefined} />
@@ -309,7 +313,7 @@ export function WorkflowRuntimePanel({
             <button
               className="pm-btn secondary"
               type="button"
-              disabled={pending}
+              disabled={!canWrite || pending}
               onClick={onPause}
             >
               <Pause size={14} />
@@ -320,7 +324,7 @@ export function WorkflowRuntimePanel({
             <button
               className="pm-btn primary"
               type="button"
-              disabled={pending}
+              disabled={!canWrite || pending}
               onClick={onResume}
             >
               <Play size={14} />
@@ -410,7 +414,7 @@ export function WorkflowRuntimePanel({
                     <button
                       className="pm-btn secondary"
                       type="button"
-                      disabled={pending}
+                      disabled={!canWrite || pending}
                       onClick={onDispatch}
                     >
                       <Bot size={13} />
@@ -426,7 +430,7 @@ export function WorkflowRuntimePanel({
                     <button
                       className="pm-btn primary"
                       type="button"
-                      disabled={pending}
+                      disabled={!canWrite || pending}
                       onClick={() => onComplete(node)}
                     >
                       <Check size={13} />
@@ -438,7 +442,7 @@ export function WorkflowRuntimePanel({
                     <button
                       className="pm-btn primary"
                       type="button"
-                      disabled={pending}
+                      disabled={!canApprove || pending}
                       onClick={() => onApproval(node, "approve")}
                     >
                       <ShieldCheck size={13} />
@@ -447,7 +451,7 @@ export function WorkflowRuntimePanel({
                     <button
                       className="pm-btn secondary danger"
                       type="button"
-                      disabled={pending}
+                      disabled={!canApprove || pending}
                       onClick={() => onApproval(node, "reject")}
                     >
                       <X size={13} />
@@ -456,7 +460,7 @@ export function WorkflowRuntimePanel({
                     <button
                       className="pm-btn secondary"
                       type="button"
-                      disabled={pending}
+                      disabled={!canApprove || pending}
                       onClick={() =>
                         setApprovalEditor({
                           nodeId: node.nodeId,
@@ -476,7 +480,7 @@ export function WorkflowRuntimePanel({
                     <button
                       className="pm-btn secondary"
                       type="button"
-                      disabled={pending}
+                      disabled={!canApprove || pending}
                       onClick={() =>
                         setApprovalEditor({
                           nodeId: node.nodeId,
@@ -495,7 +499,7 @@ export function WorkflowRuntimePanel({
                     <button
                       className="pm-btn secondary"
                       type="button"
-                      disabled={pending}
+                      disabled={!canWrite || pending}
                       onClick={() => onRetry(node)}
                     >
                       <RotateCcw size={13} />

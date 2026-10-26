@@ -107,18 +107,20 @@ integration("context and memory closure", () => {
   async function addAgentMember(
     projectId: string,
     agentId: string,
-  ): Promise<void> {
-    const result = await request(
+    roleIds: readonly string[] = [],
+  ): Promise<string> {
+    const result = await request<{ id: string }>(
       "POST",
       `/api/v1/projects/${projectId}/members`,
       {
         kind: "agent",
         agentId,
         responsibility: "Memory closure tests",
-        roleIds: [],
+        roleIds,
       },
     );
     expect(result.statusCode).toBe(201);
+    return result.body.id;
   }
 
   async function publishMeeting(): Promise<PublishedMeeting> {
@@ -559,7 +561,19 @@ integration("context and memory closure", () => {
     const otherProject = await createProject("Episode other project");
     const agent = await createAgent("Episode agent");
     const otherAgent = await createAgent("Episode other agent");
-    await addAgentMember(project.id, agent.id);
+    const readerRole = await request<{ id: string }>(
+      "POST",
+      `/api/v1/projects/${project.id}/roles`,
+      {
+        code: "AGENT_READER",
+        name: "Agent Reader",
+        category: "execution",
+        description: "Explicit read grant for episode access",
+        permissions: ["read"],
+      },
+    );
+    expect(readerRole.statusCode).toBe(201);
+    await addAgentMember(project.id, agent.id, [readerRole.body.id]);
     await addAgentMember(project.id, otherAgent.id);
     await addAgentMember(otherProject.id, agent.id);
 
@@ -620,22 +634,14 @@ integration("context and memory closure", () => {
       undefined,
       agent.id,
     );
-    expect(agentView.statusCode).toBe(200);
-    expect(new Set(agentView.body.items.map((item) => item.id))).toEqual(
-      new Set([privateEpisode.body.id, projectEpisode.body.id]),
-    );
+    expect(agentView.statusCode).toBe(403);
     const otherAgentView = await request<{ items: unknown[] }>(
       "GET",
       `/api/v1/projects/${project.id}/agent-episodes?agentId=${agent.id}`,
       undefined,
       otherAgent.id,
     );
-    expect(otherAgentView.statusCode).toBe(200);
-    expect(
-      otherAgentView.body.items.map(
-        (item) => (item as { id: string; visibility: string }).id,
-      ),
-    ).toEqual([projectEpisode.body.id]);
+    expect(otherAgentView.statusCode).toBe(403);
 
     const contextEpisodes =
       await repositories.memoryClosure.listEpisodesForContext(

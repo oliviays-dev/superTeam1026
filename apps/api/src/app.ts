@@ -452,6 +452,7 @@ export function buildApi(options: BuildApiOptions): {
       route,
       principal,
       params: (request.params ?? {}) as Record<string, unknown>,
+      query: (request.query ?? {}) as Record<string, unknown>,
       body: request.body,
     });
     if (!result.required || result.allowed) return;
@@ -883,8 +884,23 @@ export function buildApi(options: BuildApiOptions): {
     );
   });
 
-  app.get("/api/v1/projects", async (_request, reply) => {
-    return reply.send({ items: await application.listProjects() });
+  app.get("/api/v1/projects", async (request, reply) => {
+    const principal = requestPrincipals.get(request);
+    if (principal === undefined) {
+      throw new ApplicationError(
+        "unauthorized",
+        "Authentication is required",
+        401,
+      );
+    }
+    const readableProjectIds =
+      await repositories.authorization.listReadableProjectIds({
+        principalId: principal.principalId,
+        authSource: principal.authSource,
+      });
+    return reply.send({
+      items: await application.listProjects(readableProjectIds),
+    });
   });
 
   app.post("/api/v1/projects", async (request, reply) => {
@@ -1069,12 +1085,33 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/projects/:projectId", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);
-    const projects = await application.listProjects();
-    const project = projects.find((item) => item.id === projectId);
-    if (project === undefined) {
-      throw new ApplicationError("project_not_found", "Project not found", 404);
+    return reply.send(await application.getProject(projectId));
+  });
+
+  app.get("/api/v1/projects/:projectId/capability", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const principal = requestPrincipals.get(request);
+    if (principal === undefined) {
+      throw new ApplicationError(
+        "unauthorized",
+        "Authentication is required",
+        401,
+      );
     }
-    return reply.send(project);
+    const decision = await repositories.authorization.getProjectCapability({
+      principalId: principal.principalId,
+      authSource: principal.authSource,
+      projectId,
+    });
+    if (!decision.allowed || decision.capability === undefined) {
+      throw new ApplicationError(
+        "forbidden",
+        "The authenticated Principal is not authorized for this operation",
+        403,
+        { reason: decision.reason ?? "permission_missing", projectId },
+      );
+    }
+    return reply.send(decision.capability);
   });
 
   app.patch("/api/v1/projects/:projectId", async (request, reply) => {
@@ -1211,29 +1248,6 @@ export function buildApi(options: BuildApiOptions): {
     "/api/v1/projects/:projectId/authorization-report",
     async (request, reply) => {
       const { projectId } = projectParamsSchema.parse(request.params);
-      const principal = requestPrincipals.get(request);
-      if (principal === undefined) {
-        throw new ApplicationError(
-          "unauthorized",
-          "Authentication is required",
-          401,
-        );
-      }
-      const decision = await authorization.authorizeProject({
-        principal,
-        projectId,
-        permission: "read",
-        action: "authorization.project.report.read",
-        requestId: String(request.id),
-      });
-      if (!decision.allowed) {
-        throw new ApplicationError(
-          "forbidden",
-          "The authenticated Principal is not authorized for this operation",
-          403,
-          { reason: decision.reason, projectId },
-        );
-      }
       const report =
         await repositories.authorization.getProjectAuthorizationReport(
           projectId,
@@ -1575,6 +1589,24 @@ export function buildApi(options: BuildApiOptions): {
 
   app.get("/api/v1/tasks", async (request, reply) => {
     const query = listTasksQuerySchema.parse(request.query);
+    if (query.projectId === undefined) {
+      const principal = requestPrincipals.get(request);
+      if (principal === undefined) {
+        throw new ApplicationError(
+          "unauthorized",
+          "Authentication is required",
+          401,
+        );
+      }
+      const readableProjectIds =
+        await repositories.authorization.listReadableProjectIds({
+          principalId: principal.principalId,
+          authSource: principal.authSource,
+        });
+      return reply.send({
+        items: await application.listTasks(undefined, readableProjectIds),
+      });
+    }
     return reply.send({ items: await application.listTasks(query.projectId) });
   });
 
@@ -1683,8 +1715,11 @@ export function buildApi(options: BuildApiOptions): {
     "/api/v1/attachments/:attachmentId/download",
     async (request, reply) => {
       const { attachmentId } = taskAttachmentParamsSchema.parse(request.params);
-      const { attachment, content } =
-        await application.readTaskAttachment(attachmentId);
+      const actorId = requestActorId(request.headers);
+      const { attachment, content } = await application.readTaskAttachment(
+        attachmentId,
+        actorId,
+      );
       return reply
         .header("content-type", attachment.mimeType)
         .header(

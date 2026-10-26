@@ -11,13 +11,13 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
-  artifactDownloadUrl,
   cancelRun,
+  downloadArtifact,
   getRunContext,
   getRunDetail,
   getRunEvents,
   listArtifacts,
-  subscribeToRun,
+  streamRun,
 } from "./api.js";
 import {
   RunEventBadge,
@@ -69,52 +69,82 @@ export function RunView({ runId }: { runId: string }) {
 
   useEffect(() => {
     let disposed = false;
-    let source: EventSource | undefined;
+    const controller = new AbortController();
+    let terminal = false;
     setEvents([]);
     setLiveOutput("");
     setStreamState("connecting");
 
     void getRunEvents(runId).then((page) => {
       if (disposed) return;
-      const lastEvent = page.items.at(-1)?.seq ?? 0;
-      const lastDelta = page.deltas.at(-1)?.seq ?? 0;
+      let lastEvent = page.items.at(-1)?.seq ?? 0;
+      let lastDelta = page.deltas.at(-1)?.seq ?? 0;
       setEvents(page.items);
       setLiveOutput(page.deltas.map((delta) => delta.text).join(""));
-      source = subscribeToRun(runId, lastEvent, lastDelta);
-      setStreamState("live");
+      if (terminalStatuses.has(page.runStatus)) {
+        terminal = true;
+        setStreamState("closed");
+        return;
+      }
 
-      source.addEventListener("run.event", (message) => {
-        const event = JSON.parse(
-          (message as MessageEvent<string>).data,
-        ) as PlatformRunEvent;
-        setEvents((current) =>
-          current.some((item) => item.id === event.id)
-            ? current
-            : [...current, event],
-        );
-        if (terminalStatuses.has(event.type.replace("run.", ""))) {
-          void queryClient.invalidateQueries({ queryKey: ["run", runId] });
-          void queryClient.invalidateQueries({
-            queryKey: ["run-artifacts", runId],
-          });
-          void queryClient.invalidateQueries({ queryKey: ["tasks"] });
-          void queryClient.invalidateQueries({ queryKey: ["task-runs"] });
+      const connect = async () => {
+        while (!disposed && !terminal) {
+          setStreamState("live");
+          try {
+            await streamRun(
+              runId,
+              lastEvent,
+              lastDelta,
+              {
+                onEvent: (event) => {
+                  lastEvent = Math.max(lastEvent, event.seq);
+                  setEvents((current) =>
+                    current.some((item) => item.id === event.id)
+                      ? current
+                      : [...current, event],
+                  );
+                  if (terminalStatuses.has(event.type.replace("run.", ""))) {
+                    terminal = true;
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run", runId],
+                    });
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run-artifacts", runId],
+                    });
+                    void queryClient.invalidateQueries({
+                      queryKey: ["tasks"],
+                    });
+                    void queryClient.invalidateQueries({
+                      queryKey: ["task-runs"],
+                    });
+                  }
+                },
+                onDelta: (delta) => {
+                  lastDelta = Math.max(lastDelta, delta.seq);
+                  setLiveOutput((current) => current + delta.text);
+                },
+              },
+              controller.signal,
+            );
+          } catch (error: unknown) {
+            if (disposed || controller.signal.aborted) return;
+            console.error(error);
+          }
+          if (disposed) return;
+          if (terminal) {
+            setStreamState("closed");
+            return;
+          }
+          setStreamState("connecting");
+          await new Promise((resolve) => window.setTimeout(resolve, 1_000));
         }
-      });
-      source.addEventListener("run.delta", (message) => {
-        const delta = JSON.parse((message as MessageEvent<string>).data) as {
-          text: string;
-        };
-        setLiveOutput((current) => current + delta.text);
-      });
-      source.addEventListener("error", () => {
-        if (!disposed) setStreamState("connecting");
-      });
+      };
+      void connect();
     });
 
     return () => {
       disposed = true;
-      source?.close();
+      controller.abort();
       setStreamState("closed");
     };
   }, [queryClient, runId]);
@@ -126,6 +156,21 @@ export function RunView({ runId }: { runId: string }) {
     [events],
   );
   const artifacts: Artifact[] = artifactsQuery.data ?? [];
+  const beginArtifactDownload = async (artifact: Artifact) => {
+    try {
+      const blob = await downloadArtifact(artifact.id);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = artifact.name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 4_000);
+    } catch (error) {
+      console.error(error);
+    }
+  };
 
   if (run === undefined) {
     return (
@@ -292,15 +337,15 @@ export function RunView({ runId }: { runId: string }) {
         {artifacts.length > 0 ? (
           <div className="artifact-list">
             {artifacts.map((artifact) => (
-              <a
-                href={artifactDownloadUrl(artifact.id)}
+              <button
+                type="button"
                 key={artifact.id}
-                download
+                onClick={() => void beginArtifactDownload(artifact)}
               >
                 <FileText size={14} />
                 <span>{artifact.name}</span>
                 <Download size={13} />
-              </a>
+              </button>
             ))}
           </div>
         ) : (

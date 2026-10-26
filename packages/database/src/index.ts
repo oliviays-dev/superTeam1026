@@ -9,6 +9,7 @@ export {
   type AuthorizationPrincipal,
   type AuthorizationResourceType,
   type PrincipalResolution,
+  type ProjectCapabilityDecision,
   type ProjectAuthorizationReport,
   type ProjectMemberAuthorizationReport,
   type ProjectOwnerSourceReport,

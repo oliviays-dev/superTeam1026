@@ -2,6 +2,7 @@ import type {
   Agent,
   MemoryTopic,
   Project,
+  ProjectCapability,
   ProjectRole,
   Task,
   TaskMessage,
@@ -40,6 +41,7 @@ import {
   createMemoryTopic,
   createTask,
   dispatchTask,
+  downloadTaskAttachment,
   archiveTaskAttachment,
   getTaskDetail,
   listMemory,
@@ -52,7 +54,6 @@ import {
   publishMemoryTruth,
   reviewTask,
   setWorkbenchFollow,
-  taskAttachmentDownloadUrl,
   updateProject,
   updateTask,
   uploadTaskAttachment,
@@ -70,6 +71,7 @@ interface SharedViewProps {
   projects: Project[];
   agents: Agent[];
   projectId: string;
+  capability?: ProjectCapability | undefined;
   onProjectChange: (projectId: string) => void;
 }
 
@@ -353,6 +355,7 @@ export function ProjectsView({
   initialTab,
   canManageTemplates,
   onOpenTemplates,
+  capability,
 }: SharedViewProps & {
   onOpenTask: (taskId: string, projectId: string) => void;
   onOpenMeeting: (meetingId: string, projectId: string) => void;
@@ -379,6 +382,8 @@ export function ProjectsView({
     enabled: selectedProjectId !== "",
   });
   const project = projects.find((item) => item.id === selectedProjectId);
+  const canWrite = capability?.capabilities.write ?? false;
+  const canApprove = capability?.capabilities.approve ?? false;
   const tasks = tasksQuery.data ?? [];
   const memory = memoryQuery.data?.items ?? [];
   useEffect(() => {
@@ -490,6 +495,8 @@ export function ProjectsView({
                   <button
                     className="pm-btn secondary"
                     type="button"
+                    disabled={!canWrite}
+                    title={canWrite ? "编辑项目" : "没有项目写权限"}
                     onClick={() => setEditOpen(true)}
                   >
                     <Edit3 size={14} />
@@ -634,7 +641,7 @@ export function ProjectsView({
                 <ProjectMemoryPanel
                   projectId={project.id}
                   memory={memory}
-                  canManage={memoryQuery.data?.canManage ?? false}
+                  canManage={canApprove}
                   tasks={tasks}
                   agents={agents}
                   onOpenTask={onOpenTask}
@@ -645,11 +652,13 @@ export function ProjectsView({
                 <ProjectMembershipPanel
                   projectId={project.id}
                   agents={agents}
+                  capabilities={capability?.capabilities}
                 />
               )}
               {tab === "reports" && (
                 <ProjectReportsPanel
                   project={project}
+                  canGenerate={canApprove}
                   {...(initialReportId === undefined
                     ? {}
                     : { initialReportId })}
@@ -1232,6 +1241,7 @@ export function TasksView({
   projects,
   agents,
   projectId,
+  capability,
   onProjectChange,
   initialTaskId,
   onInitialTaskConsumed,
@@ -1241,6 +1251,8 @@ export function TasksView({
 }) {
   const queryClient = useQueryClient();
   const selectedProjectId = projectId || projects[0]?.id || "";
+  const canWrite = capability?.capabilities.write ?? false;
+  const canApprove = capability?.capabilities.approve ?? false;
   const [query, setQuery] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState("");
@@ -1304,6 +1316,7 @@ export function TasksView({
             type="button"
             disabled={
               selectedProjectId === "" ||
+              !canWrite ||
               !agents.some((agent) => agent.status === "active")
             }
             onClick={() => setCreateOpen(true)}
@@ -1346,6 +1359,7 @@ export function TasksView({
                 <button
                   title={`在${column.label}中新建任务`}
                   type="button"
+                  disabled={!canWrite}
                   onClick={() => setCreateOpen(true)}
                 >
                   <Plus size={13} />
@@ -1400,6 +1414,8 @@ export function TasksView({
           task={selectedTask}
           tasks={tasks}
           roles={roles}
+          canWrite={canWrite}
+          canApprove={canApprove}
           onClose={() => setSelectedTaskId("")}
           onTaskChanged={() => {
             void queryClient.invalidateQueries({ queryKey: ["tasks"] });
@@ -1428,12 +1444,16 @@ function TaskDetailDrawer({
   task,
   tasks,
   roles,
+  canWrite,
+  canApprove,
   onClose,
   onTaskChanged,
 }: {
   task: Task;
   tasks: Task[];
   roles: ProjectRole[];
+  canWrite: boolean;
+  canApprove: boolean;
   onClose: () => void;
   onTaskChanged: () => void;
 }) {
@@ -1594,9 +1614,7 @@ function TaskDetailDrawer({
 
   const downloadAttachment = async (attachmentId: string, name: string) => {
     try {
-      const response = await fetch(taskAttachmentDownloadUrl(attachmentId));
-      if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
-      const blob = await response.blob();
+      const blob = await downloadTaskAttachment(attachmentId);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -1696,7 +1714,8 @@ function TaskDetailDrawer({
               <button
                 className="task-acceptance-edit"
                 type="button"
-                title="编辑验收标准"
+                title={canWrite ? "编辑验收标准" : "没有项目写权限"}
+                disabled={!canWrite}
                 onClick={() => setEditingAcceptance(true)}
               >
                 <Edit3 size={12} />
@@ -1720,6 +1739,7 @@ function TaskDetailDrawer({
               <button
                 className="pm-btn secondary"
                 type="button"
+                disabled={!canWrite}
                 onClick={() => setEditingDependencies(true)}
               >
                 <Edit3 size={12} />
@@ -1799,7 +1819,9 @@ function TaskDetailDrawer({
               className="pm-btn primary"
               type="button"
               disabled={
-                dispatchMutation.isPending || unresolvedDependencies.length > 0
+                !canWrite ||
+                dispatchMutation.isPending ||
+                unresolvedDependencies.length > 0
               }
               title={
                 unresolvedDependencies.length === 0
@@ -1831,7 +1853,7 @@ function TaskDetailDrawer({
               <button
                 className="pm-btn secondary"
                 type="button"
-                disabled={reviewMutation.isPending}
+                disabled={!canApprove || reviewMutation.isPending}
                 onClick={() => reviewMutation.mutate("return")}
               >
                 <Undo2 size={14} />
@@ -1840,7 +1862,7 @@ function TaskDetailDrawer({
               <button
                 className="pm-btn primary"
                 type="button"
-                disabled={reviewMutation.isPending}
+                disabled={!canApprove || reviewMutation.isPending}
                 onClick={() => reviewMutation.mutate("approve")}
               >
                 <Check size={14} />
@@ -1874,12 +1896,16 @@ function TaskDetailDrawer({
                 <strong>任务附件</strong>
                 <span>{attachments.length} 个文件</span>
               </div>
-              <label className="pm-btn secondary task-upload-button">
+              <label
+                className="pm-btn secondary task-upload-button"
+                aria-disabled={!canWrite}
+              >
                 <Plus size={13} />
                 上传附件
                 <input
                   type="file"
                   hidden
+                  disabled={!canWrite}
                   onChange={(event) => {
                     const file = event.target.files?.[0];
                     event.target.value = "";
@@ -1913,6 +1939,7 @@ function TaskDetailDrawer({
                   </small>
                   <button
                     type="button"
+                    disabled={!canWrite}
                     title={attachment.archivedAt === null ? "归档" : "复原"}
                     aria-label={
                       attachment.archivedAt === null ? "归档附件" : "复原附件"
@@ -1975,6 +2002,7 @@ function TaskDetailDrawer({
                         <button
                           type="button"
                           title="回复这条评论"
+                          disabled={!canWrite}
                           onClick={() => setReplyingTo(item)}
                         >
                           回复
@@ -2015,12 +2043,17 @@ function TaskDetailDrawer({
                 value={comment}
                 onChange={(event) => setComment(event.target.value)}
                 placeholder="添加任务评论"
+                disabled={!canWrite}
               />
               <button
                 className="pm-btn primary"
                 type="submit"
                 title="发送评论"
-                disabled={comment.trim() === "" || commentMutation.isPending}
+                disabled={
+                  !canWrite ||
+                  comment.trim() === "" ||
+                  commentMutation.isPending
+                }
               >
                 {commentMutation.isPending ? (
                   <LoaderCircle className="spin" size={14} />

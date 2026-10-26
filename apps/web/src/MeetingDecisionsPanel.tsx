@@ -60,11 +60,15 @@ export function MeetingDecisionsPanel({
   meeting,
   members,
   agents,
+  canWrite,
+  canApprove,
   onOpenTask,
 }: {
   readonly meeting: MeetingDetail;
   readonly members: ProjectMember[];
   readonly agents: Agent[];
+  readonly canWrite: boolean;
+  readonly canApprove: boolean;
   readonly onOpenTask: (taskId: string, projectId: string) => void;
 }) {
   const queryClient = useQueryClient();
@@ -285,7 +289,7 @@ export function MeetingDecisionsPanel({
               <button
                 className="pm-btn secondary"
                 type="button"
-                disabled={saveDraftMutation.isPending}
+                disabled={!canWrite || saveDraftMutation.isPending}
                 onClick={() => saveDraftMutation.mutate()}
               >
                 {saveDraftMutation.isPending ? (
@@ -298,7 +302,11 @@ export function MeetingDecisionsPanel({
               <button
                 className="pm-btn primary"
                 type="button"
-                disabled={publishMutation.isPending || content.trim() === ""}
+                disabled={
+                  !canApprove ||
+                  publishMutation.isPending ||
+                  content.trim() === ""
+                }
                 onClick={() => publishMutation.mutate()}
               >
                 <Send size={13} />
@@ -334,6 +342,7 @@ export function MeetingDecisionsPanel({
               <VersionRow
                 version={version}
                 key={version.id}
+                canRevise={canApprove}
                 onRevise={() => {
                   setContent(version.content);
                   setDecisions(version.decisions.join("\n"));
@@ -439,6 +448,7 @@ export function MeetingDecisionsPanel({
               className="pm-btn primary"
               type="submit"
               disabled={
+                !canWrite ||
                 createActionMutation.isPending ||
                 actionTitle.trim() === "" ||
                 ownerActorId === ""
@@ -462,6 +472,7 @@ export function MeetingDecisionsPanel({
                 projectId={projectId}
                 item={item}
                 agentMembers={activeAgentMembers}
+                canWrite={canWrite}
                 onOpenTask={onOpenTask}
               />
             ))}
@@ -587,9 +598,11 @@ export function MeetingDecisionsPanel({
 
 function VersionRow({
   version,
+  canRevise,
   onRevise,
 }: {
   readonly version: MeetingMinutesVersion;
+  readonly canRevise: boolean;
   readonly onRevise: () => void;
 }) {
   return (
@@ -599,7 +612,7 @@ function VersionRow({
         <strong>{formatDateTime(version.publishedAt)}</strong>
         <small>{version.sourceMessageIds.length} 条来源消息</small>
       </div>
-      <button type="button" onClick={onRevise}>
+      <button type="button" disabled={!canRevise} onClick={onRevise}>
         修订
       </button>
     </div>
@@ -611,12 +624,14 @@ function ActionItemCard({
   projectId,
   item,
   agentMembers,
+  canWrite,
   onOpenTask,
 }: {
   readonly meetingId: string;
   readonly projectId: string;
   readonly item: MeetingActionItem;
   readonly agentMembers: ProjectMember[];
+  readonly canWrite: boolean;
   readonly onOpenTask: (taskId: string, projectId: string) => void;
 }) {
   const queryClient = useQueryClient();
@@ -710,6 +725,7 @@ function ActionItemCard({
             className="pm-btn primary"
             type="button"
             disabled={
+              !canWrite ||
               convertMutation.isPending ||
               assigneeAgentId === "" ||
               item.status === "cancelled"
@@ -728,7 +744,7 @@ function ActionItemCard({
               className="pm-icon-btn"
               type="button"
               title="取消行动项"
-              disabled={cancelMutation.isPending}
+              disabled={!canWrite || cancelMutation.isPending}
               onClick={() => cancelMutation.mutate()}
             >
               <X size={13} />

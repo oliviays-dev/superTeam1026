@@ -88,10 +88,18 @@ export class ProjectRepository {
     this.authorization = authorization ?? new AuthorizationRepository(database);
   }
 
-  async list(): Promise<Project[]> {
-    const result = await this.database.query<ProjectRow>(
-      "SELECT * FROM projects ORDER BY updated_at DESC",
-    );
+  async list(projectIds?: readonly string[]): Promise<Project[]> {
+    const result =
+      projectIds === undefined
+        ? await this.database.query<ProjectRow>(
+            "SELECT * FROM projects ORDER BY updated_at DESC",
+          )
+        : await this.database.query<ProjectRow>(
+            `SELECT * FROM projects
+             WHERE id = ANY($1::uuid[])
+             ORDER BY updated_at DESC`,
+            [projectIds],
+          );
     return result.rows.map(projectFromRow);
   }
 
@@ -388,12 +396,22 @@ export class TaskRepository {
     ) AS depends_on
   FROM tasks AS task`;
 
-  async list(projectId?: string): Promise<Task[]> {
+  async list(
+    projectId?: string,
+    readableProjectIds?: readonly string[],
+  ): Promise<Task[]> {
     const result =
       projectId === undefined
-        ? await this.database.query<TaskRow>(
-            `${this.selectSql} ORDER BY task.updated_at DESC`,
-          )
+        ? readableProjectIds === undefined
+          ? await this.database.query<TaskRow>(
+              `${this.selectSql} ORDER BY task.updated_at DESC`,
+            )
+          : await this.database.query<TaskRow>(
+              `${this.selectSql}
+               WHERE task.project_id = ANY($1::uuid[])
+               ORDER BY task.updated_at DESC`,
+              [readableProjectIds],
+            )
         : await this.database.query<TaskRow>(
             `${this.selectSql}
              WHERE task.project_id = $1
@@ -1802,7 +1820,10 @@ export class PlatformRepositories {
     this.directChats = new DirectChatRepository(database);
     this.meetingDecisions = new MeetingDecisionsRepository(database);
     this.workbench = new WorkbenchRepository(database);
-    this.workbenchReports = new WorkbenchReportsRepository(database);
+    this.workbenchReports = new WorkbenchReportsRepository(
+      database,
+      this.authorization,
+    );
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
     this.runtimeEffects = new RuntimeEffectRepository(database);
     this.traces = new RuntimeTraceRepository(database);

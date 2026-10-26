@@ -28,6 +28,7 @@ import { ProjectTemplatesView } from "./ProjectTemplatesView.js";
 import { RuntimesView } from "./RuntimesView.js";
 import {
   ApiRequestError,
+  getProjectCapability,
   getViewerCapabilities,
   listAllAgents,
   listProjects,
@@ -101,6 +102,12 @@ export function App() {
   const [theme, setTheme] = useState<Theme>(initialTheme);
   const [leftOpen, setLeftOpen] = useState(() => window.innerWidth >= 760);
   const selectedProjectId = projectId || projectsQuery.data?.[0]?.id || "";
+  const capabilityQuery = useQuery({
+    queryKey: ["project-capability", selectedProjectId, sessionVersion],
+    queryFn: () => getProjectCapability(selectedProjectId),
+    enabled: selectedProjectId !== "",
+  });
+  const projectCapability = capabilityQuery.data;
   const consumeInitialTask = useCallback(() => setTaskId(""), []);
   const consumeInitialMeeting = useCallback(() => setMeetingId(""), []);
 
@@ -419,6 +426,7 @@ export function App() {
             canManageTemplates={
               viewerQuery.data?.canManageProjectTemplates ?? false
             }
+            capability={projectCapability}
             onOpenTemplates={() => setView("project-templates")}
             {...(projectReportId === undefined
               ? {}
@@ -441,6 +449,7 @@ export function App() {
             }}
             initialTaskId={taskId}
             onInitialTaskConsumed={consumeInitialTask}
+            capability={projectCapability}
           />
         )}
         {view === "workflows" && (
@@ -452,6 +461,7 @@ export function App() {
               setProjectId(nextProjectId);
               setTaskId("");
             }}
+            capability={projectCapability}
             {...(workflowInstanceId === ""
               ? {}
               : { initialInstanceId: workflowInstanceId })}
@@ -470,6 +480,7 @@ export function App() {
             initialMeetingId={meetingId}
             onInitialMeetingConsumed={consumeInitialMeeting}
             onOpenTask={openTask}
+            capability={projectCapability}
           />
         )}
         {view === "agents" && <AgentsView />}

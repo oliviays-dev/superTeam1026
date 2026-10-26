@@ -68,6 +68,7 @@ import type {
   MemoryTopic,
   PlatformRunEvent,
   Project,
+  ProjectCapability,
   ProjectMember,
   ProjectRole,
   ProjectTemplate,
@@ -226,6 +227,12 @@ export async function currentPrincipal(): Promise<AuthenticatedPrincipal> {
 
 export async function listProjects(): Promise<Project[]> {
   return (await request<ListResponse<Project>>("/projects")).items;
+}
+
+export function getProjectCapability(
+  projectId: string,
+): Promise<ProjectCapability> {
+  return request(`/projects/${projectId}/capability`);
 }
 
 export function createProject(
@@ -668,8 +675,10 @@ export function archiveTaskAttachment(
   );
 }
 
-export function taskAttachmentDownloadUrl(attachmentId: string): string {
-  return `${API_BASE}/attachments/${attachmentId}/download`;
+export async function downloadTaskAttachment(
+  attachmentId: string,
+): Promise<Blob> {
+  return requestBlob(`/attachments/${attachmentId}/download`);
 }
 
 export function dispatchTask(
@@ -722,8 +731,8 @@ export async function listArtifacts(runId: string): Promise<Artifact[]> {
     .items;
 }
 
-export function artifactDownloadUrl(artifactId: string): string {
-  return `${API_BASE}/artifacts/${artifactId}/download`;
+export async function downloadArtifact(artifactId: string): Promise<Blob> {
+  return requestBlob(`/artifacts/${artifactId}/download`);
 }
 
 export function listMemory(projectId: string): Promise<MemoryListResponse> {
@@ -1421,12 +1430,85 @@ export function getMeetingTraceability(
   return request(`/meetings/${meetingId}/traceability`);
 }
 
-export function subscribeToRun(
+async function requestBlob(path: string): Promise<Blob> {
+  const headers = new Headers();
+  const token = authToken();
+  if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}${path}`, { headers });
+  if (!response.ok) {
+    if (response.status === 401) clearAuthToken();
+    throw new ApiRequestError(
+      `Request failed: ${response.status}`,
+      "request_failed",
+      response.status,
+    );
+  }
+  return response.blob();
+}
+
+export interface RunStreamHandlers {
+  readonly onEvent: (event: PlatformRunEvent) => void;
+  readonly onDelta: (delta: RunDelta) => void;
+}
+
+export async function streamRun(
   runId: string,
   afterSeq: number,
   afterDeltaSeq: number,
-): EventSource {
-  return new EventSource(
+  handlers: RunStreamHandlers,
+  signal: AbortSignal,
+): Promise<void> {
+  const headers = new Headers({ accept: "text/event-stream" });
+  const token = authToken();
+  if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
+  const response = await fetch(
     `${API_BASE}/runs/${runId}/stream?afterSeq=${afterSeq}&afterDeltaSeq=${afterDeltaSeq}`,
+    { headers, signal },
   );
+  if (!response.ok) {
+    if (response.status === 401) clearAuthToken();
+    throw new ApiRequestError(
+      `Run stream failed: ${response.status}`,
+      "request_failed",
+      response.status,
+    );
+  }
+  if (response.body === null) return;
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const dispatch = (frame: string) => {
+    if (frame.trim() === "") return;
+    let eventName = "message";
+    const data: string[] = [];
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        data.push(line.slice("data:".length).trimStart());
+      }
+    }
+    if (data.length === 0) return;
+    const payload = data.join("\n");
+    if (eventName === "run.event") {
+      handlers.onEvent(JSON.parse(payload) as PlatformRunEvent);
+    } else if (eventName === "run.delta") {
+      handlers.onDelta(JSON.parse(payload) as RunDelta);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      dispatch(buffer.slice(0, boundary));
+      buffer = buffer.slice(boundary + 2);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+  buffer += decoder.decode();
+  dispatch(buffer);
 }

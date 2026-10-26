@@ -21,6 +21,7 @@ export interface RouteAuthorizationInput {
   readonly route: string;
   readonly principal: AuthorizedRequestPrincipal;
   readonly params: Record<string, unknown>;
+  readonly query?: Record<string, unknown> | undefined;
   readonly body?: unknown;
 }
 
@@ -52,7 +53,6 @@ const SELF_WRITE_ROUTES = new Set([
   "POST /api/v1/workbench/brief/refresh",
   "POST /api/v1/workbench/brief/:briefId/read",
   "PATCH /api/v1/workbench/brief/settings",
-  "POST /api/v1/workbench/follows",
   "POST /api/v1/workflows/validate",
 ]);
 
@@ -69,6 +69,16 @@ const PLATFORM_ACCESS_WRITE_PREFIXES = [
   "/api/v1/agents",
   "/api/v1/runtimes",
 ] as const;
+
+const PROJECT_QUERY_READ_ROUTES = new Set([
+  "/api/v1/tasks",
+  "/api/v1/workflows",
+  "/api/v1/workflow-instances",
+  "/api/v1/workflow-audit",
+  "/api/v1/meetings",
+  "/api/v1/workbench/supply-exceptions",
+  "/api/v1/workbench/supplier-risks",
+]);
 
 function parameter(
   params: Record<string, unknown>,
@@ -233,7 +243,89 @@ function resourceRequirement(
       ? undefined
       : { projectId, permission: "write" };
   }
+  if (route === "/api/v1/workbench/follows" && method === "POST") {
+    const projectId = bodyProjectId(body);
+    return projectId === undefined
+      ? undefined
+      : { projectId, permission: "read" };
+  }
   if (SELF_WRITE_ROUTES.has(`${method} ${route}`)) return "self";
+  return undefined;
+}
+
+function readProjectRequirement(
+  method: string,
+  route: string,
+  params: Record<string, unknown>,
+  query: Record<string, unknown>,
+): ProjectRouteRequirement | undefined {
+  if (method !== "GET" && method !== "HEAD") return undefined;
+  const directProjectId = parameter(params, "projectId");
+  if (directProjectId !== undefined) {
+    return { projectId: directProjectId, permission: "read" };
+  }
+  if (PROJECT_QUERY_READ_ROUTES.has(route)) {
+    const queryProjectId = parameter(query, "projectId");
+    if (queryProjectId !== undefined) {
+      return { projectId: queryProjectId, permission: "read" };
+    }
+  }
+  if (route.startsWith("/api/v1/tasks/:id")) {
+    return {
+      resourceType: "task",
+      resourceId: parameter(params, "id"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/attachments/:attachmentId")) {
+    return {
+      resourceType: "task-attachment",
+      resourceId: parameter(params, "attachmentId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/runs/:runId")) {
+    return {
+      resourceType: "run",
+      resourceId: parameter(params, "runId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/traces/:traceId")) {
+    return {
+      resourceType: "trace",
+      resourceId: parameter(params, "traceId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/artifacts/:artifactId")) {
+    return {
+      resourceType: "artifact",
+      resourceId: parameter(params, "artifactId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/workflow-instances/:instanceId")) {
+    return {
+      resourceType: "workflow-instance",
+      resourceId: parameter(params, "instanceId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/workflows/:workflowId")) {
+    return {
+      resourceType: "workflow",
+      resourceId: parameter(params, "workflowId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/meetings/:meetingId")) {
+    return {
+      resourceType: "meeting",
+      resourceId: parameter(params, "meetingId"),
+      permission: "read",
+    };
+  }
   return undefined;
 }
 
@@ -318,11 +410,81 @@ export class AuthorizationService {
     input: RouteAuthorizationInput,
   ): Promise<RouteAuthorizationResult> {
     const method = input.method.toUpperCase();
-    if (!["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
-      return { required: false };
-    }
     const action = actionFor(method, input.route);
     if (input.route === "/api/v1/auth/login") {
+      return { required: false };
+    }
+
+    if (method === "GET" || method === "HEAD") {
+      const requirement = readProjectRequirement(
+        method,
+        input.route,
+        input.params,
+        input.query ?? {},
+      );
+      if (requirement === undefined) return { required: false };
+      if (requirement.projectId === undefined) {
+        const resourceId = requirement.resourceId;
+        if (resourceId === undefined) {
+          return {
+            required: true,
+            allowed: false,
+            reason: "resource_id_required",
+          };
+        }
+        const resourceType = requirement.resourceType;
+        if (resourceType === undefined) return { required: false };
+        const projectIds = await this.repository.projectIdsForResource(
+          resourceType,
+          resourceId,
+        );
+        if (projectIds === undefined || projectIds.length === 0) {
+          return { required: false };
+        }
+        let firstDecision: ScopeAuthorizationDecision | undefined;
+        for (const projectId of projectIds) {
+          const decision = await this.authorizeProject({
+            principal: input.principal,
+            projectId,
+            permission: "read",
+            action,
+            requestId: input.requestId,
+          });
+          firstDecision ??= decision;
+          if (!decision.allowed) {
+            return {
+              required: true,
+              allowed: false,
+              decision,
+              ...(decision.reason === undefined
+                ? {}
+                : { reason: decision.reason }),
+            };
+          }
+        }
+        return {
+          required: true,
+          allowed: true,
+          ...(firstDecision === undefined ? {} : { decision: firstDecision }),
+        };
+      }
+      const projectId = requirement.projectId;
+      const decision = await this.authorizeProject({
+        principal: input.principal,
+        projectId,
+        permission: "read",
+        action,
+        requestId: input.requestId,
+      });
+      return {
+        required: true,
+        allowed: decision.allowed,
+        decision,
+        ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      };
+    }
+
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
       return { required: false };
     }
 

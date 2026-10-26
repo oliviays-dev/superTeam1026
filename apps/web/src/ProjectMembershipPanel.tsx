@@ -1,6 +1,7 @@
 import type {
   Agent,
   CreateProjectMemberInput,
+  ProjectCapabilityFlags,
   ProjectMember,
   ProjectRole,
 } from "@pluginmax/contracts";
@@ -33,6 +34,7 @@ import {
 interface ProjectMembershipPanelProps {
   readonly projectId: string;
   readonly agents: Agent[];
+  readonly capabilities?: ProjectCapabilityFlags | undefined;
 }
 
 type MemberEditor = "new" | string | null;
@@ -45,6 +47,7 @@ function errorMessage(error: unknown, fallback: string): string {
 export function ProjectMembershipPanel({
   projectId,
   agents,
+  capabilities,
 }: ProjectMembershipPanelProps) {
   const queryClient = useQueryClient();
   const [memberEditor, setMemberEditor] = useState<MemberEditor>(null);
@@ -97,6 +100,8 @@ export function ProjectMembershipPanel({
   const activeMemberCount = members.filter(
     (member) => member.status === "active",
   ).length;
+  const canManageMembers = capabilities?.manage_members ?? false;
+  const canManageRoles = capabilities?.manage_roles ?? false;
 
   return (
     <section className="project-membership">
@@ -111,6 +116,7 @@ export function ProjectMembershipPanel({
           <button
             className="pm-btn secondary"
             type="button"
+            disabled={!canManageRoles}
             onClick={() => setRoleEditor("new")}
           >
             <Shield size={14} />
@@ -120,6 +126,7 @@ export function ProjectMembershipPanel({
             className="pm-btn primary"
             type="button"
             title="添加项目成员"
+            disabled={!canManageMembers}
             onClick={() => setMemberEditor("new")}
           >
             <Plus size={14} />
@@ -187,6 +194,7 @@ export function ProjectMembershipPanel({
                   className="pm-icon-btn"
                   type="button"
                   title="编辑成员"
+                  disabled={!canManageMembers}
                   onClick={() => setMemberEditor(member.id)}
                 >
                   <Edit3 size={14} />
@@ -195,7 +203,9 @@ export function ProjectMembershipPanel({
                   className="pm-icon-btn"
                   type="button"
                   title={member.owner ? "Owner 不可移除" : "移除成员"}
-                  disabled={member.owner || memberDelete.isPending}
+                  disabled={
+                    !canManageMembers || member.owner || memberDelete.isPending
+                  }
                   onClick={() => {
                     if (
                       window.confirm(`确认将 ${member.name} 从项目中移除？`)
@@ -241,6 +251,7 @@ export function ProjectMembershipPanel({
                       className="pm-icon-btn"
                       type="button"
                       title="编辑角色"
+                      disabled={!canManageRoles}
                       onClick={() => setRoleEditor(role.id)}
                     >
                       <Edit3 size={13} />
@@ -251,7 +262,11 @@ export function ProjectMembershipPanel({
                       title={
                         assignedCount === 0 ? "删除角色" : "角色仍被成员使用"
                       }
-                      disabled={assignedCount > 0 || roleDelete.isPending}
+                      disabled={
+                        !canManageRoles ||
+                        assignedCount > 0 ||
+                        roleDelete.isPending
+                      }
                       onClick={() => {
                         if (window.confirm(`确认删除角色「${role.name}」？`)) {
                           roleDelete.mutate(role.id);

@@ -83,8 +83,9 @@ test("multi-Principal project authorization and immediate Grant revocation", asy
     const adminPage = await login(adminContext, fixture.admin);
     const outsiderPage = await login(outsiderContext, fixture.outsider);
 
+    const projectName = `RBAC E2E ${Date.now()}`;
     const created = await api(ownerPage, "POST", "/projects", {
-      name: `RBAC E2E ${Date.now()}`,
+      name: projectName,
       description: "Playwright multi-Principal authorization",
     });
     expect(created.status).toBe(201);
@@ -114,6 +115,51 @@ test("multi-Principal project authorization and immediate Grant revocation", asy
     );
     expect(added.status).toBe(201);
     const memberId = added.body.id as string;
+
+    const otherProjectName = `RBAC Other ${Date.now()}`;
+    const otherProject = await api(ownerPage, "POST", "/projects", {
+      name: otherProjectName,
+      description: "Cross-project read isolation",
+    });
+    expect(otherProject.status).toBe(201);
+    const otherProjectId = otherProject.body.id as string;
+    const readableTask = await api(ownerPage, "POST", "/tasks", {
+      projectId,
+      title: "Readable E2E task",
+      description: "Member may read this task",
+    });
+    expect(readableTask.status).toBe(201);
+    const otherTask = await api(ownerPage, "POST", "/tasks", {
+      projectId: otherProjectId,
+      title: "Cross-project E2E task",
+      description: "Member must not read this task",
+    });
+    expect(otherTask.status).toBe(201);
+    const readableTaskId = readableTask.body.id as string;
+    const otherTaskId = otherTask.body.id as string;
+    expect(
+      (await api(memberPage, "GET", `/tasks/${readableTaskId}`)).status,
+    ).toBe(200);
+    expect((await api(memberPage, "GET", `/tasks/${otherTaskId}`)).status).toBe(
+      403,
+    );
+    expect((await api(adminPage, "GET", `/projects/${projectId}`)).status).toBe(
+      403,
+    );
+    const memberProjects = await api(memberPage, "GET", "/projects");
+    expect(memberProjects.status).toBe(200);
+    expect(
+      (memberProjects.body.items as Array<{ id: string }>).map(
+        (item) => item.id,
+      ),
+    ).toEqual([projectId]);
+    const memberTasks = await api(memberPage, "GET", "/tasks");
+    expect(memberTasks.status).toBe(200);
+    expect(
+      (memberTasks.body.items as Array<{ projectId: string }>).every(
+        (item) => item.projectId === projectId,
+      ),
+    ).toBe(true);
 
     const memberWrite = await api(
       memberPage,
@@ -146,6 +192,19 @@ test("multi-Principal project authorization and immediate Grant revocation", asy
       { permissions: ["read"] },
     );
     expect(permissionReduced.status).toBe(200);
+    await memberPage.reload();
+    await memberPage.getByRole("button", { name: "项目", exact: true }).click();
+    await expect(
+      memberPage.getByRole("button", { name: new RegExp(projectName) }).first(),
+    ).toBeVisible();
+    await expect(
+      memberPage.getByRole("button", {
+        name: new RegExp(otherProjectName),
+      }),
+    ).toHaveCount(0);
+    await expect(
+      memberPage.getByRole("button", { name: "项目设置" }),
+    ).toBeDisabled();
     const deniedAfterReduction = await api(
       memberPage,
       "PATCH",

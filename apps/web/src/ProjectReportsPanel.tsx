@@ -23,6 +23,7 @@ import {
 
 interface ProjectReportsPanelProps {
   readonly project: Project;
+  readonly canGenerate?: boolean | undefined;
   readonly initialReportId?: string;
   readonly onOpenSource: (
     source: WorkbenchSourceRef,
@@ -52,6 +53,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 export function ProjectReportsPanel({
   project,
+  canGenerate: capabilityCanGenerate,
   initialReportId,
   onOpenSource,
 }: ProjectReportsPanelProps) {
@@ -105,7 +107,10 @@ export function ProjectReportsPanel({
 
   const loading = reportsQuery.isLoading || detailQuery.isLoading;
   const error = reportsQuery.error ?? detailQuery.error;
-  const canGenerate = reports[0]?.canGenerate ?? project.status === "active";
+  const canGenerate =
+    capabilityCanGenerate ??
+    reports[0]?.canGenerate ??
+    project.status === "active";
   const readOnly = reports[0]?.readOnly ?? project.status === "archived";
   const grouped = useMemo(() => {
     const detail: ProjectReportDetail | undefined = detailQuery.data;

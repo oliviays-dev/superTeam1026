@@ -283,6 +283,17 @@ integration("authorization repository", () => {
         principalId: memberPrincipalId,
         authSource: "bearer",
         projectId,
+        permission: "read",
+      }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      grantSource: "grant",
+    });
+    await expect(
+      authorization.authorizeProject({
+        principalId: memberPrincipalId,
+        authSource: "bearer",
+        projectId,
         permission: "write",
       }),
     ).resolves.toMatchObject({
@@ -446,6 +457,18 @@ integration("authorization repository", () => {
         permission: "read",
       }),
     ).resolves.toMatchObject({ reason: "principal_not_active" });
+    await database.query(
+      `UPDATE principals
+       SET status = 'active', status_authority = 'account', updated_at = NOW()
+       WHERE id = $1`,
+      [memberPrincipalId],
+    );
+    await database.query(
+      `UPDATE accounts
+       SET status = 'active', updated_at = NOW()
+       WHERE id = $1`,
+      [memberAccountId],
+    );
   });
 
   it("applies the same explicit project Grant model to AI Principals", async () => {
@@ -472,6 +495,17 @@ integration("authorization repository", () => {
       },
       ownerPrincipalId,
     );
+    await expect(
+      authorization.authorizeProject({
+        principalId: aiPrincipalId,
+        authSource: "bearer",
+        projectId,
+        permission: "read",
+      }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      grantSource: "grant",
+    });
     await expect(
       authorization.authorizeProject({
         principalId: aiPrincipalId,
@@ -512,7 +546,7 @@ integration("authorization repository", () => {
         principalId: aiPrincipalId,
         authSource: "bearer",
         projectId: otherProjectId,
-        permission: "write",
+        permission: "read",
       }),
     ).resolves.toMatchObject({
       allowed: false,
@@ -626,6 +660,138 @@ integration("authorization repository", () => {
     ).resolves.toMatchObject({
       principal: { id: firstPrincipalId },
       resolvedBy: "auth-user",
+    });
+  });
+
+  it("projects capabilities, owner sources and readable project ids", async () => {
+    const capabilityProjectId = randomUUID();
+    const readerPrincipalId = `principal-human-reader-${suffix}`;
+    await insertPrincipal({ id: readerPrincipalId, kind: "human" });
+    await insertProject(capabilityProjectId, "capability");
+    const readerRole = await memberships.createRole(capabilityProjectId, {
+      code: "READER",
+      name: `Reader ${suffix}`,
+      description: "Read-only capability fixture",
+      permissions: ["read"],
+    });
+    await memberships.createMember(
+      capabilityProjectId,
+      {
+        kind: "human",
+        actorId: readerPrincipalId,
+        principalId: readerPrincipalId,
+        name: "Read-only Principal",
+        responsibility: "Reads capability fixtures",
+        roleIds: [readerRole.id],
+      },
+      ownerPrincipalId,
+    );
+
+    await expect(
+      authorization.getProjectCapability({
+        principalId: readerPrincipalId,
+        authSource: "local-development",
+        projectId: capabilityProjectId,
+      }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      capability: {
+        projectId: capabilityProjectId,
+        principalId: readerPrincipalId,
+        capabilities: {
+          read: true,
+          write: false,
+          approve: false,
+          manage_members: false,
+          manage_roles: false,
+        },
+        ownerSources: {
+          legacy: false,
+          grant: false,
+          consistent: true,
+        },
+        grantSource: "grant",
+      },
+    });
+    await expect(
+      authorization.getProjectCapability({
+        principalId: ownerPrincipalId,
+        authSource: "local-development",
+        projectId,
+      }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      capability: {
+        capabilities: {
+          read: true,
+          write: true,
+          approve: true,
+          manage_members: true,
+          manage_roles: true,
+        },
+        ownerSources: {
+          legacy: true,
+          grant: true,
+          consistent: true,
+        },
+      },
+    });
+    await expect(
+      authorization.listReadableProjectIds({
+        principalId: readerPrincipalId,
+        authSource: "local-development",
+      }),
+    ).resolves.toContain(capabilityProjectId);
+    await expect(
+      authorization.listReadableProjectIds({
+        principalId: ownerPrincipalId,
+        authSource: "local-development",
+      }),
+    ).resolves.not.toContain(capabilityProjectId);
+    await expect(
+      authorization.listReadableProjectIds({
+        principalId: outsiderPrincipalId,
+        authSource: "local-development",
+      }),
+    ).resolves.toEqual([]);
+    await database.query(
+      "UPDATE projects SET status = 'archived', updated_at = NOW() WHERE id = $1",
+      [capabilityProjectId],
+    );
+    await expect(
+      authorization.getProjectCapability({
+        principalId: readerPrincipalId,
+        authSource: "local-development",
+        projectId: capabilityProjectId,
+      }),
+    ).resolves.toMatchObject({
+      allowed: true,
+      capability: {
+        capabilities: {
+          read: true,
+          write: false,
+          approve: false,
+          manage_members: false,
+          manage_roles: false,
+        },
+      },
+    });
+    await expect(
+      authorization.listReadableProjectIds({
+        principalId: readerPrincipalId,
+        authSource: "local-development",
+      }),
+    ).resolves.toContain(capabilityProjectId);
+    await expect(
+      authorization.authorizeProject({
+        principalId: readerPrincipalId,
+        authSource: "local-development",
+        projectId: capabilityProjectId,
+        permission: "write",
+      }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: "project_archived",
     });
   });
 });

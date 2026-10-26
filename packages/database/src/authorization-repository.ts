@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient, QueryResultRow } from "pg";
-import type { ProjectRole } from "@pluginmax/contracts";
+import type { ProjectCapability, ProjectRole } from "@pluginmax/contracts";
 import type { Database } from "./database.js";
 
 export const AUTHORIZATION_PERMISSIONS = [
@@ -129,13 +129,28 @@ export interface ProjectAuthorizationReport {
   readonly members: readonly ProjectMemberAuthorizationReport[];
 }
 
+export interface ProjectCapabilityDecision {
+  readonly allowed: boolean;
+  readonly reason?: AuthorizationDenialReason;
+  readonly principal: AuthorizationPrincipal | null;
+  readonly capability?: ProjectCapability;
+}
+
 export type AuthorizationResourceType =
   | "task"
   | "run"
   | "workflow"
   | "workflow-instance"
   | "meeting"
-  | "task-attachment";
+  | "task-attachment"
+  | "artifact"
+  | "trace"
+  | "memory-topic"
+  | "memory-claim"
+  | "report"
+  | "handoff"
+  | "agent-episode"
+  | "meeting-action-item";
 
 export class AuthorizationRepositoryError extends Error {
   constructor(
@@ -197,6 +212,17 @@ interface ProjectMemberRolePermissionRow {
   project_member_id: string;
   role_id: string;
   permissions: ProjectRole["permissions"];
+}
+
+interface ProjectAccessEvaluation {
+  readonly principal: AuthorizationPrincipal | null;
+  readonly reason?: AuthorizationDenialReason;
+  readonly projectStatus?: "active" | "archived";
+  readonly member?: ProjectMemberAuthorizationRow;
+  readonly grants: readonly ProjectGrantRow[];
+  readonly effectivePermissions: readonly ScopedAuthorizationPermission[];
+  readonly grantSource: ScopeAuthorizationDecision["grantSource"];
+  readonly ownerSources?: ProjectOwnerSourceReport;
 }
 
 interface QueryExecutor {
@@ -623,50 +649,80 @@ export class AuthorizationRepository {
     };
   }
 
-  async projectIdForResource(
+  async projectIdsForResource(
     resourceType: AuthorizationResourceType,
     resourceId: string,
-  ): Promise<string | null | undefined> {
-    const queries: Record<
-      AuthorizationResourceType,
-      { readonly sql: string; readonly nullable: boolean }
-    > = {
-      task: {
-        sql: "SELECT project_id FROM tasks WHERE id = $1",
-        nullable: false,
-      },
-      run: {
-        sql: "SELECT project_id FROM runs WHERE id = $1",
-        nullable: true,
-      },
-      workflow: {
-        sql: "SELECT project_id FROM workflow_definitions WHERE id = $1",
-        nullable: false,
-      },
-      "workflow-instance": {
-        sql: "SELECT project_id FROM workflow_instances WHERE id = $1",
-        nullable: false,
-      },
-      meeting: {
-        sql: "SELECT project_id FROM meetings WHERE id = $1",
-        nullable: false,
-      },
-      "task-attachment": {
-        sql: `SELECT task.project_id
-          FROM task_attachments AS attachment
-          JOIN tasks AS task ON task.id = attachment.task_id
-          WHERE attachment.id = $1`,
-        nullable: false,
-      },
-    };
+  ): Promise<string[] | undefined> {
+    const queries: Record<AuthorizationResourceType, { readonly sql: string }> =
+      {
+        task: {
+          sql: "SELECT project_id FROM tasks WHERE id = $1",
+        },
+        run: {
+          sql: "SELECT project_id FROM runs WHERE id = $1",
+        },
+        workflow: {
+          sql: "SELECT project_id FROM workflow_definitions WHERE id = $1",
+        },
+        "workflow-instance": {
+          sql: "SELECT project_id FROM workflow_instances WHERE id = $1",
+        },
+        meeting: {
+          sql: "SELECT project_id FROM meetings WHERE id = $1",
+        },
+        "task-attachment": {
+          sql: "SELECT project_id FROM task_attachments WHERE id = $1",
+        },
+        artifact: {
+          sql: "SELECT project_id FROM artifacts WHERE id = $1",
+        },
+        trace: {
+          sql: "SELECT project_id FROM runs WHERE trace_id = $1",
+        },
+        "memory-topic": {
+          sql: "SELECT project_id FROM memory_topics WHERE id = $1",
+        },
+        "memory-claim": {
+          sql: "SELECT project_id FROM memory_claims WHERE id = $1",
+        },
+        report: {
+          sql: "SELECT project_id FROM project_reports WHERE id = $1",
+        },
+        handoff: {
+          sql: "SELECT project_id FROM handoff_cards WHERE id = $1",
+        },
+        "agent-episode": {
+          sql: "SELECT project_id FROM agent_episodes WHERE id = $1",
+        },
+        "meeting-action-item": {
+          sql: "SELECT project_id FROM meeting_action_items WHERE id = $1",
+        },
+      };
     const query = queries[resourceType];
     const result = await this.database.query<{ project_id: string | null }>(
       query.sql,
       [resourceId],
     );
-    if (result.rows[0] === undefined) return undefined;
-    const projectId = result.rows[0].project_id;
-    return projectId === null ? (query.nullable ? null : undefined) : projectId;
+    if (result.rows.length === 0) return undefined;
+    return [
+      ...new Set(
+        result.rows
+          .map((row) => row.project_id)
+          .filter((projectId): projectId is string => projectId !== null),
+      ),
+    ];
+  }
+
+  async projectIdForResource(
+    resourceType: AuthorizationResourceType,
+    resourceId: string,
+  ): Promise<string | null | undefined> {
+    const projectIds = await this.projectIdsForResource(
+      resourceType,
+      resourceId,
+    );
+    if (projectIds === undefined) return undefined;
+    return projectIds[0] ?? null;
   }
 
   private async projectMember(
@@ -720,12 +776,24 @@ export class AuthorizationRepository {
     return result.rows;
   }
 
-  async authorizeProject(input: {
+  private scopedPermissions(
+    permissions: readonly string[],
+  ): ScopedAuthorizationPermission[] {
+    const projectPermissions = new Set<string>(PROJECT_OWNER_PERMISSIONS);
+    return [
+      ...new Set(
+        permissions.filter((permission): permission is string =>
+          projectPermissions.has(permission),
+        ),
+      ),
+    ] as ScopedAuthorizationPermission[];
+  }
+
+  private async evaluateProject(input: {
     readonly principalId: string;
     readonly authSource: "bearer" | "local-development";
     readonly projectId: string;
-    readonly permission: ScopedAuthorizationPermission;
-  }): Promise<ScopeAuthorizationDecision> {
+  }): Promise<ProjectAccessEvaluation> {
     const resolved = await this.principalByExactId(
       this.database,
       input.principalId,
@@ -733,13 +801,9 @@ export class AuthorizationRepository {
     const denial = this.principalDenial(resolved ?? null, input.authSource);
     if (denial !== undefined || resolved === undefined) {
       return {
-        allowed: false,
-        reason: denial ?? "principal_not_found",
         principal: resolved ?? null,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: [],
+        reason: denial ?? "principal_not_found",
+        grants: [],
         effectivePermissions: [],
         grantSource: "none",
       };
@@ -747,33 +811,16 @@ export class AuthorizationRepository {
     const project = await this.database.query<{
       status: "active" | "archived";
     }>("SELECT status FROM projects WHERE id = $1", [input.projectId]);
-    if (project.rows[0] === undefined) {
+    const projectRow = project.rows[0];
+    if (projectRow === undefined) {
       return {
-        allowed: false,
+        principal: resolved,
         reason: "project_not_found",
-        principal: resolved,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: [],
+        grants: [],
         effectivePermissions: [],
         grantSource: "none",
       };
     }
-    if (project.rows[0].status !== "active") {
-      return {
-        allowed: false,
-        reason: "project_archived",
-        principal: resolved,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: [],
-        effectivePermissions: [],
-        grantSource: "none",
-      };
-    }
-
     const aliases = await this.aliasesForPrincipal(this.database, resolved.id);
     const memberResult = await this.projectMember(
       input.projectId,
@@ -782,16 +829,13 @@ export class AuthorizationRepository {
     );
     if (memberResult.kind !== "found") {
       return {
-        allowed: false,
+        principal: resolved,
         reason:
           memberResult.kind === "ambiguous"
             ? "membership_ambiguous"
             : "membership_missing",
-        principal: resolved,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: [],
+        projectStatus: projectRow.status,
+        grants: [],
         effectivePermissions: [],
         grantSource: "none",
       };
@@ -799,16 +843,12 @@ export class AuthorizationRepository {
     const member = memberResult.member;
     if (member.status !== "active") {
       return {
-        allowed: false,
-        reason: "membership_inactive",
         principal: resolved,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: [],
+        reason: "membership_inactive",
+        projectStatus: projectRow.status,
+        member,
+        grants: [],
         effectivePermissions: [],
-        membershipId: member.id,
-        membershipStatus: member.status,
         grantSource: "none",
       };
     }
@@ -828,67 +868,47 @@ export class AuthorizationRepository {
     const ownerGrantHistory = history.some(
       (grant) => grant.role_key === "PROJECT_OWNER",
     );
-    const matching =
-      ownerGrant === undefined
-        ? grants.filter((grant) => grant.permissions.includes(input.permission))
-        : [ownerGrant];
     const ownerSources = {
       legacy: member.is_owner,
       grant: ownerGrant !== undefined,
       consistent: member.is_owner === (ownerGrant !== undefined),
     };
 
-    if (matching.length > 0) {
+    if (ownerGrant !== undefined) {
       return {
-        allowed: true,
         principal: resolved,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: matching.map((grant) => grant.id),
-        effectivePermissions:
-          ownerGrant === undefined
-            ? [...new Set(grants.flatMap((grant) => grant.permissions))]
-            : [...PROJECT_OWNER_PERMISSIONS],
-        membershipId: member.id,
-        membershipStatus: member.status,
-        ownerSources,
+        projectStatus: projectRow.status,
+        member,
+        grants,
+        effectivePermissions: [...PROJECT_OWNER_PERMISSIONS],
         grantSource: "grant",
+        ownerSources,
       };
     }
 
     if (ownerGrantHistory) {
       return {
-        allowed: false,
-        reason: grants.length === 0 ? "grant_missing" : "permission_missing",
         principal: resolved,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: [],
-        effectivePermissions: [
-          ...new Set(grants.flatMap((grant) => grant.permissions)),
-        ],
-        membershipId: member.id,
-        membershipStatus: member.status,
+        projectStatus: projectRow.status,
+        member,
+        grants,
+        effectivePermissions: this.scopedPermissions(
+          grants.flatMap((grant) => grant.permissions),
+        ),
+        grantSource: grants.length === 0 ? "none" : "grant",
         ownerSources,
-        grantSource: "none",
       };
     }
 
     if (member.is_owner) {
       return {
-        allowed: true,
         principal: resolved,
-        scopeType: "project",
-        scopeId: input.projectId,
-        permission: input.permission,
-        grantIds: [],
-        effectivePermissions: [input.permission],
-        membershipId: member.id,
-        membershipStatus: member.status,
-        ownerSources,
+        projectStatus: projectRow.status,
+        member,
+        grants,
+        effectivePermissions: [...PROJECT_OWNER_PERMISSIONS],
         grantSource: "legacy-owner",
+        ownerSources,
       };
     }
 
@@ -905,46 +925,208 @@ export class AuthorizationRepository {
              AND role.project_id = $2`,
           [member.id, input.projectId],
         );
-      if (
-        legacyRoles.rows.some((role) =>
-          role.permissions.includes(input.permission),
-        )
-      ) {
+      if (legacyRoles.rows.length > 0) {
         return {
-          allowed: true,
           principal: resolved,
-          scopeType: "project",
-          scopeId: input.projectId,
-          permission: input.permission,
-          grantIds: [],
-          effectivePermissions: [
-            ...new Set(
-              legacyRoles.rows.flatMap((role) => role.permissions as string[]),
-            ),
-          ],
-          membershipId: member.id,
-          membershipStatus: member.status,
-          ownerSources,
+          projectStatus: projectRow.status,
+          member,
+          grants,
+          effectivePermissions: this.scopedPermissions(
+            legacyRoles.rows.flatMap((role) => role.permissions as string[]),
+          ),
           grantSource: "legacy-role",
+          ownerSources,
         };
       }
     }
 
     return {
-      allowed: false,
-      reason: grants.length === 0 ? "grant_missing" : "permission_missing",
       principal: resolved,
+      projectStatus: projectRow.status,
+      member,
+      grants,
+      effectivePermissions: this.scopedPermissions(
+        grants.flatMap((grant) => grant.permissions),
+      ),
+      grantSource: grants.length === 0 ? "none" : "grant",
+      ownerSources,
+    };
+  }
+
+  async getProjectCapability(input: {
+    readonly principalId: string;
+    readonly authSource: "bearer" | "local-development";
+    readonly projectId: string;
+  }): Promise<ProjectCapabilityDecision> {
+    const evaluation = await this.evaluateProject(input);
+    if (evaluation.reason !== undefined) {
+      return {
+        allowed: false,
+        reason: evaluation.reason,
+        principal: evaluation.principal,
+      };
+    }
+    const allowedPermissions = new Set(evaluation.effectivePermissions);
+    const archived = evaluation.projectStatus === "archived";
+    const capability: ProjectCapability = {
+      projectId: input.projectId,
+      principalId: input.principalId,
+      capabilities: {
+        read: allowedPermissions.has("read"),
+        write: !archived && allowedPermissions.has("write"),
+        approve: !archived && allowedPermissions.has("approve"),
+        manage_members: !archived && allowedPermissions.has("manage_members"),
+        manage_roles: !archived && allowedPermissions.has("manage_roles"),
+      },
+      ownerSources: evaluation.ownerSources ?? {
+        legacy: false,
+        grant: false,
+        consistent: true,
+      },
+      effectivePermissions: archived
+        ? evaluation.effectivePermissions.filter(
+            (permission) => permission === "read",
+          )
+        : [...evaluation.effectivePermissions],
+      grantSource: evaluation.grantSource,
+      ...(evaluation.member === undefined
+        ? {}
+        : {
+            membershipId: evaluation.member.id,
+            membershipStatus: evaluation.member.status,
+          }),
+    };
+    return {
+      allowed: capability.capabilities.read,
+      ...(capability.capabilities.read
+        ? {}
+        : {
+            reason:
+              evaluation.grants.length === 0
+                ? ("grant_missing" as const)
+                : ("permission_missing" as const),
+          }),
+      principal: evaluation.principal,
+      capability,
+    };
+  }
+
+  async listReadableProjectIds(input: {
+    readonly principalId: string;
+    readonly authSource: "bearer" | "local-development";
+  }): Promise<string[]> {
+    const projects = await this.database.query<{ id: string }>(
+      "SELECT id FROM projects ORDER BY updated_at DESC",
+    );
+    const readable: string[] = [];
+    for (const project of projects.rows) {
+      const evaluation = await this.evaluateProject({
+        principalId: input.principalId,
+        authSource: input.authSource,
+        projectId: project.id,
+      });
+      if (
+        evaluation.reason === undefined &&
+        evaluation.effectivePermissions.includes("read")
+      ) {
+        readable.push(project.id);
+      }
+    }
+    return readable;
+  }
+
+  async authorizeProject(input: {
+    readonly principalId: string;
+    readonly authSource: "bearer" | "local-development";
+    readonly projectId: string;
+    readonly permission: ScopedAuthorizationPermission;
+  }): Promise<ScopeAuthorizationDecision> {
+    const evaluation = await this.evaluateProject(input);
+    if (
+      evaluation.reason === undefined &&
+      evaluation.projectStatus === "archived" &&
+      input.permission !== "read"
+    ) {
+      return {
+        allowed: false,
+        reason: "project_archived",
+        principal: evaluation.principal,
+        scopeType: "project",
+        scopeId: input.projectId,
+        permission: input.permission,
+        grantIds: [],
+        effectivePermissions: [...evaluation.effectivePermissions],
+        ...(evaluation.member === undefined
+          ? {}
+          : {
+              membershipId: evaluation.member.id,
+              membershipStatus: evaluation.member.status,
+            }),
+        ...(evaluation.ownerSources === undefined
+          ? {}
+          : { ownerSources: evaluation.ownerSources }),
+        grantSource: "none",
+      };
+    }
+    const allowed = evaluation.effectivePermissions.includes(input.permission);
+    if (evaluation.reason !== undefined || !allowed) {
+      const reason =
+        evaluation.reason ??
+        (evaluation.grants.length === 0
+          ? ("grant_missing" as const)
+          : ("permission_missing" as const));
+      return {
+        allowed: false,
+        reason,
+        principal: evaluation.principal,
+        scopeType: "project",
+        scopeId: input.projectId,
+        permission: input.permission,
+        grantIds: [],
+        effectivePermissions: [...evaluation.effectivePermissions],
+        ...(evaluation.member === undefined
+          ? {}
+          : {
+              membershipId: evaluation.member.id,
+              membershipStatus: evaluation.member.status,
+            }),
+        ...(evaluation.ownerSources === undefined
+          ? {}
+          : { ownerSources: evaluation.ownerSources }),
+        grantSource: "none",
+      };
+    }
+
+    const ownerGrant = evaluation.grants.find(
+      (grant) => grant.role_key === "PROJECT_OWNER",
+    );
+    const matching =
+      ownerGrant === undefined
+        ? evaluation.grants.filter((grant) =>
+            grant.permissions.includes(input.permission),
+          )
+        : [ownerGrant];
+    return {
+      allowed: true,
+      principal: evaluation.principal,
       scopeType: "project",
       scopeId: input.projectId,
       permission: input.permission,
-      grantIds: [],
-      effectivePermissions: [
-        ...new Set(grants.flatMap((grant) => grant.permissions)),
-      ],
-      membershipId: member.id,
-      membershipStatus: member.status,
-      ownerSources,
-      grantSource: "none",
+      grantIds:
+        evaluation.grantSource === "grant"
+          ? matching.map((grant) => grant.id)
+          : [],
+      effectivePermissions: [...evaluation.effectivePermissions],
+      ...(evaluation.member === undefined
+        ? {}
+        : {
+            membershipId: evaluation.member.id,
+            membershipStatus: evaluation.member.status,
+          }),
+      ...(evaluation.ownerSources === undefined
+        ? {}
+        : { ownerSources: evaluation.ownerSources }),
+      grantSource: evaluation.grantSource,
     };
   }
 

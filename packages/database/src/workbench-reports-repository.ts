@@ -27,6 +27,7 @@ import type {
   WorkbenchTodo,
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
+import type { AuthorizationRepository } from "./authorization-repository.js";
 import type { Database } from "./database.js";
 
 interface ProjectReportRow {
@@ -290,7 +291,10 @@ function reportSummary(row: ProjectReportRow): ProjectReportSummary {
 }
 
 export class WorkbenchReportsRepository {
-  constructor(private readonly database: Database) {}
+  constructor(
+    private readonly database: Database,
+    private readonly authorization: AuthorizationRepository,
+  ) {}
 
   async generateProjectReport(input: {
     readonly projectId: string;
@@ -883,24 +887,40 @@ export class WorkbenchReportsRepository {
   private async accessibleProjects(
     actorId: string,
   ): Promise<AccessibleProjectRow[]> {
+    const principal = await this.authorization.getPrincipal(actorId);
+    const readableProjectIds = await this.authorization.listReadableProjectIds({
+      principalId: actorId,
+      authSource:
+        principal?.source === "local" ? "local-development" : "bearer",
+    });
+    if (readableProjectIds.length === 0) return [];
     const result = await this.database.query<AccessibleProjectRow>(
       `SELECT
          project.id,
          project.name,
-         BOOL_OR(member.is_owner AND member.kind = 'human') AS owner
+         FALSE AS owner
        FROM projects AS project
-       JOIN project_members AS member ON member.project_id = project.id
-       WHERE member.actor_id = $1
-         AND member.status = 'active'
+       WHERE project.id = ANY($1::uuid[])
          AND project.status = 'active'
-       GROUP BY project.id, project.name
        ORDER BY project.name`,
-      [actorId],
+      [readableProjectIds],
     );
-    return result.rows.map((row) => ({
+    const capabilities = await Promise.all(
+      result.rows.map((row) =>
+        this.authorization.getProjectCapability({
+          principalId: actorId,
+          authSource:
+            principal?.source === "local" ? "local-development" : "bearer",
+          projectId: row.id,
+        }),
+      ),
+    );
+    return result.rows.map((row, index) => ({
       id: row.id,
       name: row.name,
-      owner: Boolean(row.owner),
+      owner:
+        capabilities[index]?.capability?.ownerSources.legacy === true ||
+        capabilities[index]?.capability?.ownerSources.grant === true,
     }));
   }
 

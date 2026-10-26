@@ -7,6 +7,7 @@ export * from "./trace.js";
 export * from "./trace-projection.js";
 export * from "./workbench-reports.js";
 export * from "./project-templates.js";
+export * from "./authorization.js";
 export * from "./direct-chat.js";
 export * from "./external-runtime.js";
 export * from "./agent-runtime-binding.js";

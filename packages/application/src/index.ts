@@ -51,6 +51,7 @@ import type {
   MemoryReviewResult,
   MemoryTopic,
   Project,
+  ProjectCapability,
   ProjectMember,
   ProjectRole,
   ProjectTemplate,
@@ -264,8 +265,16 @@ export class PlatformApplication {
     this.agentRuntimePreflight = new AgentRuntimePreflightService(repositories);
   }
 
-  listProjects(): Promise<Project[]> {
-    return this.repositories.projects.list();
+  listProjects(projectIds?: readonly string[]): Promise<Project[]> {
+    return this.repositories.projects.list(projectIds);
+  }
+
+  async getProject(projectId: string): Promise<Project> {
+    const project = await this.repositories.projects.get(projectId);
+    if (project === undefined) {
+      throw new ApplicationError("project_not_found", "Project not found", 404);
+    }
+    return project;
   }
 
   createProject(
@@ -1413,8 +1422,11 @@ export class PlatformApplication {
     }
   }
 
-  listTasks(projectId?: string): Promise<Task[]> {
-    return this.repositories.tasks.list(projectId);
+  listTasks(
+    projectId?: string,
+    readableProjectIds?: readonly string[],
+  ): Promise<Task[]> {
+    return this.repositories.tasks.list(projectId, readableProjectIds);
   }
 
   async getTask(id: string): Promise<Task> {
@@ -1714,7 +1726,10 @@ export class PlatformApplication {
     return attachment;
   }
 
-  async readTaskAttachment(attachmentId: string): Promise<{
+  async readTaskAttachment(
+    attachmentId: string,
+    actorId = "local-admin",
+  ): Promise<{
     readonly attachment: TaskAttachment;
     readonly content: Uint8Array;
   }> {
@@ -1727,7 +1742,7 @@ export class PlatformApplication {
         404,
       );
     }
-    await this.requireProjectOwner(attachment.projectId);
+    await this.requireProjectReadAccess(attachment.projectId, actorId);
     if (this.files === undefined) {
       throw new ApplicationError(
         "file_store_unavailable",
@@ -2043,10 +2058,10 @@ export class PlatformApplication {
     projectId: string,
     actorId = "local-admin",
   ): Promise<{ readonly items: MemoryTopic[]; readonly canManage: boolean }> {
-    const access = await this.requireProjectAccess(projectId, actorId);
+    const access = await this.requireProjectReadAccess(projectId, actorId);
     return {
       items: await this.repositories.memory.list(projectId),
-      canManage: access.canManage,
+      canManage: access.capability.capabilities.approve,
     };
   }
 
@@ -2121,10 +2136,10 @@ export class PlatformApplication {
     projectId: string,
     actorId = "local-admin",
   ): Promise<MemoryReviewQueue> {
-    const access = await this.requireProjectAccess(projectId, actorId);
+    const access = await this.requireProjectReadAccess(projectId, actorId);
     return {
       items: await this.repositories.memoryClosure.listReviewQueue(projectId),
-      canManage: access.canManage,
+      canManage: access.capability.capabilities.approve,
     };
   }
 
@@ -2152,7 +2167,7 @@ export class PlatformApplication {
     claimId: string,
     actorId = "local-admin",
   ): Promise<MemoryClaimTrace> {
-    await this.requireProjectAccess(projectId, actorId);
+    await this.requireProjectReadAccess(projectId, actorId);
     const trace = await this.repositories.memoryClosure.claimTrace(
       projectId,
       claimId,
@@ -2246,7 +2261,7 @@ export class PlatformApplication {
     projectId: string,
     actorId = "local-admin",
   ): Promise<HandoffCard[]> {
-    await this.requireProjectAccess(projectId, actorId);
+    await this.requireProjectReadAccess(projectId, actorId);
     return this.repositories.memoryClosure.listHandoffs(projectId);
   }
 
@@ -2255,7 +2270,7 @@ export class PlatformApplication {
     handoffId: string,
     actorId = "local-admin",
   ): Promise<HandoffCard> {
-    await this.requireProjectAccess(projectId, actorId);
+    await this.requireProjectReadAccess(projectId, actorId);
     const handoff = await this.repositories.memoryClosure.getHandoff(
       projectId,
       handoffId,
@@ -2345,7 +2360,7 @@ export class PlatformApplication {
     agentId: string,
     actorId = "local-admin",
   ): Promise<AgentEpisode[]> {
-    await this.requireProjectAccess(projectId, actorId);
+    await this.requireProjectReadAccess(projectId, actorId);
     await this.requireProjectAgent(projectId, agentId);
     return this.repositories.memoryClosure.listEpisodes({
       projectId,
@@ -2391,13 +2406,15 @@ export class PlatformApplication {
     query: ProjectReportQuery,
     actorId: string,
   ): Promise<ProjectReportSummary[]> {
-    const access = await this.requireProjectAccess(projectId, actorId);
+    const access = await this.requireProjectReadAccess(projectId, actorId);
     return this.repositories.workbenchReports.listProjectReports({
       projectId,
       actorId,
       query,
       readOnly: access.project.status === "archived",
-      canGenerate: access.canManage && access.project.status === "active",
+      canGenerate:
+        access.capability.capabilities.approve &&
+        access.project.status === "active",
     });
   }
 
@@ -2442,7 +2459,7 @@ export class PlatformApplication {
     reportId: string,
     actorId: string,
   ): Promise<ProjectReportDetail> {
-    const access = await this.requireProjectAccess(projectId, actorId);
+    const access = await this.requireProjectReadAccess(projectId, actorId);
     const report = await this.repositories.workbenchReports.getProjectReport(
       projectId,
       reportId,
@@ -2458,7 +2475,9 @@ export class PlatformApplication {
     return {
       ...report,
       readOnly: access.project.status === "archived",
-      canGenerate: access.canManage && access.project.status === "active",
+      canGenerate:
+        access.capability.capabilities.approve &&
+        access.project.status === "active",
     };
   }
 
@@ -2501,17 +2520,12 @@ export class PlatformApplication {
   }
 
   async getLatestWorkbenchBrief(actorId: string): Promise<WorkbenchBrief> {
-    const brief =
-      await this.repositories.workbenchReports.getLatestBrief(actorId);
-    if (brief === null) {
-      const generated =
-        await this.repositories.workbenchReports.generateWorkbenchBrief({
-          actorId,
-          briefDate: todayInShanghai(),
-        });
-      return generated.brief;
-    }
-    return brief;
+    const generated =
+      await this.repositories.workbenchReports.generateWorkbenchBrief({
+        actorId,
+        briefDate: todayInShanghai(),
+      });
+    return generated.brief;
   }
 
   async markWorkbenchBriefRead(
@@ -2551,14 +2565,28 @@ export class PlatformApplication {
   }
 
   async listWorkbenchFollows(actorId: string): Promise<WorkbenchFollow[]> {
-    return this.repositories.workbenchReports.listFollows(actorId);
+    const principal =
+      await this.repositories.authorization.getPrincipal(actorId);
+    const readableProjectIds =
+      await this.repositories.authorization.listReadableProjectIds({
+        principalId: actorId,
+        authSource:
+          principal?.source === "local" ? "local-development" : "bearer",
+      });
+    const readable = new Set(readableProjectIds);
+    const follows =
+      await this.repositories.workbenchReports.listFollows(actorId);
+    return follows.filter((follow) => readable.has(follow.projectId));
   }
 
   async setWorkbenchFollow(
     actorId: string,
     input: SetWorkbenchFollowInput,
   ): Promise<{ readonly followed: boolean }> {
-    const access = await this.requireProjectAccess(input.projectId, actorId);
+    const access = await this.requireProjectReadAccess(
+      input.projectId,
+      actorId,
+    );
     const belongs =
       await this.repositories.workbenchReports.resourceBelongsToProject(
         input.projectId,
@@ -2802,6 +2830,35 @@ export class PlatformApplication {
       project,
       canManage: member.kind === "human" && member.owner,
     };
+  }
+
+  private async requireProjectReadAccess(
+    projectId: string,
+    actorId: string,
+  ): Promise<{
+    readonly project: Project;
+    readonly capability: ProjectCapability;
+  }> {
+    const project = await this.requireProject(projectId);
+    const principal =
+      await this.repositories.authorization.getPrincipal(actorId);
+    const decision = await this.repositories.authorization.getProjectCapability(
+      {
+        principalId: actorId,
+        authSource:
+          principal?.source === "local" ? "local-development" : "bearer",
+        projectId,
+      },
+    );
+    if (!decision.allowed || decision.capability === undefined) {
+      throw new ApplicationError(
+        "forbidden",
+        "Project read permission is required",
+        403,
+        { reason: decision.reason ?? "permission_missing", projectId },
+      );
+    }
+    return { project, capability: decision.capability };
   }
 
   private async requireProjectAgent(
@@ -5257,7 +5314,7 @@ export class PlatformApplication {
     projectId: string,
     actorId = "local-admin",
   ): Promise<Meeting[]> {
-    await this.requireProjectOwner(projectId, actorId);
+    await this.requireProjectReadAccess(projectId, actorId);
     return this.repositories.meetings.list(projectId);
   }
 
@@ -5305,7 +5362,7 @@ export class PlatformApplication {
     if (detail === undefined) {
       throw new ApplicationError("meeting_not_found", "Meeting not found", 404);
     }
-    await this.requireProjectOwner(detail.meeting.projectId, actorId);
+    await this.requireProjectReadAccess(detail.meeting.projectId, actorId);
     return detail;
   }
 

@@ -5,6 +5,7 @@ import type {
   MeetingAiPolicy,
   MeetingDetail,
   Project,
+  ProjectCapability,
   WorkbenchSourceRef,
   WorkflowDefinition,
   WorkflowInstanceDetail,
@@ -77,6 +78,7 @@ interface ProjectViewProps {
   readonly projects: Project[];
   readonly agents: Agent[];
   readonly projectId: string;
+  readonly capability?: ProjectCapability | undefined;
   readonly onProjectChange: (projectId: string) => void;
 }
 
@@ -632,6 +634,7 @@ export function WorkbenchView({
 export function WorkflowsView({
   projects,
   projectId,
+  capability,
   onProjectChange,
   initialInstanceId,
 }: ProjectViewProps & {
@@ -639,6 +642,8 @@ export function WorkflowsView({
 }) {
   const queryClient = useQueryClient();
   const selectedProjectId = projectId || projects[0]?.id || "";
+  const canWrite = capability?.capabilities.write ?? false;
+  const canApprove = capability?.capabilities.approve ?? false;
   const [name, setName] = useState("");
   const [steps, setSteps] = useState("");
   const [roleId, setRoleId] = useState("");
@@ -928,7 +933,11 @@ export function WorkflowsView({
                 </option>
               ))}
             </select>
-            <button className="pm-btn secondary" type="submit">
+            <button
+              className="pm-btn secondary"
+              type="submit"
+              disabled={!canWrite}
+            >
               <Plus size={14} />
               创建定义
             </button>
@@ -950,7 +959,11 @@ export function WorkflowsView({
               <button
                 className="pm-btn secondary"
                 type="button"
-                disabled={markdown.trim() === "" || validateMutation.isPending}
+                disabled={
+                  !canWrite ||
+                  markdown.trim() === "" ||
+                  validateMutation.isPending
+                }
                 onClick={() => validateMutation.mutate()}
               >
                 校验 Markdown
@@ -959,7 +972,9 @@ export function WorkflowsView({
                 className="pm-btn primary"
                 type="button"
                 disabled={
-                  validation?.valid !== true || importMutation.isPending
+                  !canWrite ||
+                  validation?.valid !== true ||
+                  importMutation.isPending
                 }
                 onClick={() => importMutation.mutate()}
               >
@@ -1001,6 +1016,7 @@ export function WorkflowsView({
                 className="pm-directory-row"
                 type="button"
                 key={workflow.id}
+                disabled={!canWrite}
                 onClick={() => startMutation.mutate(workflow)}
               >
                 <span className="pm-directory-mark">
@@ -1095,6 +1111,8 @@ export function WorkflowsView({
           ) : (
             <WorkflowRuntimePanel
               detail={detail}
+              canWrite={canWrite}
+              canApprove={canApprove}
               pending={panelPending}
               onComplete={(node) => completeMutation.mutate(node)}
               onDispatch={() => dispatchMutation.mutate()}
@@ -1127,6 +1145,7 @@ export function MeetingsView({
   projects,
   agents,
   projectId,
+  capability,
   onProjectChange,
   onOpenTask,
   initialMeetingId,
@@ -1138,6 +1157,8 @@ export function MeetingsView({
 }) {
   const queryClient = useQueryClient();
   const selectedProjectId = projectId || projects[0]?.id || "";
+  const canWrite = capability?.capabilities.write ?? false;
+  const canApprove = capability?.capabilities.approve ?? false;
   const [meetingId, setMeetingId] = useState("");
   const [directChatId, setDirectChatId] = useState("");
   const [conversationKind, setConversationKind] = useState<
@@ -1342,7 +1363,11 @@ export function MeetingsView({
                     </option>
                   ))}
               </select>
-              <button className="pm-btn secondary" type="submit">
+              <button
+                className="pm-btn secondary"
+                type="submit"
+                disabled={!canWrite}
+              >
                 <Plus size={14} />
                 新建会议
               </button>
@@ -1464,6 +1489,7 @@ export function MeetingsView({
                     <button
                       className="pm-btn secondary"
                       type="button"
+                      disabled={!canWrite}
                       onClick={() => closeMutation.mutate()}
                     >
                       结束会议
@@ -1515,6 +1541,7 @@ export function MeetingsView({
                   projects.find((project) => project.id === selectedProjectId)
                     ?.status === "archived"
                 }
+                canWrite={canWrite}
                 selectedMentionAgentIds={mentionAgentIds}
                 onMentionAgentIdsChange={setMentionAgentIds}
               />
@@ -1536,7 +1563,9 @@ export function MeetingsView({
                     className="pm-btn primary"
                     type="submit"
                     disabled={
-                      message.trim() === "" || messageMutation.isPending
+                      !canWrite ||
+                      message.trim() === "" ||
+                      messageMutation.isPending
                     }
                   >
                     发送
@@ -1547,6 +1576,8 @@ export function MeetingsView({
                 meeting={detail}
                 members={membersQuery.data ?? []}
                 agents={agents}
+                canWrite={canWrite}
+                canApprove={canApprove}
                 onOpenTask={onOpenTask}
               />
             </>
@@ -1614,12 +1645,14 @@ function MeetingAiParticipationPanel({
   meeting,
   agents,
   projectArchived,
+  canWrite,
   selectedMentionAgentIds,
   onMentionAgentIdsChange,
 }: {
   readonly meeting: MeetingDetail;
   readonly agents: Agent[];
   readonly projectArchived: boolean;
+  readonly canWrite: boolean;
   readonly selectedMentionAgentIds: string[];
   readonly onMentionAgentIdsChange: (agentIds: string[]) => void;
 }) {
@@ -1721,7 +1754,7 @@ function MeetingAiParticipationPanel({
   });
   const policy = policyQuery.data;
   const participationBlocked =
-    projectArchived || meeting.meeting.status === "closed";
+    !canWrite || projectArchived || meeting.meeting.status === "closed";
   const busy =
     lifecycleMutation.isPending ||
     saveMutation.isPending ||

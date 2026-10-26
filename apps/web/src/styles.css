@@ -5604,7 +5604,8 @@ code {
   margin-top: 9px;
 }
 
-.artifact-list a {
+.artifact-list a,
+.artifact-list button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -5613,11 +5614,14 @@ code {
   border-radius: 5px;
   color: var(--pm-label-secondary);
   background: var(--pm-bg-layer-2);
+  cursor: pointer;
+  font-family: inherit;
   font-size: 10.5px;
   text-decoration: none;
 }
 
-.artifact-list a:hover {
+.artifact-list a:hover,
+.artifact-list button:hover {
   color: var(--pm-label-primary);
   border-color: var(--pm-border-l4);
 }

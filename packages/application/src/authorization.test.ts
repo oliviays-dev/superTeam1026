@@ -165,4 +165,136 @@ describe("authorization route policy", () => {
     ).resolves.toEqual({ required: false });
     expect(calls).toEqual(["resource"]);
   });
+
+  it("maps project, query and nested read routes to the read permission", async () => {
+    const calls: string[] = [];
+    const repository = {
+      projectIdsForResource: async (
+        resourceType: string,
+        resourceId: string,
+      ) => {
+        calls.push(`${resourceType}:${resourceId}`);
+        return ["project-read"];
+      },
+      authorizeProject: async (input: {
+        projectId: string;
+        permission: string;
+      }) => {
+        calls.push(`${input.projectId}:${input.permission}`);
+        return allowedDecision("project", input.projectId, "read");
+      },
+      audit: async (_input: AuthorizationAuditInput) => undefined,
+    } as unknown as AuthorizationRepository;
+    const service = new AuthorizationService(repository);
+
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-project-read",
+        method: "GET",
+        route: "/api/v1/projects/:projectId",
+        principal,
+        params: { projectId: "project-read" },
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-query-read",
+        method: "GET",
+        route: "/api/v1/meetings",
+        principal,
+        params: {},
+        query: { projectId: "project-read" },
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-task-runs",
+        method: "GET",
+        route: "/api/v1/tasks/:id/runs",
+        principal,
+        params: { id: "task-read" },
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-trace",
+        method: "GET",
+        route: "/api/v1/traces/:traceId",
+        principal,
+        params: { traceId: "trace-read" },
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-sse",
+        method: "GET",
+        route: "/api/v1/runs/:runId/stream",
+        principal,
+        params: { runId: "run-read" },
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+
+    expect(calls).toEqual([
+      "project-read:read",
+      "project-read:read",
+      "task:task-read",
+      "project-read:read",
+      "trace:trace-read",
+      "project-read:read",
+      "run:run-read",
+      "project-read:read",
+    ]);
+  });
+
+  it("requires every project linked to Trace data to be readable", async () => {
+    const decisions: string[] = [];
+    const repository = {
+      projectIdsForResource: async () => ["project-a", "project-b"],
+      authorizeProject: async (input: { projectId: string }) => {
+        decisions.push(input.projectId);
+        return input.projectId === "project-a"
+          ? allowedDecision("project", input.projectId, "read")
+          : {
+              ...allowedDecision("project", input.projectId, "read"),
+              allowed: false,
+              reason: "membership_missing",
+            };
+      },
+      audit: async (_input: AuthorizationAuditInput) => undefined,
+    } as unknown as AuthorizationRepository;
+    const service = new AuthorizationService(repository);
+
+    const result = await service.authorizeRoute({
+      requestId: "request-cross-trace",
+      method: "GET",
+      route: "/api/v1/traces/:traceId",
+      principal,
+      params: { traceId: "trace-cross-project" },
+    });
+    expect(result).toMatchObject({
+      required: true,
+      allowed: false,
+      reason: "membership_missing",
+      decision: { scopeId: "project-b", permission: "read" },
+    });
+    expect(decisions).toEqual(["project-a", "project-b"]);
+  });
+
+  it("keeps projectless direct-chat runs in the existing self boundary", async () => {
+    const repository = {
+      projectIdsForResource: async () => [],
+      audit: async (_input: AuthorizationAuditInput) => undefined,
+    } as unknown as AuthorizationRepository;
+    const service = new AuthorizationService(repository);
+
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-direct-chat-stream",
+        method: "GET",
+        route: "/api/v1/runs/:runId/stream",
+        principal,
+        params: { runId: "direct-chat-run" },
+      }),
+    ).resolves.toEqual({ required: false });
+  });
 });
