@@ -321,6 +321,15 @@ export const runInputSnapshotSchema = z.object({
   instruction: z.string(),
   agentName: z.string(),
   runtimeKind: runtimeKindSchema,
+  meeting: z
+    .object({
+      meetingId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      triggerKind: z.enum(["mention", "round", "agenda", "summary"]),
+      triggerReason: z.string(),
+      agendaItem: z.string().nullable().optional(),
+    })
+    .optional(),
   runtimeOptions: z
     .object({
       fault: z.enum(["fail", "timeout"]).optional(),
@@ -333,7 +342,8 @@ export type RunInputSnapshot = z.infer<typeof runInputSnapshotSchema>;
 export const runSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
-  taskId: z.string().uuid(),
+  taskId: z.string().uuid().nullable(),
+  meetingTurnId: z.string().uuid().nullable(),
   agentId: z.string().uuid(),
   status: runStatusSchema,
   contextPackId: z.string().uuid().nullable(),
@@ -420,7 +430,8 @@ export const contextPackSchema = z.object({
   id: z.string().uuid(),
   runId: z.string().uuid(),
   projectId: z.string().uuid(),
-  taskId: z.string().uuid(),
+  taskId: z.string().uuid().nullable(),
+  meetingTurnId: z.string().uuid().nullable(),
   agentId: z.string().uuid(),
   identity: z.object({
     name: z.string(),

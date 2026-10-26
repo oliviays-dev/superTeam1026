@@ -35,6 +35,7 @@ import {
   jobListQuerySchema,
   jobRecoveryInputSchema,
   markReportReadInputSchema,
+  meetingAiPolicyLifecycleInputSchema,
   projectReportQuerySchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
@@ -43,6 +44,7 @@ import {
   setWorkbenchFollowInputSchema,
   taskReviewInputSchema,
   traceIdSchema,
+  triggerMeetingAiInputSchema,
   transferTaskInputSchema,
   retryWorkflowNodeInputSchema,
   startWorkflowInputSchema,
@@ -50,6 +52,7 @@ import {
   updateAgentInputSchema,
   updateHandoffCardInputSchema,
   updateMeetingActionItemInputSchema,
+  updateMeetingAiPolicyInputSchema,
   updateMeetingMinutesDraftInputSchema,
   updateMemoryClaimInputSchema,
   updateProjectMemberInputSchema,
@@ -158,6 +161,11 @@ const episodeQuerySchema = z.object({
 });
 const meetingMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
+  mentions: z
+    .array(z.string().uuid())
+    .max(20)
+    .default([])
+    .transform((ids) => [...new Set(ids)]),
 });
 const meetingCloseInputSchema = z.object({
   summary: z.string().trim().max(20_000).default(""),
@@ -238,7 +246,7 @@ export function buildApi(options: BuildApiOptions): {
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
   const localActorId = options.localActorId ?? "local-admin";
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 18;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 19;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -1783,6 +1791,58 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.getMeeting(meetingId, actorId));
   });
 
+  app.get("/api/v1/meetings/:meetingId/ai-policy", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getMeetingAiPolicy(meetingId, actorId));
+  });
+
+  app.put("/api/v1/meetings/:meetingId/ai-policy", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = updateMeetingAiPolicyInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.updateMeetingAiPolicy(meetingId, input, actorId),
+    );
+  });
+
+  for (const transition of ["pause", "resume", "terminate"] as const) {
+    app.post(
+      `/api/v1/meetings/:meetingId/ai-policy/${transition}`,
+      async (request, reply) => {
+        const { meetingId } = meetingParamsSchema.parse(request.params);
+        const input = meetingAiPolicyLifecycleInputSchema.parse(request.body);
+        const actorId = requestActorId(request.headers);
+        const method =
+          transition === "pause"
+            ? application.pauseMeetingAi.bind(application)
+            : transition === "resume"
+              ? application.resumeMeetingAi.bind(application)
+              : application.terminateMeetingAi.bind(application);
+        return reply.send(await method(meetingId, input, actorId));
+      },
+    );
+  }
+
+  app.post(
+    "/api/v1/meetings/:meetingId/ai-triggers",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const input = triggerMeetingAiInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `meeting:${meetingId}`,
+        operation: "meeting.ai.trigger",
+        actorId,
+        payload: input,
+        statusCode: 202,
+        execute: () => application.triggerMeetingAi(meetingId, input, actorId),
+      });
+    },
+  );
+
   app.get("/api/v1/meetings/:meetingId/minutes", async (request, reply) => {
     const { meetingId } = meetingParamsSchema.parse(request.params);
     const actorId = requestActorId(request.headers);
@@ -1915,7 +1975,12 @@ export function buildApi(options: BuildApiOptions): {
     return reply
       .status(201)
       .send(
-        await application.postMeetingMessage(meetingId, input.content, actorId),
+        await application.postMeetingMessage(
+          meetingId,
+          input.content,
+          actorId,
+          input.mentions,
+        ),
       );
   });
 

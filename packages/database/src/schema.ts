@@ -1728,3 +1728,190 @@ ALTER TABLE workflow_definitions
 CREATE INDEX IF NOT EXISTS workflow_definitions_source_template_idx
   ON workflow_definitions(source_template_id, source_template_version);
 `;
+
+export const MEETING_AI_PARTICIPATION_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS meeting_ai_policies (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL UNIQUE
+    REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'paused'
+    CHECK (status IN ('active', 'paused', 'terminated')),
+  trigger_kinds JSONB NOT NULL DEFAULT '["mention"]'::jsonb,
+  cooldown_seconds INTEGER NOT NULL DEFAULT 30
+    CHECK (cooldown_seconds BETWEEN 0 AND 3600),
+  max_rounds INTEGER NOT NULL DEFAULT 6
+    CHECK (max_rounds BETWEEN 1 AND 100),
+  max_messages INTEGER NOT NULL DEFAULT 12
+    CHECK (max_messages BETWEEN 1 AND 500),
+  run_budget_ms INTEGER NOT NULL DEFAULT 60000
+    CHECK (run_budget_ms BETWEEN 1000 AND 1800000),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  last_error_code TEXT,
+  last_error_message TEXT,
+  last_error_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL,
+  updated_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS meeting_ai_policies_project_idx
+  ON meeting_ai_policies(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS meeting_ai_participants (
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'paused', 'removed')),
+  joined_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (meeting_id, agent_id)
+);
+
+CREATE INDEX IF NOT EXISTS meeting_ai_participants_agent_idx
+  ON meeting_ai_participants(agent_id, status);
+
+CREATE TABLE IF NOT EXISTS meeting_ai_rounds (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  round_number INTEGER NOT NULL CHECK (round_number > 0),
+  trigger_kind TEXT NOT NULL
+    CHECK (trigger_kind IN ('mention', 'round', 'agenda', 'summary')),
+  trigger_reason TEXT NOT NULL,
+  source_message_id UUID REFERENCES meeting_messages(id) ON DELETE SET NULL,
+  agenda_item TEXT,
+  dedupe_key TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (meeting_id, round_number),
+  UNIQUE (meeting_id, dedupe_key)
+);
+
+CREATE INDEX IF NOT EXISTS meeting_ai_rounds_meeting_idx
+  ON meeting_ai_rounds(meeting_id, round_number DESC);
+
+CREATE TABLE IF NOT EXISTS meeting_ai_turns (
+  id UUID PRIMARY KEY,
+  round_id UUID NOT NULL
+    REFERENCES meeting_ai_rounds(id) ON DELETE CASCADE,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  policy_id UUID NOT NULL
+    REFERENCES meeting_ai_policies(id) ON DELETE RESTRICT,
+  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+  trigger_kind TEXT NOT NULL
+    CHECK (trigger_kind IN ('mention', 'round', 'agenda', 'summary')),
+  trigger_reason TEXT NOT NULL,
+  source_message_id UUID REFERENCES meeting_messages(id) ON DELETE SET NULL,
+  agenda_item TEXT,
+  dedupe_key TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN (
+      'queued',
+      'running',
+      'completed',
+      'failed',
+      'cancelled',
+      'skipped'
+    )),
+  run_id UUID UNIQUE REFERENCES runs(id) ON DELETE SET NULL,
+  message_id UUID UNIQUE REFERENCES meeting_messages(id) ON DELETE SET NULL,
+  error_code TEXT,
+  error_message TEXT,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (meeting_id, dedupe_key)
+);
+
+CREATE INDEX IF NOT EXISTS meeting_ai_turns_meeting_idx
+  ON meeting_ai_turns(meeting_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS meeting_ai_turns_run_idx
+  ON meeting_ai_turns(run_id)
+  WHERE run_id IS NOT NULL;
+
+ALTER TABLE runs
+  ALTER COLUMN task_id DROP NOT NULL,
+  ADD COLUMN IF NOT EXISTS meeting_turn_id UUID
+    REFERENCES meeting_ai_turns(id) ON DELETE SET NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS runs_meeting_turn_idx
+  ON runs(meeting_turn_id)
+  WHERE meeting_turn_id IS NOT NULL;
+
+ALTER TABLE context_packs
+  ALTER COLUMN task_id DROP NOT NULL,
+  ADD COLUMN IF NOT EXISTS meeting_turn_id UUID
+    REFERENCES meeting_ai_turns(id) ON DELETE SET NULL;
+
+ALTER TABLE meeting_messages
+  ADD COLUMN IF NOT EXISTS turn_id UUID,
+  ADD COLUMN IF NOT EXISTS policy_id UUID
+    REFERENCES meeting_ai_policies(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS policy_revision INTEGER,
+  ADD COLUMN IF NOT EXISTS trigger_kind TEXT
+    CHECK (trigger_kind IN ('mention', 'round', 'agenda', 'summary')),
+  ADD COLUMN IF NOT EXISTS trigger_reason TEXT,
+  ADD COLUMN IF NOT EXISTS run_id UUID REFERENCES runs(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS trace_id TEXT,
+  ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'sent'
+    CHECK (status IN ('sent', 'failed')),
+  ADD COLUMN IF NOT EXISTS error_code TEXT,
+  ADD COLUMN IF NOT EXISTS error_message TEXT;
+
+ALTER TABLE meeting_messages
+  DROP CONSTRAINT IF EXISTS meeting_messages_turn_id_fkey;
+
+ALTER TABLE meeting_messages
+  ADD CONSTRAINT meeting_messages_turn_id_fkey
+  FOREIGN KEY (turn_id) REFERENCES meeting_ai_turns(id) ON DELETE SET NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS meeting_messages_turn_idx
+  ON meeting_messages(turn_id)
+  WHERE turn_id IS NOT NULL;
+
+INSERT INTO meeting_ai_policies (
+  id, meeting_id, project_id, status, trigger_kinds, cooldown_seconds,
+  max_rounds, max_messages, run_budget_ms, revision, created_by, updated_by,
+  created_at, updated_at
+)
+SELECT
+  gen_random_uuid(),
+  meeting.id,
+  meeting.project_id,
+  'paused',
+  '["mention"]'::jsonb,
+  30,
+  6,
+  12,
+  60000,
+  1,
+  'local-admin',
+  'local-admin',
+  meeting.created_at,
+  meeting.updated_at
+FROM meetings AS meeting
+ON CONFLICT (meeting_id) DO NOTHING;
+
+INSERT INTO meeting_ai_participants (
+  meeting_id, project_id, agent_id, status, joined_at, updated_at
+)
+SELECT
+  meeting.id,
+  meeting.project_id,
+  (participant.value ->> 'id')::uuid,
+  'active',
+  meeting.created_at,
+  meeting.updated_at
+FROM meetings AS meeting
+CROSS JOIN LATERAL jsonb_array_elements(meeting.participants) AS participant(value)
+WHERE participant.value ->> 'kind' = 'agent'
+  AND participant.value ->> 'id'
+    ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+ON CONFLICT (meeting_id, agent_id) DO NOTHING;
+`;

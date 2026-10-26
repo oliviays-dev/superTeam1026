@@ -640,6 +640,16 @@ interface MeetingMessageRow {
   author_id: string;
   author_name: string;
   content: string;
+  turn_id: string | null;
+  policy_id: string | null;
+  policy_revision: number | null;
+  trigger_kind: MeetingMessage["triggerKind"];
+  trigger_reason: string | null;
+  run_id: string | null;
+  trace_id: string | null;
+  status: MeetingMessage["status"];
+  error_code: string | null;
+  error_message: string | null;
   created_at: Date;
 }
 
@@ -694,6 +704,26 @@ export class MeetingRepository {
          )`,
         [randomUUID(), meetingId, input.projectId],
       );
+      await client.query(
+        `INSERT INTO meeting_ai_policies (
+           id, meeting_id, project_id, status, trigger_kinds,
+           cooldown_seconds, max_rounds, max_messages, run_budget_ms,
+           revision, created_by, updated_by, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, 'paused', '["mention"]'::jsonb,
+           30, 6, 12, 60000, 1, 'local-admin', 'local-admin', NOW(), NOW()
+         )`,
+        [randomUUID(), meetingId, input.projectId],
+      );
+      for (const participant of participants) {
+        if (participant.kind !== "agent") continue;
+        await client.query(
+          `INSERT INTO meeting_ai_participants (
+             meeting_id, project_id, agent_id, status, joined_at, updated_at
+           ) VALUES ($1, $2, $3, 'active', NOW(), NOW())`,
+          [meetingId, input.projectId, participant.id],
+        );
+      }
       return meetingFromRow(result.rows[0]!);
     });
   }
@@ -862,6 +892,16 @@ function meetingMessageFromRow(row: MeetingMessageRow): MeetingMessage {
     authorId: row.author_id,
     authorName: row.author_name,
     content: row.content,
+    turnId: row.turn_id,
+    policyId: row.policy_id,
+    policyRevision: row.policy_revision,
+    triggerKind: row.trigger_kind,
+    triggerReason: row.trigger_reason,
+    runId: row.run_id,
+    traceId: row.trace_id,
+    status: row.status,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
     createdAt: row.created_at.toISOString(),
   };
 }

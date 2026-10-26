@@ -14,6 +14,12 @@ export {
   type CreateMeetingActionItemRepositoryInput,
 } from "./meeting-decisions-repository.js";
 export {
+  MeetingAiPreconditionError,
+  MeetingAiRepository,
+  type MeetingAiRunContext,
+  type MeetingAiTurnRecord,
+} from "./meeting-ai-repository.js";
+export {
   MemoryClosureRepository,
   MemoryReviewConflictError,
 } from "./memory-closure-repository.js";

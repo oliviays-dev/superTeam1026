@@ -1,6 +1,7 @@
 import type {
   Agent,
   Meeting,
+  MeetingAiPolicy,
   MeetingDetail,
   Project,
   WorkbenchSourceRef,
@@ -13,13 +14,17 @@ import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowRight,
+  Bot,
   CalendarClock,
   Factory,
   FileText,
   MessageSquare,
   PackageX,
   Plus,
+  Pause,
+  Play,
   RefreshCw,
+  Square,
   Star,
   TriangleAlert,
   Workflow,
@@ -36,6 +41,7 @@ import {
   getWorkflowInstanceDetail,
   importWorkflowMarkdown,
   getMeeting,
+  getMeetingAiPolicy,
   getWorkbenchDashboard,
   listMeetings,
   listProjectMembers,
@@ -46,6 +52,8 @@ import {
   markWorkbenchBriefRead,
   pauseWorkflow,
   postMeetingMessage,
+  transitionMeetingAiPolicy,
+  triggerMeetingAi,
   reconcileWorkflow,
   refreshWorkbenchBrief,
   resumeWorkflow,
@@ -54,6 +62,7 @@ import {
   startWorkflow,
   transferWorkflowApproval,
   updateWorkbenchBriefSettings,
+  updateMeetingAiPolicy,
   validateWorkflowMarkdown,
 } from "./api.js";
 import { MeetingDecisionsPanel } from "./MeetingDecisionsPanel.js";
@@ -1129,6 +1138,7 @@ export function MeetingsView({
   const [agenda, setAgenda] = useState("");
   const [agentId, setAgentId] = useState("");
   const [message, setMessage] = useState("");
+  const [mentionAgentIds, setMentionAgentIds] = useState<string[]>([]);
   useEffect(() => {
     if (initialMeetingId === "") return;
     setMeetingId(initialMeetingId);
@@ -1166,10 +1176,14 @@ export function MeetingsView({
     },
   });
   const messageMutation = useMutation({
-    mutationFn: () => postMeetingMessage(meetingId, message),
+    mutationFn: () => postMeetingMessage(meetingId, message, mentionAgentIds),
     onSuccess: () => {
       setMessage("");
+      setMentionAgentIds([]);
       void queryClient.invalidateQueries({ queryKey: ["meeting", meetingId] });
+      void queryClient.invalidateQueries({
+        queryKey: ["meeting-ai-policy", meetingId],
+      });
     },
   });
   const closeMutation = useMutation({
@@ -1331,12 +1345,32 @@ export function MeetingsView({
                       <time>{formatDateTime(item.createdAt)}</time>
                     </div>
                     <p>{item.content}</p>
+                    {item.triggerKind !== null && (
+                      <div className="meeting-ai-message-meta">
+                        <span>自动发言</span>
+                        <span>{item.triggerKind}</span>
+                        {item.status === "failed" && <span>失败</span>}
+                        {item.runId !== null && (
+                          <code>{item.runId.slice(0, 8)}</code>
+                        )}
+                      </div>
+                    )}
                   </article>
                 ))}
                 {detail.messages.length === 0 && (
                   <div className="pm-empty compact">会议尚未产生消息</div>
                 )}
               </div>
+              <MeetingAiParticipationPanel
+                meeting={detail}
+                agents={agents}
+                projectArchived={
+                  projects.find((project) => project.id === selectedProjectId)
+                    ?.status === "archived"
+                }
+                selectedMentionAgentIds={mentionAgentIds}
+                onMentionAgentIdsChange={setMentionAgentIds}
+              />
               {detail.meeting.status === "open" && (
                 <form
                   className="message-composer"
@@ -1373,5 +1407,419 @@ export function MeetingsView({
         </section>
       </div>
     </main>
+  );
+}
+
+function MeetingAiParticipationPanel({
+  meeting,
+  agents,
+  projectArchived,
+  selectedMentionAgentIds,
+  onMentionAgentIdsChange,
+}: {
+  readonly meeting: MeetingDetail;
+  readonly agents: Agent[];
+  readonly projectArchived: boolean;
+  readonly selectedMentionAgentIds: string[];
+  readonly onMentionAgentIdsChange: (agentIds: string[]) => void;
+}) {
+  const queryClient = useQueryClient();
+  const meetingId = meeting.meeting.id;
+  const policyQuery = useQuery({
+    queryKey: ["meeting-ai-policy", meetingId],
+    queryFn: () => getMeetingAiPolicy(meetingId),
+    refetchInterval: 2_500,
+  });
+  const [draft, setDraft] = useState<{
+    readonly triggerKinds: MeetingAiPolicy["triggerKinds"];
+    readonly cooldownSeconds: number;
+    readonly maxRounds: number;
+    readonly maxMessages: number;
+    readonly runBudgetMs: number;
+  } | null>(null);
+  const [agendaItem, setAgendaItem] = useState(meeting.meeting.agenda);
+  useEffect(() => {
+    const policy = policyQuery.data;
+    if (policy === undefined) return;
+    setDraft({
+      triggerKinds: policy.triggerKinds,
+      cooldownSeconds: policy.cooldownSeconds,
+      maxRounds: policy.maxRounds,
+      maxMessages: policy.maxMessages,
+      runBudgetMs: policy.runBudgetMs,
+    });
+  }, [policyQuery.data?.revision]);
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({
+      queryKey: ["meeting-ai-policy", meetingId],
+    });
+    void queryClient.invalidateQueries({ queryKey: ["meeting", meetingId] });
+  };
+  const lifecycleMutation = useMutation({
+    mutationFn: (transition: "pause" | "resume" | "terminate") => {
+      const policy = policyQuery.data;
+      if (policy === undefined) throw new Error("AI 发言策略尚未加载");
+      return transitionMeetingAiPolicy(meetingId, transition, {
+        expectedRevision: policy.revision,
+        reason: `会议界面${transition}`,
+      });
+    },
+    onSuccess: refresh,
+  });
+  const saveMutation = useMutation({
+    mutationFn: () => {
+      const policy = policyQuery.data;
+      if (policy === undefined || draft === null) {
+        throw new Error("AI 发言策略尚未加载");
+      }
+      return updateMeetingAiPolicy(meetingId, {
+        expectedRevision: policy.revision,
+        triggerKinds: draft.triggerKinds,
+        cooldownSeconds: draft.cooldownSeconds,
+        maxRounds: draft.maxRounds,
+        maxMessages: draft.maxMessages,
+        runBudgetMs: draft.runBudgetMs,
+      });
+    },
+    onSuccess: refresh,
+  });
+  const triggerMutation = useMutation({
+    mutationFn: (kind: "round" | "agenda" | "summary") => {
+      const currentRound = policyQuery.data?.stats.roundsUsed ?? 0;
+      const lastMessage = meeting.messages.at(-1);
+      const reason =
+        kind === "round"
+          ? "界面发起固定轮次"
+          : kind === "agenda"
+            ? `界面触发议程：${agendaItem.trim()}`
+            : "界面请求确定性会议总结";
+      return triggerMeetingAi(
+        meetingId,
+        {
+          kind,
+          agentIds: [],
+          reason,
+          ...(kind === "round" ? { roundNumber: currentRound + 1 } : {}),
+          ...(kind === "agenda"
+            ? {
+                agendaItem: agendaItem.trim(),
+              }
+            : {}),
+          ...(kind === "summary" && lastMessage !== undefined
+            ? { sourceMessageId: lastMessage.id }
+            : {}),
+        },
+        `batch12a:${meetingId}:${kind}:${
+          kind === "round"
+            ? currentRound + 1
+            : agendaItem.trim() || lastMessage?.id || "summary"
+        }`,
+      );
+    },
+    onSuccess: refresh,
+  });
+  const policy = policyQuery.data;
+  const participationBlocked =
+    projectArchived || meeting.meeting.status === "closed";
+  const busy =
+    lifecycleMutation.isPending ||
+    saveMutation.isPending ||
+    triggerMutation.isPending;
+  const error =
+    policyQuery.error?.message ??
+    lifecycleMutation.error?.message ??
+    saveMutation.error?.message ??
+    triggerMutation.error?.message;
+  const agentParticipants = meeting.meeting.participants.filter(
+    (participant) =>
+      participant.kind === "agent" &&
+      agents.some(
+        (agent) => agent.id === participant.id && agent.status === "active",
+      ),
+  );
+  const triggerLabels = {
+    mention: "被 @ 时",
+    round: "固定轮次",
+    agenda: "议程节点",
+    summary: "会议总结",
+  } as const;
+
+  return (
+    <section className="meeting-ai-panel" aria-label="AI 自动发言">
+      <div className="meeting-ai-head">
+        <div>
+          <strong>
+            <Bot size={14} />
+            AI 自动发言
+          </strong>
+          <span>
+            {policy === undefined
+              ? "加载中…"
+              : `${policy.stats.remainingRounds} 轮 · ${policy.stats.remainingMessages} 条剩余`}
+          </span>
+        </div>
+        {policy !== undefined && (
+          <div className="meeting-ai-actions">
+            <label className="meeting-ai-switch">
+              <input
+                type="checkbox"
+                role="switch"
+                checked={policy.status === "active"}
+                disabled={
+                  busy || policy.status === "terminated" || participationBlocked
+                }
+                onChange={() =>
+                  lifecycleMutation.mutate(
+                    policy.status === "active" ? "pause" : "resume",
+                  )
+                }
+              />
+              <span>自动发言</span>
+            </label>
+            <button
+              className="pm-icon-button"
+              type="button"
+              title={policy.status === "active" ? "暂停" : "恢复"}
+              aria-label={
+                policy.status === "active" ? "暂停自动发言" : "恢复自动发言"
+              }
+              disabled={
+                busy || policy.status === "terminated" || participationBlocked
+              }
+              onClick={() =>
+                lifecycleMutation.mutate(
+                  policy.status === "active" ? "pause" : "resume",
+                )
+              }
+            >
+              {policy.status === "active" ? (
+                <Pause size={13} />
+              ) : (
+                <Play size={13} />
+              )}
+            </button>
+            <button
+              className="pm-icon-button danger"
+              type="button"
+              title="终止自动发言"
+              aria-label="终止自动发言"
+              disabled={
+                busy || policy.status === "terminated" || participationBlocked
+              }
+              onClick={() => lifecycleMutation.mutate("terminate")}
+            >
+              <Square size={12} />
+            </button>
+          </div>
+        )}
+      </div>
+      {error !== undefined && <div className="pm-error">{error}</div>}
+      {participationBlocked && (
+        <div className="meeting-ai-last-error">
+          {projectArchived ? "项目已归档" : "会议已关闭"}，自动发言已停止。
+        </div>
+      )}
+      {policy?.lastErrorMessage !== null &&
+        policy?.lastErrorMessage !== undefined && (
+          <div className="meeting-ai-last-error">
+            {policy.lastErrorCode} · {policy.lastErrorMessage}
+          </div>
+        )}
+      {draft !== null && policy !== undefined && (
+        <>
+          <div className="meeting-ai-trigger-grid">
+            {(
+              Object.keys(triggerLabels) as Array<keyof typeof triggerLabels>
+            ).map((kind) => (
+              <label key={kind}>
+                <input
+                  type="checkbox"
+                  checked={draft.triggerKinds.includes(kind)}
+                  disabled={
+                    busy ||
+                    policy.status === "terminated" ||
+                    participationBlocked
+                  }
+                  onChange={() =>
+                    setDraft({
+                      ...draft,
+                      triggerKinds: draft.triggerKinds.includes(kind)
+                        ? draft.triggerKinds.filter((item) => item !== kind)
+                        : [...draft.triggerKinds, kind],
+                    })
+                  }
+                />
+                {triggerLabels[kind]}
+              </label>
+            ))}
+          </div>
+          <div className="meeting-ai-fields">
+            <label>
+              <span>冷却秒数</span>
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                value={draft.cooldownSeconds}
+                disabled={
+                  busy || policy.status === "terminated" || participationBlocked
+                }
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    cooldownSeconds: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+            <label>
+              <span>最大轮次</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={draft.maxRounds}
+                disabled={
+                  busy || policy.status === "terminated" || participationBlocked
+                }
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    maxRounds: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+            <label>
+              <span>最大消息</span>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={draft.maxMessages}
+                disabled={
+                  busy || policy.status === "terminated" || participationBlocked
+                }
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    maxMessages: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
+            <label>
+              <span>单次预算（秒）</span>
+              <input
+                type="number"
+                min={1}
+                max={1800}
+                value={Math.round(draft.runBudgetMs / 1_000)}
+                disabled={
+                  busy || policy.status === "terminated" || participationBlocked
+                }
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    runBudgetMs: Number(event.target.value) * 1_000,
+                  })
+                }
+              />
+            </label>
+          </div>
+          <div className="meeting-ai-mentions">
+            <span>会议中 @</span>
+            {agentParticipants.length === 0 ? (
+              <em>当前会议没有活跃 AI 伙伴</em>
+            ) : (
+              agentParticipants.map((participant) => {
+                const selected = selectedMentionAgentIds.includes(
+                  participant.id,
+                );
+                return (
+                  <button
+                    key={participant.id}
+                    type="button"
+                    className={selected ? "active" : ""}
+                    aria-pressed={selected}
+                    disabled={participationBlocked}
+                    onClick={() =>
+                      onMentionAgentIdsChange(
+                        selected
+                          ? selectedMentionAgentIds.filter(
+                              (agentId) => agentId !== participant.id,
+                            )
+                          : [...selectedMentionAgentIds, participant.id],
+                      )
+                    }
+                  >
+                    {participant.name}
+                  </button>
+                );
+              })
+            )}
+          </div>
+          <div className="meeting-ai-footer">
+            <button
+              className="pm-btn secondary small"
+              type="button"
+              disabled={
+                busy || policy.status === "terminated" || participationBlocked
+              }
+              onClick={() => saveMutation.mutate()}
+            >
+              保存策略
+            </button>
+            <button
+              className="pm-btn secondary small"
+              type="button"
+              disabled={
+                busy || policy.status !== "active" || participationBlocked
+              }
+              onClick={() => triggerMutation.mutate("round")}
+            >
+              发起一轮
+            </button>
+            <button
+              className="pm-btn secondary small"
+              type="button"
+              disabled={
+                busy ||
+                policy.status !== "active" ||
+                participationBlocked ||
+                agendaItem.trim() === ""
+              }
+              onClick={() => triggerMutation.mutate("agenda")}
+            >
+              触发议程
+            </button>
+            <button
+              className="pm-btn secondary small"
+              type="button"
+              disabled={
+                busy ||
+                policy.status !== "active" ||
+                meeting.messages.length === 0 ||
+                participationBlocked
+              }
+              onClick={() => triggerMutation.mutate("summary")}
+            >
+              生成总结
+            </button>
+          </div>
+          <input
+            className="meeting-ai-agenda-input"
+            aria-label="AI 议程节点"
+            value={agendaItem}
+            disabled={
+              busy || policy.status !== "active" || participationBlocked
+            }
+            onChange={(event) => setAgendaItem(event.target.value)}
+            placeholder="用于 AI 触发的议程节点"
+          />
+        </>
+      )}
+    </section>
   );
 }

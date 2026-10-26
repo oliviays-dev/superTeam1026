@@ -7,9 +7,13 @@ import {
   type AgentRuntimeEvent,
   type DshSdkAdapterOptions,
 } from "@pluginmax/agent-runtime";
-import { buildTaskContext } from "@pluginmax/context";
+import { buildMeetingContext, buildTaskContext } from "@pluginmax/context";
 import type { Agent, Run, Task } from "@pluginmax/contracts";
-import type { PlatformRepositories } from "@pluginmax/database";
+import {
+  MeetingAiPreconditionError,
+  type MeetingAiRunContext,
+  type PlatformRepositories,
+} from "@pluginmax/database";
 import { isTerminalRunStatus } from "@pluginmax/domain";
 import { LocalFileStore } from "@pluginmax/files";
 
@@ -94,7 +98,7 @@ export class RunExecutor {
       }
     };
     await assertLease();
-    const run = await this.requireRun(runId);
+    let run = await this.requireRun(runId);
     if (
       options.traceId !== undefined &&
       run.traceId !== null &&
@@ -102,7 +106,36 @@ export class RunExecutor {
     ) {
       throw new Error("claimed job trace does not match its run");
     }
-    const task = await this.requireTask(run.taskId);
+    const task =
+      run.taskId === null ? null : await this.requireTask(run.taskId);
+    let meetingContext: MeetingAiRunContext | null = null;
+    if (run.meetingTurnId !== null) {
+      try {
+        meetingContext = await this.repositories.meetingAi.prepareRun(runId);
+      } catch (error) {
+        if (!(error instanceof MeetingAiPreconditionError)) throw error;
+        if (run.status === "cancelled") return;
+        await this.repositories.runs.appendEventIfAbsent(
+          runId,
+          "error",
+          "Meeting AI participation was rejected before execution",
+          { code: error.code, error: error.message },
+        );
+        await this.repositories.runs.finish(
+          runId,
+          "failed",
+          null,
+          error.message,
+        );
+        await this.repositories.meetingAi.failTurn(
+          runId,
+          error.code,
+          error.message,
+        );
+        return;
+      }
+      run = await this.requireRun(runId);
+    }
     const agent = await this.repositories.agents.get(run.agentId);
     if (agent === undefined) throw new Error("agent is unavailable");
     const project = await this.repositories.projects.get(run.projectId);
@@ -131,7 +164,7 @@ export class RunExecutor {
           attempt: effect.receipt.attempt,
         },
       );
-      await this.completeRun(runId, task, output, assertLease);
+      await this.completeRun(runId, task, meetingContext, output, assertLease);
       return;
     }
     if (effect.kind === "cancelled") {
@@ -161,13 +194,32 @@ export class RunExecutor {
         project.id,
         agent.id,
       );
-    const context = buildTaskContext({
-      runId,
-      project,
-      task,
-      agent,
-      episodes,
-    });
+    if (meetingContext !== null) {
+      const currentMeetingContext =
+        await this.repositories.meetingAi.getRunContext(runId);
+      if (currentMeetingContext === undefined) {
+        throw new Error("meeting AI turn context is unavailable");
+      }
+      meetingContext = currentMeetingContext;
+    }
+    const context =
+      meetingContext === null
+        ? buildTaskContext({
+            runId,
+            project,
+            task: task!,
+            agent,
+            episodes,
+          })
+        : buildMeetingContext({
+            runId,
+            project,
+            meeting: meetingContext.meeting,
+            turn: meetingContext.turn,
+            messages: meetingContext.messages,
+            agent,
+            episodes,
+          });
     await this.repositories.contexts.save(context.pack, context.receipt);
     const workspacePath = resolve(this.options.workspaceRoot, run.projectId);
     await mkdir(workspacePath, { recursive: true });
@@ -256,9 +308,11 @@ export class RunExecutor {
         {
           runId,
           effectKey,
-          title: task.title,
-          description: task.description,
-          acceptance: task.acceptance,
+          title:
+            task?.title ??
+            `${meetingContext!.meeting.title} · ${meetingContext!.turn.triggerKind}`,
+          description: task?.description ?? meetingContext!.turn.triggerReason,
+          acceptance: task?.acceptance ?? [],
           instruction: context.pack.renderedPrompt,
           agentName: agent.name,
           runtimeKind: agent.runtimeKind,
@@ -283,7 +337,13 @@ export class RunExecutor {
             { output: event.output },
           );
           if (completed === undefined) throw new RunLeaseLostError();
-          await this.completeRun(runId, task, event.output, assertLease);
+          await this.completeRun(
+            runId,
+            task,
+            meetingContext,
+            event.output,
+            assertLease,
+          );
           return;
         }
       }
@@ -318,7 +378,15 @@ export class RunExecutor {
           "Run exceeded its timeout",
         );
         await this.repositories.runs.timeout(runId, "Run exceeded its timeout");
-        await this.repositories.tasks.setStatus(task.id, "queued");
+        if (task !== null) {
+          await this.repositories.tasks.setStatus(task.id, "queued");
+        } else {
+          await this.repositories.meetingAi.failTurn(
+            runId,
+            "meeting_ai_timeout",
+            "Meeting AI turn exceeded its run budget",
+          );
+        }
         await this.repositories.runs.appendEvent(
           runId,
           "error",
@@ -358,17 +426,36 @@ export class RunExecutor {
 
   private async completeRun(
     runId: string,
-    task: Task,
+    task: Task | null,
+    meetingContext: MeetingAiRunContext | null,
     output: string,
     assertLease: () => Promise<void>,
   ): Promise<void> {
     const run = await this.requireRun(runId);
     if (run.status === "cancelled") throw new RunCancelledError();
-    if (run.status === "completed") return;
+    if (run.status === "completed") {
+      if (meetingContext !== null) {
+        await this.repositories.meetingAi.completeTurn(runId, output);
+      }
+      return;
+    }
+    if (output.trim() === "") {
+      throw new Error("runtime returned an empty output");
+    }
     await this.repositories.runs.finish(runId, "completed", output, null);
+    if (meetingContext !== null) {
+      await this.repositories.meetingAi.completeTurn(runId, output);
+      await this.repositories.runs.appendEventIfAbsent(
+        runId,
+        "run.completed",
+        "Meeting AI turn completed and was published to the meeting",
+        { meetingId: meetingContext.meeting.id },
+      );
+      return;
+    }
     const ref = await this.fileStore.put({
       workspaceId: run.projectId,
-      name: `${task.title.replace(/[^a-zA-Z0-9._-]+/g, "-")}-result.md`,
+      name: `${task!.title.replace(/[^a-zA-Z0-9._-]+/g, "-")}-result.md`,
       mimeType: "text/markdown",
       content: Buffer.from(output, "utf8"),
     });
@@ -401,7 +488,7 @@ export class RunExecutor {
         size: artifact.size,
       },
     );
-    await this.repositories.tasks.setStatus(task.id, "review");
+    await this.repositories.tasks.setStatus(task!.id, "review");
   }
 
   private async persistEvent(

@@ -36,6 +36,8 @@ import type {
   Meeting,
   MeetingActionItem,
   MeetingActionItemConversion,
+  MeetingAiPolicy,
+  MeetingAiPolicyLifecycleInput,
   MeetingDetail,
   MeetingMessage,
   MeetingMinutes,
@@ -68,9 +70,12 @@ import type {
   TaskDetail,
   TaskMessage,
   TransferWorkflowApprovalInput,
+  TriggerMeetingAiInput,
+  TriggerMeetingAiResult,
   UploadTaskAttachmentInput,
   UpdateAgentInput,
   UpdateHandoffCardInput,
+  UpdateMeetingAiPolicyInput,
   UpdateMemoryClaimInput,
   UpdateProjectMemberInput,
   UpdateProjectInput,
@@ -1048,10 +1053,52 @@ export function getMeeting(id: string): Promise<MeetingDetail> {
 export function postMeetingMessage(
   meetingId: string,
   content: string,
+  mentions: readonly string[] = [],
 ): Promise<MeetingMessage> {
   return request(`/meetings/${meetingId}/messages`, {
     method: "POST",
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, mentions }),
+  });
+}
+
+export function getMeetingAiPolicy(
+  meetingId: string,
+): Promise<MeetingAiPolicy> {
+  return request(`/meetings/${meetingId}/ai-policy`);
+}
+
+export function updateMeetingAiPolicy(
+  meetingId: string,
+  input: UpdateMeetingAiPolicyInput,
+): Promise<MeetingAiPolicy> {
+  return request(`/meetings/${meetingId}/ai-policy`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function transitionMeetingAiPolicy(
+  meetingId: string,
+  transition: "pause" | "resume" | "terminate",
+  input: MeetingAiPolicyLifecycleInput,
+): Promise<MeetingAiPolicy> {
+  return request(`/meetings/${meetingId}/ai-policy/${transition}`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function triggerMeetingAi(
+  meetingId: string,
+  input: TriggerMeetingAiInput,
+  idempotencyKey?: string,
+): Promise<TriggerMeetingAiResult> {
+  return request(`/meetings/${meetingId}/ai-triggers`, {
+    method: "POST",
+    ...(idempotencyKey === undefined
+      ? {}
+      : { headers: { "idempotency-key": idempotencyKey } }),
+    body: JSON.stringify(input),
   });
 }
 

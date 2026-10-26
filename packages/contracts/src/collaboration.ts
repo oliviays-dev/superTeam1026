@@ -961,6 +961,19 @@ export const meetingMessageSchema = z.object({
   authorId: z.string(),
   authorName: z.string(),
   content: z.string(),
+  turnId: z.string().uuid().nullable().default(null),
+  policyId: z.string().uuid().nullable().default(null),
+  policyRevision: z.number().int().positive().nullable().default(null),
+  triggerKind: z
+    .enum(["mention", "round", "agenda", "summary"])
+    .nullable()
+    .default(null),
+  triggerReason: z.string().nullable().default(null),
+  runId: z.string().uuid().nullable().default(null),
+  traceId: z.string().nullable().default(null),
+  status: z.enum(["sent", "failed"]).default("sent"),
+  errorCode: z.string().nullable().default(null),
+  errorMessage: z.string().nullable().default(null),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type MeetingMessage = z.infer<typeof meetingMessageSchema>;
@@ -970,6 +983,133 @@ export const meetingDetailSchema = z.object({
   messages: z.array(meetingMessageSchema),
 });
 export type MeetingDetail = z.infer<typeof meetingDetailSchema>;
+
+export const meetingAiTriggerKindSchema = z.enum([
+  "mention",
+  "round",
+  "agenda",
+  "summary",
+]);
+export type MeetingAiTriggerKind = z.infer<typeof meetingAiTriggerKindSchema>;
+
+export const meetingAiPolicyStatusSchema = z.enum([
+  "active",
+  "paused",
+  "terminated",
+]);
+export type MeetingAiPolicyStatus = z.infer<typeof meetingAiPolicyStatusSchema>;
+
+export const meetingAiPolicyStatsSchema = z.object({
+  roundsUsed: z.number().int().nonnegative(),
+  messagesSent: z.number().int().nonnegative(),
+  messagesFailed: z.number().int().nonnegative(),
+  remainingRounds: z.number().int().nonnegative(),
+  remainingMessages: z.number().int().nonnegative(),
+});
+export type MeetingAiPolicyStats = z.infer<typeof meetingAiPolicyStatsSchema>;
+
+export const meetingAiPolicySchema = z.object({
+  id: z.string().uuid(),
+  meetingId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  status: meetingAiPolicyStatusSchema,
+  triggerKinds: z.array(meetingAiTriggerKindSchema),
+  cooldownSeconds: z.number().int().nonnegative(),
+  maxRounds: z.number().int().positive(),
+  maxMessages: z.number().int().positive(),
+  runBudgetMs: z.number().int().positive(),
+  revision: z.number().int().positive(),
+  lastErrorCode: z.string().nullable(),
+  lastErrorMessage: z.string().nullable(),
+  lastErrorAt: z.string().datetime({ offset: true }).nullable(),
+  stats: meetingAiPolicyStatsSchema,
+  createdBy: z.string(),
+  updatedBy: z.string(),
+  createdAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type MeetingAiPolicy = z.infer<typeof meetingAiPolicySchema>;
+
+export const updateMeetingAiPolicyInputSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+  status: meetingAiPolicyStatusSchema.optional(),
+  triggerKinds: z
+    .array(meetingAiTriggerKindSchema)
+    .min(1)
+    .max(4)
+    .transform((kinds) => [...new Set(kinds)])
+    .optional(),
+  cooldownSeconds: z.number().int().min(0).max(3600).optional(),
+  maxRounds: z.number().int().min(1).max(100).optional(),
+  maxMessages: z.number().int().min(1).max(500).optional(),
+  runBudgetMs: z.number().int().min(1_000).max(1_800_000).optional(),
+});
+export type UpdateMeetingAiPolicyInput = z.infer<
+  typeof updateMeetingAiPolicyInputSchema
+>;
+
+export const meetingAiPolicyLifecycleInputSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+  reason: z.string().trim().max(1_000).default(""),
+});
+export type MeetingAiPolicyLifecycleInput = z.infer<
+  typeof meetingAiPolicyLifecycleInputSchema
+>;
+
+export const triggerMeetingAiInputSchema = z.object({
+  kind: meetingAiTriggerKindSchema,
+  agentIds: z
+    .array(z.string().uuid())
+    .max(20)
+    .default([])
+    .transform((ids) => [...new Set(ids)]),
+  sourceMessageId: z.string().uuid().optional(),
+  roundNumber: z.number().int().min(1).max(100).optional(),
+  agendaItem: z.string().trim().min(1).max(2_000).optional(),
+  reason: z.string().trim().max(2_000).default(""),
+});
+export type TriggerMeetingAiInput = z.infer<typeof triggerMeetingAiInputSchema>;
+
+export const meetingAiTurnSummarySchema = z.object({
+  id: z.string().uuid(),
+  roundId: z.string().uuid(),
+  roundNumber: z.number().int().positive(),
+  agentId: z.string().uuid(),
+  agentName: z.string(),
+  triggerKind: meetingAiTriggerKindSchema,
+  triggerReason: z.string(),
+  status: z.enum([
+    "queued",
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "skipped",
+  ]),
+  runId: z.string().uuid().nullable(),
+  messageId: z.string().uuid().nullable(),
+  errorCode: z.string().nullable(),
+  errorMessage: z.string().nullable(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type MeetingAiTurnSummary = z.infer<typeof meetingAiTurnSummarySchema>;
+
+export const triggerMeetingAiResultSchema = z.object({
+  policy: meetingAiPolicySchema,
+  outcome: z.enum(["queued", "reused", "skipped"]),
+  roundNumber: z.number().int().positive().nullable(),
+  turns: z.array(meetingAiTurnSummarySchema),
+  skipped: z.array(
+    z.object({
+      agentId: z.string().uuid(),
+      agentName: z.string(),
+      reason: z.string(),
+    }),
+  ),
+});
+export type TriggerMeetingAiResult = z.infer<
+  typeof triggerMeetingAiResultSchema
+>;
 
 const meetingSourceMessageIdsSchema = z
   .array(z.string().uuid())

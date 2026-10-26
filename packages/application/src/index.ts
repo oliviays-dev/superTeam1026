@@ -33,6 +33,8 @@ import type {
   Meeting,
   MeetingActionItem,
   MeetingActionItemConversion,
+  MeetingAiPolicy,
+  MeetingAiPolicyLifecycleInput,
   MeetingDetail,
   MeetingMessage,
   MeetingMinutes,
@@ -76,12 +78,15 @@ import type {
   TaskMessage,
   TaskReviewInput,
   TraceContext,
+  TriggerMeetingAiInput,
+  TriggerMeetingAiResult,
   TransferTaskInput,
   TransferWorkflowApprovalInput,
   UpdateAgentInput,
   UpdateHandoffCardInput,
   UpdateMemoryClaimInput,
   UpdateMeetingActionItemInput,
+  UpdateMeetingAiPolicyInput,
   UpdateMeetingMinutesDraftInput,
   UpdateProjectMemberInput,
   UpdateProjectInput,
@@ -132,6 +137,7 @@ import {
   workflowRetryDelayMs,
 } from "@pluginmax/domain";
 import {
+  MeetingAiPreconditionError,
   MemoryReviewConflictError,
   ProjectTemplateRepositoryError,
   type PlatformRepositories,
@@ -674,6 +680,27 @@ export class PlatformApplication {
           404,
         );
       }
+      if (project.status === "archived") {
+        const meetings = await this.repositories.meetings.list(project.id);
+        for (const meeting of meetings) {
+          const policy = await this.repositories.meetingAi.getPolicy(
+            meeting.id,
+          );
+          if (policy?.status === "active") {
+            await this.repositories.meetingAi.transitionPolicy({
+              id: policy.id,
+              expectedRevision: policy.revision,
+              status: "paused",
+              actorId: "local-admin",
+              reason: "project archived",
+            });
+          }
+          await this.repositories.meetingAi.cancelOpenRuns(
+            meeting.id,
+            "project archived",
+          );
+        }
+      }
       return project;
     } catch (error) {
       if (
@@ -723,6 +750,12 @@ export class PlatformApplication {
     );
     if (agent === undefined) {
       throw new ApplicationError("agent_not_found", "Agent not found", 404);
+    }
+    if (agent.status !== "active") {
+      await this.repositories.meetingAi.cancelAgentOpenRuns(
+        agent.id,
+        "agent disabled",
+      );
     }
     return this.getAgent(id);
   }
@@ -3295,6 +3328,9 @@ export class PlatformApplication {
       if (node.type !== "task" || node.runId === null) continue;
       const run = await this.repositories.runs.get(node.runId);
       if (run === undefined) continue;
+      if (run.taskId === null) {
+        throw new Error("workflow task run is missing its task id");
+      }
       if (
         node.status === "running" &&
         node.timeoutAt !== null &&
@@ -4545,7 +4581,34 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<Meeting> {
     await this.requireActiveProjectOwner(input.projectId, actorId);
+    const members = await this.repositories.projectMemberships.listMembers(
+      input.projectId,
+    );
     const agents = await this.repositories.agents.list();
+    for (const agentId of input.agentIds) {
+      const agent = await this.repositories.agents.get(agentId, true);
+      if (agent === undefined || agent.status !== "active") {
+        throw new ApplicationError(
+          "meeting_ai_agent_unavailable",
+          "Every meeting AI participant must be active",
+          409,
+        );
+      }
+      if (
+        !members.some(
+          (member) =>
+            member.kind === "agent" &&
+            member.actorId === agentId &&
+            member.status === "active",
+        )
+      ) {
+        throw new ApplicationError(
+          "meeting_ai_agent_not_member",
+          "Every meeting AI participant must be an active project member",
+          409,
+        );
+      }
+    }
     return this.repositories.meetings.create(input, agents);
   }
 
@@ -4565,18 +4628,210 @@ export class PlatformApplication {
     meetingId: string,
     content: string,
     actorId = "local-admin",
+    mentions: readonly string[] = [],
   ): Promise<MeetingMessage> {
     const detail = await this.getMeeting(meetingId, actorId);
     if (detail.meeting.status === "closed") {
       throw new ApplicationError("meeting_closed", "Meeting is closed", 409);
     }
-    return this.repositories.meetings.postMessage(
+    const mentionedAgentIds = new Set(mentions);
+    for (const participant of detail.meeting.participants) {
+      if (participant.kind !== "agent") continue;
+      if (content.includes(`@${participant.name}`)) {
+        mentionedAgentIds.add(participant.id);
+      }
+    }
+    const agentParticipants = new Set(
+      detail.meeting.participants
+        .filter((participant) => participant.kind === "agent")
+        .map((participant) => participant.id),
+    );
+    if (
+      [...mentionedAgentIds].some((agentId) => !agentParticipants.has(agentId))
+    ) {
+      throw new ApplicationError(
+        "meeting_mention_not_participant",
+        "Mentioned AI participants must belong to the meeting",
+        409,
+      );
+    }
+    const message = await this.repositories.meetings.postMessage(
       meetingId,
       "human",
       actorId,
       "Local Admin",
       content,
     );
+    if (mentionedAgentIds.size > 0) {
+      const policy = await this.repositories.meetingAi.getPolicy(meetingId);
+      if (
+        policy !== undefined &&
+        policy.status === "active" &&
+        policy.triggerKinds.includes("mention")
+      ) {
+        try {
+          await this.repositories.meetingAi.trigger({
+            meetingId,
+            projectId: detail.meeting.projectId,
+            actorId,
+            trigger: {
+              kind: "mention",
+              agentIds: [...mentionedAgentIds],
+              sourceMessageId: message.id,
+              reason: "A human participant mentioned the AI teammate",
+            },
+            fallbackSummaryKey: message.id,
+          });
+        } catch (error) {
+          if (!(error instanceof MeetingAiPreconditionError)) throw error;
+        }
+      }
+    }
+    return message;
+  }
+
+  async getMeetingAiPolicy(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingAiPolicy> {
+    await this.getMeeting(meetingId, actorId);
+    const policy = await this.repositories.meetingAi.getPolicy(meetingId);
+    if (policy === undefined) {
+      throw new ApplicationError(
+        "meeting_ai_policy_not_found",
+        "Meeting AI policy not found",
+        404,
+      );
+    }
+    return policy;
+  }
+
+  async updateMeetingAiPolicy(
+    meetingId: string,
+    input: UpdateMeetingAiPolicyInput,
+    actorId = "local-admin",
+  ): Promise<MeetingAiPolicy> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    const current = await this.getMeetingAiPolicy(meetingId, actorId);
+    const updated = await this.repositories.meetingAi.updatePolicy({
+      id: current.id,
+      expectedRevision: input.expectedRevision,
+      patch: input,
+      actorId,
+    });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "meeting_ai_policy_revision_conflict",
+        "Meeting AI policy was revised or terminated",
+        409,
+        { currentRevision: current.revision },
+      );
+    }
+    if (updated.status !== "active") {
+      await this.repositories.meetingAi.cancelOpenRuns(
+        meetingId,
+        updated.status === "terminated"
+          ? "meeting AI participation terminated"
+          : "meeting AI participation paused",
+      );
+    }
+    return updated;
+  }
+
+  async pauseMeetingAi(
+    meetingId: string,
+    input: MeetingAiPolicyLifecycleInput,
+    actorId = "local-admin",
+  ): Promise<MeetingAiPolicy> {
+    return this.transitionMeetingAi(meetingId, "paused", input, actorId);
+  }
+
+  async resumeMeetingAi(
+    meetingId: string,
+    input: MeetingAiPolicyLifecycleInput,
+    actorId = "local-admin",
+  ): Promise<MeetingAiPolicy> {
+    return this.transitionMeetingAi(meetingId, "active", input, actorId);
+  }
+
+  async terminateMeetingAi(
+    meetingId: string,
+    input: MeetingAiPolicyLifecycleInput,
+    actorId = "local-admin",
+  ): Promise<MeetingAiPolicy> {
+    return this.transitionMeetingAi(meetingId, "terminated", input, actorId);
+  }
+
+  async triggerMeetingAi(
+    meetingId: string,
+    input: TriggerMeetingAiInput,
+    actorId = "local-admin",
+  ): Promise<TriggerMeetingAiResult> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    const policy = await this.getMeetingAiPolicy(meetingId, actorId);
+    let trigger = input;
+    if (trigger.kind === "mention" && trigger.sourceMessageId === undefined) {
+      const lastMessage = [...detail.messages]
+        .reverse()
+        .find((message) => message.status === "sent");
+      if (lastMessage === undefined) {
+        throw new ApplicationError(
+          "meeting_ai_source_required",
+          "A mention trigger requires an existing meeting message",
+          400,
+        );
+      }
+      trigger = { ...trigger, sourceMessageId: lastMessage.id };
+    }
+    try {
+      return await this.repositories.meetingAi.trigger({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        actorId,
+        trigger,
+        fallbackSummaryKey:
+          trigger.sourceMessageId ?? detail.messages.at(-1)?.id ?? meetingId,
+      });
+    } catch (error) {
+      if (error instanceof MeetingAiPreconditionError) {
+        throw new ApplicationError(
+          error.code,
+          error.message,
+          error.code === "meeting_not_found" ? 404 : 409,
+          { policyRevision: policy.revision },
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async transitionMeetingAi(
+    meetingId: string,
+    status: MeetingAiPolicy["status"],
+    input: MeetingAiPolicyLifecycleInput,
+    actorId: string,
+  ): Promise<MeetingAiPolicy> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    await this.requireActiveProjectOwner(detail.meeting.projectId, actorId);
+    const current = await this.getMeetingAiPolicy(meetingId, actorId);
+    const updated = await this.repositories.meetingAi.transitionPolicy({
+      id: current.id,
+      expectedRevision: input.expectedRevision,
+      status,
+      actorId,
+      reason: input.reason,
+    });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "meeting_ai_policy_revision_conflict",
+        "Meeting AI policy was revised or cannot transition",
+        409,
+        { currentRevision: current.revision },
+      );
+    }
+    return updated;
   }
 
   async closeMeeting(
@@ -4592,6 +4847,20 @@ export class PlatformApplication {
         409,
       );
     }
+    const aiPolicy = await this.repositories.meetingAi.getPolicy(meetingId);
+    if (aiPolicy?.status === "active") {
+      await this.repositories.meetingAi.transitionPolicy({
+        id: aiPolicy.id,
+        expectedRevision: aiPolicy.revision,
+        status: "paused",
+        actorId,
+        reason: "meeting closed",
+      });
+    }
+    await this.repositories.meetingAi.cancelOpenRuns(
+      meetingId,
+      "meeting closed",
+    );
     if (summary.trim() !== "") {
       const minutes = await this.getMeetingMinutes(meetingId, actorId);
       const saved = await this.repositories.meetingDecisions.saveDraft({

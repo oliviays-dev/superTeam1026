@@ -60,6 +60,10 @@ import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.j
 import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
 import { RuntimeTraceRepository } from "./runtime-trace-repository.js";
 import { MeetingDecisionsRepository } from "./meeting-decisions-repository.js";
+import {
+  failMeetingTurnWithClient,
+  MeetingAiRepository,
+} from "./meeting-ai-repository.js";
 import { MemoryClosureRepository } from "./memory-closure-repository.js";
 import { WorkbenchReportsRepository } from "./workbench-reports-repository.js";
 import { ProjectTemplatesRepository } from "./project-templates-repository.js";
@@ -816,10 +820,12 @@ export class RunRepository {
         [id],
       );
       const run = runFromRow(result.rows[0]!);
-      await client.query(
-        "UPDATE tasks SET status = 'cancelled', updated_at = NOW() WHERE id = $1",
-        [run.taskId],
-      );
+      if (run.taskId !== null) {
+        await client.query(
+          "UPDATE tasks SET status = 'cancelled', updated_at = NOW() WHERE id = $1",
+          [run.taskId],
+        );
+      }
       await this.appendEvent(
         id,
         "run.cancelled",
@@ -915,6 +921,7 @@ export class JobRepository {
   async claimNext(
     owner: string,
     leaseSeconds: number,
+    runId?: string,
   ): Promise<ClaimedJob | undefined> {
     return this.database.transaction(async (client) => {
       const candidate = await client.query<{
@@ -923,7 +930,7 @@ export class JobRepository {
         attempts: number;
         max_attempts: number;
         run_status: string;
-        task_id: string;
+        task_id: string | null;
         trace_id: string | null;
         trace_root_span_id: string | null;
       }>(
@@ -941,9 +948,11 @@ export class JobRepository {
          WHERE job.status = 'queued'
            AND job.available_at <= NOW()
            AND job.attempts < job.max_attempts
+           AND ($1::uuid IS NULL OR job.run_id = $1)
          ORDER BY job.available_at, job.created_at
          FOR UPDATE OF job SKIP LOCKED
          LIMIT 1`,
+        [runId ?? null],
       );
       const row = candidate.rows[0];
       if (row === undefined) return undefined;
@@ -1019,12 +1028,14 @@ export class JobRepository {
           ],
         );
       }
-      await client.query(
-        `UPDATE tasks
-         SET status = 'in_progress', updated_at = NOW()
-         WHERE id = $1 AND status = 'queued'`,
-        [row.task_id],
-      );
+      if (row.task_id !== null) {
+        await client.query(
+          `UPDATE tasks
+           SET status = 'in_progress', updated_at = NOW()
+           WHERE id = $1 AND status = 'queued'`,
+          [row.task_id],
+        );
+      }
       return {
         id: row.id,
         runId: row.run_id,
@@ -1148,7 +1159,7 @@ export class JobRepository {
         run_id: string;
         attempts: number;
         max_attempts: number;
-        task_id: string;
+        task_id: string | null;
       }>(
         `SELECT
            job.run_id,
@@ -1243,12 +1254,21 @@ export class JobRepository {
          WHERE id = $1 AND status IN ('queued', 'running')`,
         [row.run_id, safeError],
       );
-      await client.query(
-        `UPDATE tasks
-         SET status = 'queued', updated_at = NOW()
-         WHERE id = $1 AND status = 'in_progress'`,
-        [row.task_id],
-      );
+      if (row.task_id !== null) {
+        await client.query(
+          `UPDATE tasks
+           SET status = 'queued', updated_at = NOW()
+           WHERE id = $1 AND status = 'in_progress'`,
+          [row.task_id],
+        );
+      } else {
+        await failMeetingTurnWithClient(
+          client,
+          row.run_id,
+          "meeting_ai_runtime_failed",
+          safeError,
+        );
+      }
       await appendRunEventWithClient(
         client,
         row.run_id,
@@ -1276,7 +1296,7 @@ export class JobRepository {
         run_id: string;
         attempts: number;
         max_attempts: number;
-        task_id: string;
+        task_id: string | null;
       }>(
         `SELECT
            job.run_id,
@@ -1325,12 +1345,21 @@ export class JobRepository {
          WHERE id = $1 AND status IN ('queued', 'running')`,
         [row.run_id, reason.slice(0, 4_000)],
       );
-      await client.query(
-        `UPDATE tasks
-         SET status = 'queued', updated_at = NOW()
-         WHERE id = $1 AND status = 'in_progress'`,
-        [row.task_id],
-      );
+      if (row.task_id !== null) {
+        await client.query(
+          `UPDATE tasks
+           SET status = 'queued', updated_at = NOW()
+           WHERE id = $1 AND status = 'in_progress'`,
+          [row.task_id],
+        );
+      } else if (exhausted) {
+        await failMeetingTurnWithClient(
+          client,
+          row.run_id,
+          "meeting_ai_interrupted",
+          reason,
+        );
+      }
       await appendRunEventWithClient(
         client,
         row.run_id,
@@ -1417,12 +1446,21 @@ export class JobRepository {
         );
         const taskId = interrupted.rows[0]?.task_id;
         if (taskId !== undefined) {
-          await client.query(
-            `UPDATE tasks
-             SET status = 'queued', updated_at = NOW()
-             WHERE id = $1`,
-            [taskId],
-          );
+          if (taskId === null && outcome === "dead_letter") {
+            await failMeetingTurnWithClient(
+              client,
+              job.run_id,
+              "meeting_ai_lease_expired",
+              "Worker lease expired after all retry attempts",
+            );
+          } else if (taskId !== null) {
+            await client.query(
+              `UPDATE tasks
+               SET status = 'queued', updated_at = NOW()
+               WHERE id = $1`,
+              [taskId],
+            );
+          }
         }
         await appendRunEventWithClient(
           client,
@@ -1469,7 +1507,7 @@ export class JobRepository {
     reason: string,
   ): Promise<Job | undefined> {
     return this.database.transaction(async (client) => {
-      const current = await client.query<JobRow & { task_id: string }>(
+      const current = await client.query<JobRow & { task_id: string | null }>(
         `SELECT job.*, run.task_id
          FROM jobs AS job
          JOIN runs AS run ON run.id = job.run_id
@@ -1503,12 +1541,14 @@ export class JobRepository {
          WHERE id = $1 AND status IN ('failed', 'interrupted')`,
         [job.run_id],
       );
-      await client.query(
-        `UPDATE tasks
-         SET status = 'in_progress', updated_at = NOW()
-         WHERE id = $1 AND status = 'queued'`,
-        [job.task_id],
-      );
+      if (job.task_id !== null) {
+        await client.query(
+          `UPDATE tasks
+           SET status = 'in_progress', updated_at = NOW()
+           WHERE id = $1 AND status = 'queued'`,
+          [job.task_id],
+        );
+      }
       await appendRunEventWithClient(
         client,
         job.run_id,
@@ -1593,6 +1633,7 @@ export class PlatformRepositories {
   readonly workflowRuntime: WorkflowRuntimeRepository;
   readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
+  readonly meetingAi: MeetingAiRepository;
   readonly meetingDecisions: MeetingDecisionsRepository;
   readonly workbench: WorkbenchRepository;
   readonly workbenchReports: WorkbenchReportsRepository;
@@ -1618,6 +1659,7 @@ export class PlatformRepositories {
     this.workflowRuntime = new WorkflowRuntimeRepository(database);
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
+    this.meetingAi = new MeetingAiRepository(database);
     this.meetingDecisions = new MeetingDecisionsRepository(database);
     this.workbench = new WorkbenchRepository(database);
     this.workbenchReports = new WorkbenchReportsRepository(database);
