@@ -1,7 +1,7 @@
 # V1 Batch 13.1B：Runtime 经济与可见性
 
-> 状态：Batch 13.1B 已完成。Batch 17B、Shared Space、sandbox、Lane 级路径写
-> 权限和 Global Write 仍未实现。
+> 状态：Batch 13.1B 已完成。Batch 17B 已由后续独立批次完成；Shared Space、
+> sandbox、Lane 级路径写权限和 Global Write 仍未实现。
 
 ## 1. 基线
 

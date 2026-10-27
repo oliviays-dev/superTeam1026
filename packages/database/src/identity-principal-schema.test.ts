@@ -49,7 +49,7 @@ integration("identity principal migration", () => {
       const version = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(version.rows[0]?.version).toBe(29);
+      expect(version.rows[0]?.version).toBe(30);
 
       const tables = await isolated.query<{ table_name: string }>(
         `SELECT table_name

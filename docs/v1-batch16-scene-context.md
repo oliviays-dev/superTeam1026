@@ -1,7 +1,7 @@
 # V1 Batch 16：Scene Context / Scene Session
 
-> 状态：Batch 16 已完成。Batch 17A Task Execution Depth 已在后续独立批次完成；
-> Shared Space、sandbox 扩展和 Batch 17B 仍未实现。
+> 状态：Batch 16 已完成。Batch 17A、17B 已在后续独立批次完成；
+> Shared Space 和 sandbox 扩展仍未实现。
 
 ## 1. 基线
 

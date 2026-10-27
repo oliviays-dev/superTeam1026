@@ -157,7 +157,7 @@ upgrade_attachment="$(
      FROM task_attachments
      WHERE id = '00000000-0000-4000-8000-000000000504';"
 )"
-[[ "$upgrade_version" == "29" ]]
+[[ "$upgrade_version" == "30" ]]
 [[ "$upgrade_task" == "done|medium|true" ]]
 [[ "$upgrade_run" == "migration-27-output|owner|true" ]]
 [[ "$upgrade_message" == "legacy task message|true|0|0" ]]
@@ -169,7 +169,7 @@ fresh_version="$(
   psql_database "$FRESH_DATABASE" \
     "SELECT MAX(version) FROM platform_migrations;"
 )"
-[[ "$fresh_version" == "29" ]]
+[[ "$fresh_version" == "30" ]]
 
 TEST_DATABASE_URL="$FRESH_URL" CI=true \
   node_modules/.bin/vitest run \

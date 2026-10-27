@@ -156,7 +156,7 @@ upgrade_sessions="$(
   psql_database "$UPGRADE_DATABASE" \
     "SELECT COUNT(*) FROM scene_sessions;"
 )"
-[[ "$upgrade_version" == "29" ]]
+[[ "$upgrade_version" == "30" ]]
 [[ "$upgrade_tables" == "5" ]]
 [[ "$upgrade_pack" == "00000000-0000-4000-8000-000000000302|true" ]]
 [[ "$upgrade_consensus" == "f" ]]
@@ -168,7 +168,7 @@ fresh_version="$(
   psql_database "$FRESH_DATABASE" \
     "SELECT MAX(version) FROM platform_migrations;"
 )"
-[[ "$fresh_version" == "29" ]]
+[[ "$fresh_version" == "30" ]]
 
 TEST_DATABASE_URL="$FRESH_URL" CI=true \
   node_modules/.bin/vitest run \

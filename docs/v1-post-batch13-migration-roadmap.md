@@ -1,6 +1,6 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 13.1A、13.1B、14A-17A 已完成；下一正式批次为 Batch 17B
+> 状态：Batch 13.1A、13.1B、14A-17B 已完成；下一正式批次为 Batch 18
 >
 > Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
 >
@@ -136,7 +136,7 @@ Binding 完成。
 | 15B Ticket / Gate | P0 | 15A | Action Ticket、阻塞 Gate、决策和恢复 | 无 Ticket 或 Gate 不放行，重试无重复副作用 |
 | 16 Scene Context | P1 | 14C、15B | Scene Session、Contribution、Receipt、Channel | 场景隔离、确定性重放、来源可追溯 |
 | 17A Task Execution Depth | P1 | 13.1A、15B、16 | 队列、暂停、Claim、needsInput、文档、自动验收 | 队列、依赖、恢复、Review 和文档权限通过 |
-| 17B AI Teammate | P1 | 14C、16、17A、13.1B | 模板、生命周期、工作计划、周报、统计 | 模板/实例可追溯、受限任务、转派和统计对账通过 |
+| 17B AI Teammate | P1 | 14C、16、17A、13.1B | 模板、生命周期、工作计划、周报、统计 | 已完成：模板/实例可追溯、受限任务、转派和统计对账通过 |
 | 18 Meeting Collaboration | P1 | 14C、16 | Facilitator、Delegate、私密嘱咐、文件、归档 | 委托、投递、纪要、归档和敏感信息边界通过 |
 | 19 Shared Space | P1 | 14C、15B、16 | 路径权限、Global Write、Locks、文件审计 | 路径穿越、越权写、锁竞争和写审批通过 |
 | 20 Governance + Workbench | P2 | 14C、17B | 项目健康度、角色确认、审计、SSE、可配置布局 | 并发保护、只追加审计、三视口无溢出 |
@@ -410,6 +410,9 @@ Gate 最低能力：
 
 ### Batch 17B：AI Teammate
 
+状态：已完成。交付记录见
+[v1-batch17b-ai-teammate.md](./v1-batch17b-ai-teammate.md)。
+
 范围：
 
 - Teammate 模板与实例、归属、版本和生命周期。
@@ -563,7 +566,7 @@ HTTP Request
 - [x] Batch 15B Action Ticket 与 Execution Gate
 - [x] Batch 16 Context 与 Scene Session
 - [x] Batch 17A Task Execution Depth
-- [ ] Batch 17B AI Teammate
+- [x] Batch 17B AI Teammate
 - [ ] Batch 18 Meeting Collaboration
 - [ ] Batch 19 Shared Space
 - [ ] Batch 20 Project Governance 与 Workbench
@@ -584,17 +587,17 @@ HTTP Request
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 17B：AI Teammate**。
-Batch 13.1B 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context、Task
+下一执行批次为 **Batch 18：Meeting Collaboration**，需独立规划与 worktree。
+Batch 17B 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context、Task
 Execution Depth 或 Runtime 统计查询绕过。
-Shared Space、sandbox 扩展和 Batch 17B 均未实现。
+Shared Space 和 sandbox 扩展仍未实现。
 
 建议在独立 worktree 执行：
 
 ```text
-worktree: 独立 `.tmp/pluginmax-platform-batch17b-*`
-branch:   `feat/v1-batch17b-*`
-base:     Batch 13.1B local commit
+worktree: 独立 `.tmp/pluginmax-platform-batch18-*`
+branch:   `feat/v1-batch18-*`
+base:     Batch 17B local commit
 ```
 
 ## 13. 参考文档
@@ -610,6 +613,7 @@ base:     Batch 13.1B local commit
 - [v1-batch16-scene-context.md](./v1-batch16-scene-context.md)
 - [v1-batch17a-task-execution-depth.md](./v1-batch17a-task-execution-depth.md)
 - [v1-batch13.1b-runtime-economics.md](./v1-batch13.1b-runtime-economics.md)
+- [v1-batch17b-ai-teammate.md](./v1-batch17b-ai-teammate.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)

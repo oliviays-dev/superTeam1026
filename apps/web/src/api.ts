@@ -136,6 +136,22 @@ import type {
   WorkspaceRuntimeCatalogItem,
   WorkspaceRuntimeEconomics,
   WorkspaceRuntimeEconomicsQuery,
+  ChangeTeammateStatusInput,
+  CreateTeammateInput,
+  CreateTeammateTemplateInput,
+  CreateTeammateWorkPlanInput,
+  ParsedTeammateWorkPlan,
+  Teammate,
+  TeammateDefinition,
+  TeammateExecutionHistoryQuery,
+  TeammateQueueItem,
+  TeammateRuntimeStatistics,
+  TeammateTemplate,
+  TeammateTemplateVersion,
+  TeammateTransfer,
+  TeammateEvent,
+  TeammateWeeklyReport,
+  TransferTeammateInput,
 } from "@pluginmax/contracts";
 
 const API_BASE = "/api/v1";
@@ -746,6 +762,216 @@ export function listExecutionHistory(
 
 export function getRunEconomics(runId: string): Promise<RunExecutionEconomics> {
   return request(`/runs/${runId}/economics`);
+}
+
+export async function listTeammateTemplates(
+  projectId: string,
+  includeArchived = false,
+): Promise<TeammateTemplate[]> {
+  const params = new URLSearchParams({ projectId });
+  if (includeArchived) params.set("includeArchived", "1");
+  return (
+    await request<{ items: TeammateTemplate[] }>(
+      `/teammate-templates?${params.toString()}`,
+    )
+  ).items;
+}
+
+export function createTeammateTemplate(
+  input: CreateTeammateTemplateInput,
+): Promise<TeammateTemplate> {
+  return request("/teammate-templates", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateTeammateTemplate(
+  templateId: string,
+  input: {
+    readonly expectedVersion: number;
+    readonly definition: TeammateDefinition;
+  },
+): Promise<TeammateTemplate> {
+  return request(`/teammate-templates/${templateId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function archiveTeammateTemplate(
+  templateId: string,
+  expectedVersion: number,
+): Promise<TeammateTemplate> {
+  return request(`/teammate-templates/${templateId}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ expectedVersion }),
+  });
+}
+
+export function getTeammateTemplate(templateId: string): Promise<{
+  readonly template: TeammateTemplate;
+  readonly versions: TeammateTemplateVersion[];
+}> {
+  return request(`/teammate-templates/${templateId}`);
+}
+
+export async function listTeammates(
+  projectId: string,
+  includeArchived = false,
+): Promise<Teammate[]> {
+  const params = new URLSearchParams({ projectId });
+  if (includeArchived) params.set("includeArchived", "1");
+  return (
+    await request<{ items: Teammate[] }>(`/teammates?${params.toString()}`)
+  ).items;
+}
+
+export function createTeammate(input: CreateTeammateInput): Promise<Teammate> {
+  return request("/teammates", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getTeammate(teammateId: string): Promise<{
+  readonly teammate: Teammate;
+  readonly template: TeammateTemplate;
+  readonly templateVersion: TeammateTemplateVersion;
+  readonly transfers: TeammateTransfer[];
+  readonly events: TeammateEvent[];
+  readonly weeklyReports: TeammateWeeklyReport[];
+}> {
+  return request(`/teammates/${teammateId}`);
+}
+
+export function changeTeammateStatus(
+  teammateId: string,
+  input: ChangeTeammateStatusInput,
+): Promise<Teammate> {
+  return request(`/teammates/${teammateId}/status`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function setTeammateAutoExecute(
+  teammateId: string,
+  autoExecute: boolean,
+  expectedVersion: number,
+): Promise<Teammate> {
+  return request(`/teammates/${teammateId}/auto-execute`, {
+    method: "POST",
+    body: JSON.stringify({ autoExecute, expectedVersion }),
+  });
+}
+
+export function transferTeammate(
+  teammateId: string,
+  input: TransferTeammateInput,
+): Promise<Teammate> {
+  return request(`/teammates/${teammateId}/transfer`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listTeammateWorkQueue(
+  teammateId: string,
+): Promise<TeammateQueueItem[]> {
+  return (
+    await request<{ items: TeammateQueueItem[] }>(
+      `/teammates/${teammateId}/work-queue`,
+    )
+  ).items;
+}
+
+export async function reorderTeammateWorkQueue(
+  teammateId: string,
+  taskIds: string[],
+): Promise<TeammateQueueItem[]> {
+  return (
+    await request<{ items: TeammateQueueItem[] }>(
+      `/teammates/${teammateId}/work-queue/reorder`,
+      {
+        method: "POST",
+        body: JSON.stringify({ taskIds }),
+      },
+    )
+  ).items;
+}
+
+export function parseTeammateWorkPlan(
+  teammateId: string,
+  instruction: string,
+): Promise<ParsedTeammateWorkPlan> {
+  return request(`/teammates/${teammateId}/work-plans/parse`, {
+    method: "POST",
+    body: JSON.stringify({ instruction }),
+  });
+}
+
+export function createTeammateWorkPlan(
+  teammateId: string,
+  input: CreateTeammateWorkPlanInput,
+): Promise<{
+  readonly planId: string;
+  readonly taskIds: string[];
+  readonly queue: TeammateQueueItem[];
+}> {
+  return request(`/teammates/${teammateId}/work-plans`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getTeammateEconomics(
+  teammateId: string,
+  query: { readonly from?: string; readonly to?: string } = {},
+): Promise<TeammateRuntimeStatistics> {
+  const params = new URLSearchParams();
+  if (query.from !== undefined) params.set("from", query.from);
+  if (query.to !== undefined) params.set("to", query.to);
+  const suffix = params.toString();
+  return request(
+    `/teammates/${teammateId}/economics${suffix === "" ? "" : `?${suffix}`}`,
+  );
+}
+
+export function getTeammateExecutionHistory(
+  teammateId: string,
+  query: TeammateExecutionHistoryQuery = { limit: 25 },
+): Promise<ExecutionHistoryPage> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined) params.set(key, String(value));
+  }
+  const suffix = params.toString();
+  return request(
+    `/teammates/${teammateId}/execution-history${
+      suffix === "" ? "" : `?${suffix}`
+    }`,
+  );
+}
+
+export async function listTeammateWeeklyReports(
+  teammateId: string,
+): Promise<TeammateWeeklyReport[]> {
+  return (
+    await request<{ items: TeammateWeeklyReport[] }>(
+      `/teammates/${teammateId}/weekly-reports`,
+    )
+  ).items;
+}
+
+export function generateTeammateWeeklyReport(
+  teammateId: string,
+  weekStart?: string,
+): Promise<TeammateWeeklyReport> {
+  return request(`/teammates/${teammateId}/weekly-reports/generate`, {
+    method: "POST",
+    body: JSON.stringify(weekStart === undefined ? {} : { weekStart }),
+  });
 }
 
 export function archiveTaskAttachment(

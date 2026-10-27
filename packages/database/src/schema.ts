@@ -3585,3 +3585,395 @@ BEFORE UPDATE OR DELETE ON run_runtime_usage_receipts
 FOR EACH ROW
 EXECUTE FUNCTION pluginmax_reject_runtime_usage_mutation();
 `;
+
+export const AI_TEAMMATE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS teammate_templates (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL
+    CHECK (length(btrim(workspace_id)) BETWEEN 1 AND 180),
+  scope TEXT NOT NULL CHECK (scope IN ('platform', 'personal')),
+  owner_principal_id TEXT REFERENCES principals(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled', 'archived')),
+  current_version INTEGER NOT NULL CHECK (current_version > 0),
+  definition JSONB NOT NULL
+    CHECK (jsonb_typeof(definition) = 'object'),
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (scope <> 'personal' OR owner_principal_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS teammate_templates_active_name_idx
+  ON teammate_templates(
+    workspace_id,
+    scope,
+    lower(btrim(definition ->> 'name'))
+  )
+  WHERE status <> 'archived';
+
+CREATE INDEX IF NOT EXISTS teammate_templates_project_idx
+  ON teammate_templates(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS teammate_template_versions (
+  id UUID PRIMARY KEY,
+  template_id UUID NOT NULL
+    REFERENCES teammate_templates(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  definition JSONB NOT NULL
+    CHECK (jsonb_typeof(definition) = 'object'),
+  content_digest TEXT NOT NULL
+    CHECK (content_digest ~ '^[a-f0-9]{64}$'),
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (template_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS teammate_template_versions_template_idx
+  ON teammate_template_versions(template_id, version DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_teammate_template_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'teammate template versions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS teammate_template_versions_immutable
+  ON teammate_template_versions;
+CREATE TRIGGER teammate_template_versions_immutable
+BEFORE UPDATE OR DELETE ON teammate_template_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_teammate_template_version_mutation();
+
+CREATE TABLE IF NOT EXISTS teammates (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL
+    CHECK (length(btrim(workspace_id)) BETWEEN 1 AND 180),
+  template_id UUID NOT NULL
+    REFERENCES teammate_templates(id) ON DELETE RESTRICT,
+  template_version_id UUID NOT NULL
+    REFERENCES teammate_template_versions(id) ON DELETE RESTRICT,
+  template_version INTEGER NOT NULL CHECK (template_version > 0),
+  agent_id UUID NOT NULL UNIQUE REFERENCES agents(id) ON DELETE RESTRICT,
+  ai_principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  owner_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL
+    CHECK (length(btrim(name)) BETWEEN 1 AND 120),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'paused', 'inactive', 'archived')),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  auto_execute BOOLEAN NOT NULL DEFAULT FALSE,
+  auto_run_lease_token UUID,
+  auto_run_lease_expires_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    (auto_run_lease_token IS NULL AND auto_run_lease_expires_at IS NULL)
+    OR
+    (auto_run_lease_token IS NOT NULL AND auto_run_lease_expires_at IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS teammates_active_name_idx
+  ON teammates(workspace_id, lower(btrim(name)))
+  WHERE status <> 'archived';
+
+CREATE INDEX IF NOT EXISTS teammates_project_status_idx
+  ON teammates(project_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS teammates_owner_idx
+  ON teammates(owner_principal_id, status);
+
+CREATE INDEX IF NOT EXISTS teammates_auto_execute_idx
+  ON teammates(auto_run_lease_expires_at, updated_at)
+  WHERE status = 'active' AND auto_execute = TRUE;
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_teammate_template_version()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  template_project_id UUID;
+  template_workspace_id TEXT;
+  template_scope TEXT;
+  template_status TEXT;
+  version_number INTEGER;
+  version_project_id UUID;
+BEGIN
+  SELECT project_id, workspace_id, scope, status
+    INTO template_project_id, template_workspace_id, template_scope,
+         template_status
+  FROM teammate_templates
+  WHERE id = NEW.template_id;
+
+  SELECT version, project_id
+    INTO version_number, version_project_id
+  FROM teammate_template_versions
+  WHERE id = NEW.template_version_id
+    AND template_id = NEW.template_id;
+
+  IF template_project_id IS DISTINCT FROM NEW.project_id
+    OR template_workspace_id IS DISTINCT FROM NEW.workspace_id
+    OR version_project_id IS DISTINCT FROM NEW.project_id
+    OR version_number IS DISTINCT FROM NEW.template_version
+  THEN
+    RAISE EXCEPTION 'teammate template version does not match instance scope';
+  END IF;
+  IF template_status = 'archived' AND TG_OP = 'INSERT' THEN
+    RAISE EXCEPTION 'archived teammate template cannot create an instance';
+  END IF;
+  IF template_scope = 'personal' AND TG_OP = 'INSERT' THEN
+    IF NOT EXISTS (
+      SELECT 1
+      FROM teammate_templates
+      WHERE id = NEW.template_id
+        AND owner_principal_id = NEW.created_by
+    ) THEN
+      RAISE EXCEPTION 'personal teammate template requires its owner';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS teammates_template_version_matches
+  ON teammates;
+CREATE TRIGGER teammates_template_version_matches
+BEFORE INSERT OR UPDATE OF template_id, template_version_id, template_version,
+  project_id, workspace_id
+ON teammates
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_teammate_template_version();
+
+CREATE TABLE IF NOT EXISTS teammate_transfers (
+  id UUID PRIMARY KEY,
+  teammate_id UUID NOT NULL REFERENCES teammates(id) ON DELETE RESTRICT,
+  from_owner_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  to_owner_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  transferred_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  reason TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 4000),
+  created_at TIMESTAMPTZ NOT NULL,
+  CHECK (from_owner_principal_id <> to_owner_principal_id)
+);
+
+CREATE INDEX IF NOT EXISTS teammate_transfers_teammate_idx
+  ON teammate_transfers(teammate_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_teammate_transfer_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'teammate transfers are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS teammate_transfers_append_only
+  ON teammate_transfers;
+CREATE TRIGGER teammate_transfers_append_only
+BEFORE UPDATE OR DELETE ON teammate_transfers
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_teammate_transfer_mutation();
+
+CREATE TABLE IF NOT EXISTS teammate_events (
+  id UUID PRIMARY KEY,
+  teammate_id UUID NOT NULL REFERENCES teammates(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'created',
+    'template',
+    'status',
+    'transfer',
+    'work-plan',
+    'queue',
+    'auto-run',
+    'report',
+    'archive'
+  )),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  summary TEXT NOT NULL CHECK (length(btrim(summary)) BETWEEN 1 AND 4000),
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (teammate_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS teammate_events_teammate_idx
+  ON teammate_events(teammate_id, created_at DESC, id DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_teammate_event_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'teammate events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS teammate_events_append_only ON teammate_events;
+CREATE TRIGGER teammate_events_append_only
+BEFORE UPDATE OR DELETE ON teammate_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_teammate_event_mutation();
+
+CREATE TABLE IF NOT EXISTS teammate_work_plans (
+  id UUID PRIMARY KEY,
+  teammate_id UUID NOT NULL REFERENCES teammates(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  instruction TEXT NOT NULL CHECK (length(btrim(instruction)) BETWEEN 1 AND 20000),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS teammate_work_plans_teammate_idx
+  ON teammate_work_plans(teammate_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS teammate_work_items (
+  id UUID PRIMARY KEY,
+  teammate_id UUID NOT NULL REFERENCES teammates(id) ON DELETE RESTRICT,
+  plan_id UUID REFERENCES teammate_work_plans(id) ON DELETE RESTRICT,
+  task_id UUID NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE RESTRICT,
+  queue_seq INTEGER NOT NULL CHECK (queue_seq > 0),
+  auto_execute_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(metadata) = 'object'),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'removed')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS teammate_work_items_queue_seq_idx
+  ON teammate_work_items(teammate_id, queue_seq)
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS teammate_work_items_teammate_idx
+  ON teammate_work_items(teammate_id, status, queue_seq);
+
+CREATE TABLE IF NOT EXISTS teammate_run_attributions (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+  teammate_id UUID NOT NULL REFERENCES teammates(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  template_id UUID NOT NULL REFERENCES teammate_templates(id) ON DELETE RESTRICT,
+  template_version_id UUID NOT NULL
+    REFERENCES teammate_template_versions(id) ON DELETE RESTRICT,
+  template_version INTEGER NOT NULL CHECK (template_version > 0),
+  ai_principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  owner_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  scene_session_id UUID REFERENCES scene_sessions(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS teammate_run_attributions_teammate_idx
+  ON teammate_run_attributions(teammate_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS teammate_run_attributions_principal_idx
+  ON teammate_run_attributions(ai_principal_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_teammate_run_attribution_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.scene_session_id IS NULL
+    AND NEW.scene_session_id IS NOT NULL
+    AND OLD.id = NEW.id
+    AND OLD.run_id = NEW.run_id
+    AND OLD.teammate_id = NEW.teammate_id
+    AND OLD.project_id = NEW.project_id
+    AND OLD.template_id = NEW.template_id
+    AND OLD.template_version_id = NEW.template_version_id
+    AND OLD.template_version = NEW.template_version
+    AND OLD.ai_principal_id = NEW.ai_principal_id
+    AND OLD.owner_principal_id = NEW.owner_principal_id
+    AND OLD.created_at = NEW.created_at
+  THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'teammate run attributions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS teammate_run_attributions_immutable
+  ON teammate_run_attributions;
+CREATE TRIGGER teammate_run_attributions_immutable
+BEFORE UPDATE ON teammate_run_attributions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_teammate_run_attribution_mutation();
+
+CREATE TABLE IF NOT EXISTS teammate_weekly_reports (
+  id UUID PRIMARY KEY,
+  teammate_id UUID NOT NULL REFERENCES teammates(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  week_start DATE NOT NULL,
+  week_end DATE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'generated'
+    CHECK (status IN ('generated', 'stale')),
+  summary JSONB NOT NULL CHECK (jsonb_typeof(summary) = 'object'),
+  statistics JSONB NOT NULL CHECK (jsonb_typeof(statistics) = 'object'),
+  generated_by TEXT NOT NULL
+    CHECK (length(btrim(generated_by)) BETWEEN 1 AND 180),
+  generated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (teammate_id, week_start),
+  CHECK (week_end >= week_start)
+);
+
+CREATE INDEX IF NOT EXISTS teammate_weekly_reports_project_idx
+  ON teammate_weekly_reports(project_id, week_start DESC);
+
+ALTER TABLE runtime_maintenance_runs
+  DROP CONSTRAINT IF EXISTS runtime_maintenance_runs_kind_check;
+ALTER TABLE runtime_maintenance_runs
+  ADD CONSTRAINT runtime_maintenance_runs_kind_check
+  CHECK (kind IN (
+    'idempotency_cleanup',
+    'approval_sla',
+    'lease_recovery',
+    'effect_recovery',
+    'teammate_queue'
+  ));
+
+ALTER TABLE runtime_maintenance_schedules
+  DROP CONSTRAINT IF EXISTS runtime_maintenance_schedules_kind_check;
+ALTER TABLE runtime_maintenance_schedules
+  ADD CONSTRAINT runtime_maintenance_schedules_kind_check
+  CHECK (kind IN (
+    'idempotency_cleanup',
+    'approval_sla',
+    'lease_recovery',
+    'effect_recovery',
+    'teammate_queue'
+  ));
+
+INSERT INTO runtime_maintenance_schedules (
+  kind, enabled, interval_seconds, next_run_at,
+  consecutive_failures, created_at, updated_at
+) VALUES (
+  'teammate_queue', TRUE, 60, NOW(), 0, NOW(), NOW()
+)
+ON CONFLICT (kind) DO NOTHING;
+`;

@@ -121,7 +121,7 @@ upgrade_ticket_count="$(
   psql_database "$UPGRADE_DATABASE" \
     "SELECT COUNT(*) FROM action_tickets;"
 )"
-[[ "$upgrade_version" == "29" ]]
+[[ "$upgrade_version" == "30" ]]
 [[ "$upgrade_tables" == "4" ]]
 [[ "$upgrade_run" == "migration-25-output|true" ]]
 [[ "$upgrade_ticket_count" == "0" ]]
@@ -132,7 +132,7 @@ fresh_version="$(
   psql_database "$FRESH_DATABASE" \
     "SELECT MAX(version) FROM platform_migrations;"
 )"
-[[ "$fresh_version" == "29" ]]
+[[ "$fresh_version" == "30" ]]
 
 TEST_DATABASE_URL="$FRESH_URL" CI=true \
   node_modules/.bin/vitest run \

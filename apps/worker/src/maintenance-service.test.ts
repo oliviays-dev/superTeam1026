@@ -40,7 +40,19 @@ function service(input: {
       affectedInstances: 0,
     };
   });
-  const application = { sweepApprovalSla } as unknown as PlatformApplication;
+  const runAutoQueue = vi.fn(async () => ({
+    attempted: 1,
+    dispatched: 1,
+    skipped: 0,
+  }));
+  const generateDueWeeklyReports = vi.fn(async () => ({
+    generated: 1,
+    skipped: 0,
+  }));
+  const application = {
+    sweepApprovalSla,
+    teammates: { runAutoQueue, generateDueWeeklyReports },
+  } as unknown as PlatformApplication;
   return {
     maintenance: new RuntimeMaintenanceService(repositories, application, {
       owner: "worker-test",
@@ -55,6 +67,8 @@ function service(input: {
     complete,
     fail,
     sweepApprovalSla,
+    runAutoQueue,
+    generateDueWeeklyReports,
   };
 }
 
@@ -115,6 +129,31 @@ describe("RuntimeMaintenanceService", () => {
       "worker-test",
       "00000000-0000-4000-8000-000000000002",
       "approval store unavailable",
+    );
+  });
+
+  it("runs teammate auto dispatch and reports under the maintenance lease", async () => {
+    const scheduledFor = new Date(Date.now() - 1_000).toISOString();
+    const context = service({
+      claims: [
+        {
+          kind: "teammate_queue",
+          leaseToken: "00000000-0000-4000-8000-000000000003",
+          scheduledFor,
+          intervalSeconds: 60,
+          consecutiveFailures: 0,
+          traceId: "33333333333333333333333333333333",
+          spanId: "3333333333333333",
+        },
+      ],
+    });
+    await expect(context.maintenance.runOnce()).resolves.toBe(1);
+    expect(context.runAutoQueue).toHaveBeenCalledWith(20);
+    expect(context.generateDueWeeklyReports).toHaveBeenCalled();
+    expect(context.complete).toHaveBeenCalledWith(
+      "teammate_queue",
+      "worker-test",
+      "00000000-0000-4000-8000-000000000003",
     );
   });
 });

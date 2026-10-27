@@ -151,7 +151,9 @@ export type AuthorizationResourceType =
   | "handoff"
   | "agent-episode"
   | "meeting-action-item"
-  | "execution-gate";
+  | "execution-gate"
+  | "teammate"
+  | "teammate-template";
 
 export class AuthorizationRepositoryError extends Error {
   constructor(
@@ -725,6 +727,12 @@ export class AuthorizationRepository {
         },
         "execution-gate": {
           sql: "SELECT project_id FROM execution_gate_requests WHERE gate_id = $1",
+        },
+        teammate: {
+          sql: "SELECT project_id FROM teammates WHERE id = $1",
+        },
+        "teammate-template": {
+          sql: "SELECT project_id FROM teammate_templates WHERE id = $1",
         },
       };
     const query = queries[resourceType];

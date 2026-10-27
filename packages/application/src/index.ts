@@ -226,6 +226,8 @@ import {
   executionHistoryItem,
   workspaceEconomics,
 } from "./runtime-economics.js";
+import { ApplicationError } from "./errors.js";
+import { TeammateApplicationService } from "./teammates.js";
 
 export {
   TaskExecutionPreflightError,
@@ -255,17 +257,13 @@ export {
   type RouteAuthorizationResult,
 } from "./authorization.js";
 
-export class ApplicationError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly statusCode = 400,
-    readonly details?: unknown,
-  ) {
-    super(message);
-    this.name = "ApplicationError";
-  }
-}
+export { ApplicationError } from "./errors.js";
+export {
+  TeammateApplicationService,
+  parseTeammateWorkPlan,
+  weekRange,
+  type TeammateDetail,
+} from "./teammates.js";
 
 const implementedRuntimeKinds = new Set<Agent["runtimeKind"]>([
   "fake",
@@ -316,6 +314,7 @@ function scopedPermissions(
 }
 
 export class PlatformApplication {
+  readonly teammates: TeammateApplicationService;
   private readonly agentRuntimePreflight: AgentRuntimePreflightService;
   private readonly taskExecutionPreflight: TaskExecutionPreflightService;
   private readonly executionGates: ExecutionGateService;
@@ -331,6 +330,16 @@ export class PlatformApplication {
     );
     this.executionGates = new ExecutionGateService(repositories);
     this.sceneContext = new SceneContextService(repositories);
+    this.teammates = new TeammateApplicationService(
+      repositories,
+      (taskId, aiPrincipalId) =>
+        this.dispatchTask(
+          taskId,
+          createRootTraceContext(),
+          aiPrincipalId,
+          false,
+        ),
+    );
   }
 
   listProjects(projectIds?: readonly string[]): Promise<Project[]> {

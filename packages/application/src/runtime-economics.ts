@@ -519,6 +519,7 @@ export function workspaceEconomics(
 
 export function executionHistoryFingerprint(input: {
   readonly workspaceId: string;
+  readonly teammateId?: string | undefined;
   readonly from?: string | undefined;
   readonly to?: string | undefined;
   readonly runtimeId?: string | undefined;
@@ -534,6 +535,9 @@ export function executionHistoryFingerprint(input: {
         runtimeId: input.runtimeId ?? null,
         contextType: input.contextType ?? null,
         status: input.status ?? null,
+        ...(input.teammateId === undefined
+          ? {}
+          : { teammateId: input.teammateId }),
       }),
     )
     .digest("hex");

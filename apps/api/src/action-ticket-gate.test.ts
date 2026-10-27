@@ -57,7 +57,7 @@ integration("Action Ticket and Execution Gate", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 29,
+      expectedMigrationVersion: 30,
     });
     app = built.app;
     await app.ready();

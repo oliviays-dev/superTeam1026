@@ -391,10 +391,22 @@ export class RunExecutor {
         episodes,
       });
       await this.sceneContext.commit(prepared);
+      await this.repositories.teammates.bindRunSceneSession(
+        runId,
+        prepared.binding.id,
+      );
       context = {
         pack: prepared.pack,
         receipt: prepared.legacyReceipt,
       };
+    } else {
+      const receipt = await this.repositories.sceneContext.receiptByRun(runId);
+      if (receipt !== undefined) {
+        await this.repositories.teammates.bindRunSceneSession(
+          runId,
+          receipt.sceneSessionId,
+        );
+      }
     }
     const workspacePath = resolve(
       this.options.workspaceRoot,

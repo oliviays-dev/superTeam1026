@@ -88,6 +88,7 @@ import { TaskExecutionPolicyRepository } from "./task-execution-policy-repositor
 import { ActionTicketRepository } from "./action-ticket-repository.js";
 import { SceneContextRepository } from "./scene-context-repository.js";
 import { RuntimeEconomicsRepository } from "./runtime-economics-repository.js";
+import { TeammateRepository } from "./teammate-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -1059,6 +1060,7 @@ export class RunRepository {
           [input.task.id],
         );
       }
+      await TeammateRepository.attributeRunWithClient(client, input.runId);
       return runFromRow(result.rows[0]!);
     });
   }
@@ -2202,6 +2204,7 @@ export class PlatformRepositories {
   readonly runtimeReliability: RuntimeReliabilityRepository;
   readonly runtimeEffects: RuntimeEffectRepository;
   readonly runtimeEconomics: RuntimeEconomicsRepository;
+  readonly teammates: TeammateRepository;
   readonly traces: RuntimeTraceRepository;
   readonly externalRuntimes: ExternalRuntimeRepository;
   readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
@@ -2245,6 +2248,7 @@ export class PlatformRepositories {
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
     this.runtimeEffects = new RuntimeEffectRepository(database);
     this.runtimeEconomics = new RuntimeEconomicsRepository(database);
+    this.teammates = new TeammateRepository(database);
     this.traces = new RuntimeTraceRepository(database);
     this.externalRuntimes = new ExternalRuntimeRepository(database);
     this.agentRuntimeBindings = new AgentRuntimeBindingRepository(database);

@@ -16,3 +16,4 @@ export * from "./identity.js";
 export * from "./scene-context.js";
 export * from "./task-execution-depth.js";
 export * from "./runtime-economics.js";
+export * from "./teammate.js";

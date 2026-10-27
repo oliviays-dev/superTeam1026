@@ -69,7 +69,7 @@ integration("agent runtime binding and preflight API", () => {
       fileStoreRoot: workspaceRoot,
       logger: false,
       localActorId: administrator,
-      expectedMigrationVersion: 29,
+      expectedMigrationVersion: 30,
     }).app;
     await app.ready();
   });

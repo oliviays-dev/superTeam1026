@@ -96,6 +96,7 @@ export const runtimeMaintenanceKindSchema = z.enum([
   "approval_sla",
   "lease_recovery",
   "effect_recovery",
+  "teammate_queue",
 ]);
 export type RuntimeMaintenanceKind = z.infer<
   typeof runtimeMaintenanceKindSchema

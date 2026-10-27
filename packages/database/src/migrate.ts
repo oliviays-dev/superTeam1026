@@ -1,6 +1,7 @@
 import {
   AGENT_RUNTIME_BINDING_SCHEMA_SQL,
   AGENT_MANAGEMENT_SCHEMA_SQL,
+  AI_TEAMMATE_SCHEMA_SQL,
   AI_DIRECT_CHAT_SCHEMA_SQL,
   COLLABORATION_SCHEMA_SQL,
   CONTEXT_SCHEMA_SQL,
@@ -61,6 +62,7 @@ const migrations = [
   { version: 27, sql: SCENE_CONTEXT_SCHEMA_SQL },
   { version: 28, sql: TASK_EXECUTION_DEPTH_SCHEMA_SQL },
   { version: 29, sql: RUNTIME_ECONOMICS_SCHEMA_SQL },
+  { version: 30, sql: AI_TEAMMATE_SCHEMA_SQL },
 ] as const;
 
 export async function migrate(

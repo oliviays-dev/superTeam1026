@@ -175,6 +175,7 @@ export interface ExecutionHistoryBoundary {
 
 export interface ExecutionHistoryFilter {
   readonly workspaceId: string;
+  readonly teammateId?: string | undefined;
   readonly from?: Date | undefined;
   readonly to?: Date | undefined;
   readonly runtimeId?: string | undefined;
@@ -671,11 +672,20 @@ export class RuntimeEconomicsRepository {
          AND ($5::text IS NULL OR ${contextTypeExpression()} = $5)
          AND ($6::text IS NULL OR run.status = $6)
          AND (
-           $7::timestamptz IS NULL
-           OR (run.created_at, run.id) < ($7::timestamptz, $8::uuid)
+           $7::uuid IS NULL
+           OR EXISTS (
+             SELECT 1
+             FROM teammate_run_attributions AS attribution
+             WHERE attribution.run_id = run.id
+               AND attribution.teammate_id = $7
+           )
+         )
+         AND (
+           $8::timestamptz IS NULL
+           OR (run.created_at, run.id) < ($8::timestamptz, $9::uuid)
          )
        ORDER BY run.created_at DESC, run.id DESC
-       LIMIT $9`,
+       LIMIT $10`,
       [
         input.workspaceId,
         input.from ?? null,
@@ -683,6 +693,7 @@ export class RuntimeEconomicsRepository {
         input.runtimeId ?? null,
         input.contextType ?? null,
         input.status ?? null,
+        input.teammateId ?? null,
         input.boundary?.createdAt ?? null,
         input.boundary?.id ?? null,
         input.limit + 1,

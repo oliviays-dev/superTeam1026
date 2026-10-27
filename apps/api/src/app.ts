@@ -66,6 +66,17 @@ import {
   traceIdSchema,
   triggerMeetingAiInputSchema,
   transferTaskInputSchema,
+  archiveTeammateTemplateInputSchema,
+  changeTeammateStatusInputSchema,
+  createTeammateInputSchema,
+  createTeammateTemplateInputSchema,
+  createTeammateWorkPlanInputSchema,
+  parseTeammateWorkPlanInputSchema,
+  reorderTeammateQueueInputSchema,
+  teammateDefinitionSchema,
+  teammateExecutionHistoryQuerySchema,
+  transferTeammateInputSchema,
+  updateTeammateAutoExecuteInputSchema,
   retryWorkflowNodeInputSchema,
   runtimeRevisionInputSchema,
   setAgentRuntimeBindingInputSchema,
@@ -150,6 +161,10 @@ const workflowInstanceParamsSchema = z.object({
 const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
 const directChatParamsSchema = z.object({ threadId: z.string().uuid() });
 const runtimeParamsSchema = z.object({ runtimeId: z.string().uuid() });
+const teammateParamsSchema = z.object({ teammateId: z.string().uuid() });
+const teammateTemplateParamsSchema = z.object({
+  templateId: z.string().uuid(),
+});
 const workspaceParamsSchema = z.object({
   workspaceId: z.string().trim().min(1).max(180),
 });
@@ -189,6 +204,23 @@ const templateListQuerySchema = z.object({
     .enum(["0", "1", "true", "false"])
     .optional()
     .transform((value) => value === "1" || value === "true"),
+});
+const teammateListQuerySchema = z.object({
+  projectId: z.string().uuid(),
+  includeArchived: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+});
+const teammateStatisticsQuerySchema = z.object({
+  from: z.string().datetime({ offset: true }).optional(),
+  to: z.string().datetime({ offset: true }).optional(),
+});
+const teammateWeeklyReportQuerySchema = z.object({
+  weekStart: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional(),
 });
 const memoryTopicParamsSchema = z.object({
   projectId: z.string().uuid(),
@@ -366,7 +398,7 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 29;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 30;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -1731,6 +1763,329 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(
       await application.getRunEconomics(runId, requestActorId(request.headers)),
     );
+  });
+
+  app.get("/api/v1/teammate-templates", async (request, reply) => {
+    const query = teammateListQuerySchema.parse(request.query);
+    return reply.send({
+      items: await application.teammates.listTemplates({
+        projectId: query.projectId,
+        actorPrincipalId: requestActorId(request.headers),
+        includeArchived: query.includeArchived ?? false,
+      }),
+    });
+  });
+
+  app.post("/api/v1/teammate-templates", async (request, reply) => {
+    const input = createTeammateTemplateInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.teammates.createTemplate({
+        value: input,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    );
+  });
+
+  app.get("/api/v1/teammate-templates/:templateId", async (request, reply) => {
+    const { templateId } = teammateTemplateParamsSchema.parse(request.params);
+    return reply.send(
+      await application.teammates.getTemplate(
+        templateId,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.patch(
+    "/api/v1/teammate-templates/:templateId",
+    async (request, reply) => {
+      const { templateId } = teammateTemplateParamsSchema.parse(request.params);
+      const body = z
+        .object({
+          expectedVersion: z.number().int().positive(),
+          definition: teammateDefinitionSchema,
+        })
+        .parse(request.body);
+      return reply.send(
+        await application.teammates.updateTemplate({
+          templateId,
+          actorPrincipalId: requestActorId(request.headers),
+          administrator: requestIsAdministrator(request.headers),
+          expectedVersion: body.expectedVersion,
+          definition: body.definition,
+        }),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/teammate-templates/:templateId/archive",
+    async (request, reply) => {
+      const { templateId } = teammateTemplateParamsSchema.parse(request.params);
+      const input = archiveTeammateTemplateInputSchema.parse(request.body);
+      return reply.send(
+        await application.teammates.archiveTemplate({
+          templateId,
+          actorPrincipalId: requestActorId(request.headers),
+          administrator: requestIsAdministrator(request.headers),
+          expectedVersion: input.expectedVersion,
+        }),
+      );
+    },
+  );
+
+  app.get("/api/v1/teammates", async (request, reply) => {
+    const query = teammateListQuerySchema.parse(request.query);
+    return reply.send({
+      items: await application.teammates.listTeammates({
+        projectId: query.projectId,
+        actorPrincipalId: requestActorId(request.headers),
+        includeArchived: query.includeArchived ?? false,
+      }),
+    });
+  });
+
+  app.post("/api/v1/teammates", async (request, reply) => {
+    const input = createTeammateInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.teammates.createTeammate({
+        value: input,
+        actorPrincipalId: requestActorId(request.headers),
+      }),
+    );
+  });
+
+  app.get("/api/v1/teammates/:teammateId", async (request, reply) => {
+    const { teammateId } = teammateParamsSchema.parse(request.params);
+    return reply.send(
+      await application.teammates.getTeammate(
+        teammateId,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post("/api/v1/teammates/:teammateId/status", async (request, reply) => {
+    const { teammateId } = teammateParamsSchema.parse(request.params);
+    const input = changeTeammateStatusInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `teammate:${teammateId}`,
+      operation: "teammate.status",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () =>
+        application.teammates.changeStatus({
+          teammateId,
+          value: input,
+          actorPrincipalId: actorId,
+          administrator: requestIsAdministrator(request.headers),
+        }),
+    });
+  });
+
+  app.post(
+    "/api/v1/teammates/:teammateId/auto-execute",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      const input = updateTeammateAutoExecuteInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `teammate:${teammateId}`,
+        operation: "teammate.auto_execute",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.teammates.setAutoExecute({
+            teammateId,
+            value: input,
+            actorPrincipalId: actorId,
+            administrator: requestIsAdministrator(request.headers),
+          }),
+      });
+    },
+  );
+
+  app.post("/api/v1/teammates/:teammateId/transfer", async (request, reply) => {
+    const { teammateId } = teammateParamsSchema.parse(request.params);
+    const input = transferTeammateInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `teammate:${teammateId}`,
+      operation: "teammate.transfer",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () =>
+        application.teammates.transfer({
+          teammateId,
+          value: input,
+          actorPrincipalId: actorId,
+          administrator: requestIsAdministrator(request.headers),
+        }),
+    });
+  });
+
+  app.get(
+    "/api/v1/teammates/:teammateId/work-queue",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      return reply.send({
+        items: await application.teammates.getWorkQueue(
+          teammateId,
+          requestActorId(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/teammates/:teammateId/work-queue/reorder",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      const input = reorderTeammateQueueInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `teammate:${teammateId}`,
+        operation: "teammate.queue.reorder",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: async () => ({
+          items: await application.teammates.reorderWorkQueue({
+            teammateId,
+            value: input,
+            actorPrincipalId: actorId,
+            administrator: requestIsAdministrator(request.headers),
+          }),
+        }),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/teammates/:teammateId/work-plans/parse",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      const input = parseTeammateWorkPlanInputSchema.parse(request.body);
+      return reply.send(
+        await application.teammates.parseWorkPlan({
+          teammateId,
+          actorPrincipalId: requestActorId(request.headers),
+          value: input,
+        }),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/teammates/:teammateId/work-plans",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      const input = createTeammateWorkPlanInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `teammate:${teammateId}`,
+        operation: "teammate.work_plan.create",
+        actorId,
+        payload: input,
+        statusCode: 201,
+        execute: () =>
+          application.teammates.createWorkPlan({
+            teammateId,
+            value: input,
+            actorPrincipalId: actorId,
+            administrator: requestIsAdministrator(request.headers),
+          }),
+      });
+    },
+  );
+
+  app.post("/api/v1/teammates/:teammateId/auto-run", async (request, reply) => {
+    const { teammateId } = teammateParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.teammates.runAutoQueue(1, {
+        teammateId,
+        actorPrincipalId: actorId,
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    );
+  });
+
+  app.get("/api/v1/teammates/:teammateId/economics", async (request, reply) => {
+    const { teammateId } = teammateParamsSchema.parse(request.params);
+    const query = teammateStatisticsQuerySchema.parse(request.query);
+    return reply.send(
+      await application.teammates.statistics({
+        teammateId,
+        actorPrincipalId: requestActorId(request.headers),
+        ...(query.from === undefined ? {} : { from: new Date(query.from) }),
+        ...(query.to === undefined ? {} : { to: new Date(query.to) }),
+      }),
+    );
+  });
+
+  app.get(
+    "/api/v1/teammates/:teammateId/execution-history",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      const query = teammateExecutionHistoryQuerySchema.parse(request.query);
+      return reply.send(
+        await application.teammates.executionHistory({
+          teammateId,
+          actorPrincipalId: requestActorId(request.headers),
+          query,
+        }),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/teammates/:teammateId/weekly-reports",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      const detail = await application.teammates.getTeammate(
+        teammateId,
+        requestActorId(request.headers),
+      );
+      return reply.send({ items: detail.weeklyReports });
+    },
+  );
+
+  app.post(
+    "/api/v1/teammates/:teammateId/weekly-reports/generate",
+    async (request, reply) => {
+      const { teammateId } = teammateParamsSchema.parse(request.params);
+      const input = teammateWeeklyReportQuerySchema.parse(request.body ?? {});
+      return reply.send(
+        await application.teammates.weeklyReport({
+          teammateId,
+          actorPrincipalId: requestActorId(request.headers),
+          ...(input.weekStart === undefined
+            ? {}
+            : { weekStart: input.weekStart }),
+        }),
+      );
+    },
+  );
+
+  app.post("/api/v1/operations/teammates/run-auto", async (request, reply) => {
+    assertAdministrator(request.headers);
+    return reply.send(await application.teammates.runAutoQueue(4));
   });
 
   app.get("/api/v1/tasks", async (request, reply) => {

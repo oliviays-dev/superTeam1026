@@ -167,7 +167,7 @@ integration("agent runtime binding repository", () => {
       const after = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(after.rows[0]?.version).toBe(29);
+      expect(after.rows[0]?.version).toBe(30);
       const tableAfter = await isolated.query<{ name: string | null }>(
         "SELECT to_regclass('agent_runtime_bindings')::text AS name",
       );

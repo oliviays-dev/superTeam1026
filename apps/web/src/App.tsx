@@ -13,6 +13,7 @@ import {
   PanelLeftOpen,
   SquareTerminal,
   Sun,
+  UsersRound,
   Workflow as WorkflowIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -26,6 +27,7 @@ import {
 import { ProjectsView, TasksView } from "./WorkspaceViews.js";
 import { ProjectTemplatesView } from "./ProjectTemplatesView.js";
 import { RuntimesView } from "./RuntimesView.js";
+import { TeammatesView } from "./TeammatesView.js";
 import {
   ApiRequestError,
   getProjectCapability,
@@ -44,6 +46,7 @@ type AppView =
   | "workflows"
   | "meetings"
   | "agents"
+  | "teammates"
   | "runtimes"
   | "operations"
   | "project-templates";
@@ -57,6 +60,7 @@ const navItems = [
   { key: "workflows", label: "工作流", icon: WorkflowIcon },
   { key: "meetings", label: "沟通", icon: MessagesSquare },
   { key: "agents", label: "AI伙伴", icon: Bot },
+  { key: "teammates", label: "AI Teammate", icon: UsersRound },
   { key: "runtimes", label: "运行时", icon: SquareTerminal },
   { key: "operations", label: "运维", icon: Activity },
 ] as const satisfies ReadonlyArray<{
@@ -484,6 +488,19 @@ export function App() {
           />
         )}
         {view === "agents" && <AgentsView />}
+        {view === "teammates" && (
+          <TeammatesView
+            projects={projectsQuery.data ?? []}
+            agents={agentsQuery.data ?? []}
+            projectId={selectedProjectId}
+            onProjectChange={(nextProjectId) => {
+              setProjectId(nextProjectId);
+              setTaskId("");
+            }}
+            capability={projectCapability}
+            viewerPrincipalId={viewerQuery.data.actorId}
+          />
+        )}
         {view === "runtimes" && (
           <RuntimesView workspaceId={selectedProjectId} />
         )}

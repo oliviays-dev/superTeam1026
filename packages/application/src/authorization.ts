@@ -79,6 +79,8 @@ const PROJECT_QUERY_READ_ROUTES = new Set([
   "/api/v1/meetings",
   "/api/v1/workbench/supply-exceptions",
   "/api/v1/workbench/supplier-risks",
+  "/api/v1/teammate-templates",
+  "/api/v1/teammates",
 ]);
 
 function parameter(
@@ -139,6 +141,33 @@ function resourceRequirement(
     return projectId === undefined
       ? undefined
       : { projectId, permission: "write" };
+  }
+  if (
+    (route === "/api/v1/teammate-templates" ||
+      route === "/api/v1/teammates") &&
+    method === "POST"
+  ) {
+    const projectId = bodyProjectId(body);
+    return projectId === undefined
+      ? undefined
+      : { projectId, permission: "write" };
+  }
+  if (route.startsWith("/api/v1/teammate-templates/:templateId")) {
+    return {
+      resourceType: "teammate-template",
+      resourceId: parameter(params, "templateId"),
+      permission: "write",
+    };
+  }
+  if (route.startsWith("/api/v1/teammates/:teammateId")) {
+    return {
+      resourceType: "teammate",
+      resourceId: parameter(params, "teammateId"),
+      permission:
+        route.endsWith("/transfer") || route.endsWith("/archive")
+          ? "manage_members"
+          : "write",
+    };
   }
   if (route === "/api/v1/tasks/:id") {
     return {
@@ -313,6 +342,20 @@ function readProjectRequirement(
     return {
       resourceType: "task",
       resourceId: parameter(params, "id"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/teammate-templates/:templateId")) {
+    return {
+      resourceType: "teammate-template",
+      resourceId: parameter(params, "templateId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/teammates/:teammateId")) {
+    return {
+      resourceType: "teammate",
+      resourceId: parameter(params, "teammateId"),
       permission: "read",
     };
   }

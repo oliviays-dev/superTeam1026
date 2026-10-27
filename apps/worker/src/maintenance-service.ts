@@ -163,6 +163,27 @@ export class RuntimeMaintenanceService {
         }
         return;
       }
+      case "teammate_queue": {
+        const autoRun = await this.application.teammates.runAutoQueue(
+          this.options.recoveryBatchSize,
+        );
+        const reports =
+          await this.application.teammates.generateDueWeeklyReports();
+        if (autoRun.attempted > 0 || reports.generated > 0) {
+          await this.repositories.runtimeReliability.recordMaintenance({
+            kind: claim.kind,
+            status: "completed",
+            processedCount: autoRun.attempted + reports.generated,
+            metrics: { autoRun, reports },
+            triggerSource: "scheduler",
+            scheduledFor: new Date(claim.scheduledFor),
+            startedAt,
+            trace,
+          });
+          this.log?.("teammates.auto_run", { ...autoRun, ...reports });
+        }
+        return;
+      }
       default:
         claim.kind satisfies never;
         throw new Error(`unsupported maintenance kind: ${claim.kind}`);

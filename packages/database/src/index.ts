@@ -129,6 +129,11 @@ export {
   type RuntimeRunSource,
 } from "./runtime-economics-repository.js";
 export {
+  TeammateRepository,
+  type TeammateRunAttribution,
+  type TeammateTaskStatusSummary,
+} from "./teammate-repository.js";
+export {
   WorkflowRuntimeRepository,
   type CreateWorkflowRuntimeInstanceInput,
   type SaveWorkflowRuntimeInput,
