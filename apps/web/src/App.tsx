@@ -484,7 +484,9 @@ export function App() {
           />
         )}
         {view === "agents" && <AgentsView />}
-        {view === "runtimes" && <RuntimesView />}
+        {view === "runtimes" && (
+          <RuntimesView workspaceId={selectedProjectId} />
+        )}
         {view === "operations" && <OperationsDashboardView />}
       </div>
     </div>

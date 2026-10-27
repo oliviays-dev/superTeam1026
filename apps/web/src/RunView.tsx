@@ -33,6 +33,7 @@ import {
   RunExternalRuntimePanel,
   RuntimeProgressHeading,
 } from "./ExternalRuntimeObservability.js";
+import { RunEconomicsPanel } from "./RuntimeEconomicsPanel.js";
 
 const terminalStatuses = new Set([
   "completed",
@@ -312,6 +313,8 @@ export function RunView({ runId }: { runId: string }) {
           </button>
         )}
       </header>
+
+      <RunEconomicsPanel runId={run.id} />
 
       {gates.length > 0 && (
         <section className="run-section gate-section">

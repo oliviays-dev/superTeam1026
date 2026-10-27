@@ -369,7 +369,7 @@ integration("RBAC read authorization API", () => {
       fileStoreRoot: join(directory, "files"),
       logger: false,
       authMode: "bearer",
-      expectedMigrationVersion: 28,
+      expectedMigrationVersion: 29,
     });
     app = built.app;
     await app.ready();
@@ -407,7 +407,8 @@ integration("RBAC read authorization API", () => {
     await addMember(projectId, archived, [roleId], "Archived Reader");
     await database.query(
       `UPDATE role_grants
-       SET status = 'revoked', revoked_at = NOW(), updated_at = NOW()
+       SET status = 'revoked', revoked_at = NOW(),
+           updated_at = GREATEST(NOW(), created_at + INTERVAL '1 millisecond')
        WHERE principal_id = $1 AND scope_type = 'project' AND scope_id = $2
          AND status = 'active'`,
       [revoked.principalId, projectId],

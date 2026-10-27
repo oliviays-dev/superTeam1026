@@ -45,6 +45,8 @@ import type {
   ExternalRuntimeDetail,
   ExternalRuntimeEvent,
   ExternalRuntimeProbeRequestResult,
+  ExecutionHistoryPage,
+  ExecutionHistoryQuery,
   ImportWorkflowMarkdownInput,
   IdempotencyCleanupInput,
   IdempotencyCleanupResult,
@@ -87,6 +89,8 @@ import type {
   Run,
   RunDelta,
   RunDetail,
+  RunExecutionEconomics,
+  RuntimeAccessProjection,
   OperationsSnapshot,
   Task,
   TaskDetail,
@@ -129,6 +133,9 @@ import type {
   WorkflowInstanceDetail,
   WorkflowReasonInput,
   WorkflowValidationResult,
+  WorkspaceRuntimeCatalogItem,
+  WorkspaceRuntimeEconomics,
+  WorkspaceRuntimeEconomicsQuery,
 } from "@pluginmax/contracts";
 
 const API_BASE = "/api/v1";
@@ -677,6 +684,68 @@ export function uploadTaskAttachment(
       body: JSON.stringify(input),
     },
   );
+}
+
+export async function listWorkspaceRuntimeCatalog(
+  workspaceId: string,
+  includeArchived = false,
+): Promise<WorkspaceRuntimeCatalogItem[]> {
+  return (
+    await request<{ items: WorkspaceRuntimeCatalogItem[] }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/runtimes?includeArchived=${
+        includeArchived ? "1" : "0"
+      }`,
+    )
+  ).items;
+}
+
+export function getRuntimeAccess(
+  runtimeId: string,
+): Promise<RuntimeAccessProjection> {
+  return request(`/runtimes/${runtimeId}/access`);
+}
+
+function economicsQuery(query: WorkspaceRuntimeEconomicsQuery): string {
+  const params = new URLSearchParams();
+  if (query.from !== undefined) params.set("from", query.from);
+  if (query.to !== undefined) params.set("to", query.to);
+  if (query.runtimeId !== undefined) params.set("runtimeId", query.runtimeId);
+  const value = params.toString();
+  return value === "" ? "" : `?${value}`;
+}
+
+export function getWorkspaceRuntimeEconomics(
+  workspaceId: string,
+  query: WorkspaceRuntimeEconomicsQuery = {},
+): Promise<WorkspaceRuntimeEconomics> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/runtime-economics${economicsQuery(
+      query,
+    )}`,
+  );
+}
+
+export function listExecutionHistory(
+  workspaceId: string,
+  query: ExecutionHistoryQuery,
+): Promise<ExecutionHistoryPage> {
+  const params = new URLSearchParams();
+  if (query.from !== undefined) params.set("from", query.from);
+  if (query.to !== undefined) params.set("to", query.to);
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.cursor !== undefined) params.set("cursor", query.cursor);
+  if (query.runtimeId !== undefined) params.set("runtimeId", query.runtimeId);
+  if (query.contextType !== undefined) {
+    params.set("contextType", query.contextType);
+  }
+  if (query.status !== undefined) params.set("status", query.status);
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/execution-history?${params.toString()}`,
+  );
+}
+
+export function getRunEconomics(runId: string): Promise<RunExecutionEconomics> {
+  return request(`/runs/${runId}/economics`);
 }
 
 export function archiveTaskAttachment(

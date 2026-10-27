@@ -119,6 +119,16 @@ export {
   type RuntimeEffectControl,
 } from "./runtime-effect-repository.js";
 export {
+  RuntimeEconomicsRepository,
+  type ExecutionHistoryBoundary,
+  type ExecutionHistoryFilter,
+  type ExecutionHistoryResult,
+  type ExecutionHistoryRow,
+  type RecordRuntimeUsageInput,
+  type RecordRuntimeUsageResult,
+  type RuntimeRunSource,
+} from "./runtime-economics-repository.js";
+export {
   WorkflowRuntimeRepository,
   type CreateWorkflowRuntimeInstanceInput,
   type SaveWorkflowRuntimeInput,

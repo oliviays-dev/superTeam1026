@@ -57,7 +57,7 @@ integration("Action Ticket and Execution Gate", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 28,
+      expectedMigrationVersion: 29,
     });
     app = built.app;
     await app.ready();
@@ -79,7 +79,8 @@ integration("Action Ticket and Execution Gate", () => {
       url,
       headers: { "x-pluginmax-actor": actorId },
     };
-    if (payload !== undefined) options.payload = payload as Record<string, unknown>;
+    if (payload !== undefined)
+      options.payload = payload as Record<string, unknown>;
     const response = await app.inject(options);
     return {
       statusCode: response.statusCode,
@@ -266,7 +267,10 @@ integration("Action Ticket and Execution Gate", () => {
     const outsiderDecision = await request<{ code: string }>(
       "POST",
       `/api/v1/execution-gates/${blocking.gateId}/decisions`,
-      { decision: "approve", basis: "Platform ADMIN cannot bypass Project Grant" },
+      {
+        decision: "approve",
+        basis: "Platform ADMIN cannot bypass Project Grant",
+      },
       "platform-outsider",
     );
     expect(outsiderDecision.statusCode).toBe(403);
@@ -402,12 +406,7 @@ integration("Action Ticket and Execution Gate", () => {
        FROM execution_gate_decisions
        WHERE gate_id = ANY($1::uuid[])
        ORDER BY decision`,
-      [
-        [
-          expiredGateId,
-          timeoutBundle.gates[0]!.gateId,
-        ],
-      ],
+      [[expiredGateId, timeoutBundle.gates[0]!.gateId]],
     );
     expect(decisions.rows.map((row) => row.decision)).toEqual([
       "timeout",

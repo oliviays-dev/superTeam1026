@@ -257,6 +257,36 @@ export const PREFLIGHT_POLICY_VERSION = "external-runtime-preflight-v1";
 export class AgentRuntimePreflightService {
   constructor(private readonly repositories: PlatformRepositories) {}
 
+  private async canReadRuntime(input: {
+    readonly runtime: ExternalRuntime;
+    readonly actorId: string;
+    readonly administrator: boolean;
+    readonly workspaceId: string;
+  }): Promise<boolean> {
+    if (input.administrator) return true;
+    if (input.runtime.ownerId === input.actorId) return true;
+    if (input.runtime.visibility === "platform") return true;
+    if (
+      input.runtime.visibility !== "workspace" ||
+      input.runtime.workspaceId === null ||
+      input.runtime.workspaceId !== input.workspaceId
+    ) {
+      return false;
+    }
+    const principal = await this.repositories.authorization.getPrincipal(
+      input.actorId,
+    );
+    const decision =
+      await this.repositories.authorization.authorizeExecutionWorkspace({
+        principalId: input.actorId,
+        authSource:
+          principal?.source === "local" ? "local-development" : "bearer",
+        workspaceId: input.runtime.workspaceId,
+        permission: "read",
+      });
+    return decision.allowed;
+  }
+
   async preflight(input: {
     readonly agentId: string;
     readonly actorId: string;
@@ -294,9 +324,12 @@ export class AgentRuntimePreflightService {
       );
     }
     if (
-      !input.administrator &&
-      runtime.ownerId !== input.actorId &&
-      runtime.visibility !== "platform"
+      !(await this.canReadRuntime({
+        runtime,
+        actorId: input.actorId,
+        administrator: input.administrator,
+        workspaceId: input.request.workspaceId,
+      }))
     ) {
       return failed(
         "runtime_forbidden",

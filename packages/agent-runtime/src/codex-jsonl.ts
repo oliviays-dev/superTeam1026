@@ -14,6 +14,7 @@ import {
 import type {
   ExternalRuntimeExecutionMetadata,
   ExternalRuntimeLimitOptions,
+  ExternalRuntimeReportedUsage,
 } from "./external-runtime-types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -71,6 +72,69 @@ function nestedRecords(record: JsonRecord): JsonRecord[] {
     asRecord(record.item),
     asRecord(record.message),
   ].filter((value): value is JsonRecord => value !== undefined);
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function reportedUsage(
+  record: JsonRecord,
+): ExternalRuntimeReportedUsage | undefined {
+  const usage =
+    asRecord(record.usage) ??
+    asRecord(asRecord(record.payload)?.usage) ??
+    asRecord(asRecord(record.item)?.usage);
+  if (usage === undefined) return undefined;
+  const inputTokens =
+    nonNegativeInteger(usage.input_tokens) ??
+    nonNegativeInteger(usage.inputTokens);
+  const outputTokens =
+    nonNegativeInteger(usage.output_tokens) ??
+    nonNegativeInteger(usage.outputTokens);
+  const totalTokens =
+    nonNegativeInteger(usage.total_tokens) ??
+    nonNegativeInteger(usage.totalTokens);
+  const cachedInputTokens =
+    nonNegativeInteger(usage.cached_input_tokens) ??
+    nonNegativeInteger(usage.cachedInputTokens);
+  const reasoningTokens =
+    nonNegativeInteger(usage.reasoning_output_tokens) ??
+    nonNegativeInteger(usage.reasoning_tokens) ??
+    nonNegativeInteger(usage.reasoningTokens);
+  const costAmount =
+    nonNegativeNumber(usage.total_cost_usd) ??
+    nonNegativeNumber(usage.cost_usd) ??
+    nonNegativeNumber(usage.costAmount);
+  const costCurrency =
+    asString(usage.cost_currency) ??
+    asString(usage.costCurrency) ??
+    (costAmount === undefined ? undefined : "USD");
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    totalTokens === undefined &&
+    costAmount === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(totalTokens === undefined ? {} : { totalTokens }),
+    ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+    ...(costAmount === undefined ? {} : { costAmount }),
+    ...(costCurrency === undefined ? {} : { costCurrency }),
+  };
 }
 
 function codexSandboxLabel(record: JsonRecord): string | undefined {
@@ -261,6 +325,7 @@ export function parseCodexJsonl(
     authMode: string;
     sandbox: string;
     sessionId?: string;
+    usage?: ExternalRuntimeReportedUsage;
   } = {
     provider: initial.provider ?? "codex",
     model: initial.model ?? "unknown",
@@ -294,6 +359,8 @@ export function parseCodexJsonl(
       );
     }
     updateMetadata(metadata, record);
+    const usage = reportedUsage(record);
+    if (usage !== undefined) metadata.usage = usage;
 
     const type = asString(record.type);
     const item = asRecord(record.item);

@@ -1,7 +1,7 @@
 # V1 Batch 17A：Task Execution Depth
 
-> 状态：Batch 17A 已完成。Batch 17B、Shared Space、sandbox、Lane 级路径写权限
-> 和 Global Write 仍未实现。
+> 状态：Batch 17A 已完成；Batch 13.1B 已由后续独立批次完成。Batch 17B、
+> Shared Space、sandbox、Lane 级路径写权限和 Global Write 仍未实现。
 
 ## 1. 基线
 
@@ -161,7 +161,8 @@ POST /api/v1/tasks/:id/session-reset
 未实现：
 
 - Batch 17B AI Teammate；
-- Batch 13.1B Runtime 经济、Token/成本与可见性；
+- Batch 13.1B 已由后续独立批次完成：
+  [v1-batch13.1b-runtime-economics.md](./v1-batch13.1b-runtime-economics.md)；
 - Shared Space、Lane 级路径写权限、Locks、Global Write；
 - sandbox 扩展；
 - Provider Session resume；

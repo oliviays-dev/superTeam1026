@@ -119,7 +119,7 @@ integration("RBAC authorization API", () => {
       fileStoreRoot: await mkdtemp(join(tmpdir(), "pluginmax-rbac-api-")),
       logger: false,
       authMode: "bearer",
-      expectedMigrationVersion: 28,
+      expectedMigrationVersion: 29,
     });
     app = built.app;
     await app.ready();

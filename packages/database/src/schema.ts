@@ -3459,3 +3459,129 @@ ALTER TABLE task_events
     'session'
   ));
 `;
+
+export const RUNTIME_ECONOMICS_SCHEMA_SQL = `
+ALTER TABLE external_runtimes
+  ADD COLUMN IF NOT EXISTS workspace_id TEXT
+    CHECK (
+      workspace_id IS NULL
+      OR (
+        length(workspace_id) BETWEEN 1 AND 180
+        AND workspace_id !~ '(^|/)\\\\.\\\\.?(/|$)'
+        AND workspace_id !~ '^/'
+        AND workspace_id !~ '\\\\\\\\'
+      )
+    );
+
+ALTER TABLE external_runtimes
+  DROP CONSTRAINT IF EXISTS external_runtimes_visibility_check,
+  DROP CONSTRAINT IF EXISTS external_runtimes_workspace_visibility_check;
+
+ALTER TABLE external_runtimes
+  ADD CONSTRAINT external_runtimes_visibility_check
+    CHECK (visibility IN ('platform', 'workspace', 'owner')),
+  ADD CONSTRAINT external_runtimes_workspace_visibility_check
+    CHECK (visibility <> 'workspace' OR workspace_id IS NOT NULL);
+
+CREATE INDEX IF NOT EXISTS external_runtimes_workspace_visibility_idx
+  ON external_runtimes(workspace_id, status, updated_at DESC)
+  WHERE visibility = 'workspace';
+
+CREATE INDEX IF NOT EXISTS runs_execution_workspace_created_idx
+  ON runs(
+    (
+      COALESCE(
+        execution_envelope_snapshot ->> 'workspaceId',
+        project_id::text
+      )
+    ),
+    created_at DESC,
+    id DESC
+  );
+
+CREATE TABLE IF NOT EXISTS run_runtime_usage_receipts (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  run_attempt INTEGER NOT NULL CHECK (run_attempt > 0),
+  job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
+  job_attempt INTEGER CHECK (job_attempt IS NULL OR job_attempt > 0),
+  workspace_id TEXT NOT NULL
+    CHECK (length(btrim(workspace_id)) BETWEEN 1 AND 180),
+  project_id UUID REFERENCES projects(id) ON DELETE SET NULL,
+  context_type TEXT NOT NULL
+    CHECK (context_type IN ('task', 'workflow-task', 'meeting', 'direct-chat')),
+  context_id TEXT NOT NULL
+    CHECK (length(btrim(context_id)) BETWEEN 1 AND 240),
+  runtime_id TEXT NOT NULL
+    CHECK (length(btrim(runtime_id)) BETWEEN 1 AND 180),
+  runtime_revision INTEGER
+    CHECK (runtime_revision IS NULL OR runtime_revision > 0),
+  provider TEXT
+    CHECK (provider IS NULL OR length(btrim(provider)) BETWEEN 1 AND 120),
+  model TEXT
+    CHECK (model IS NULL OR length(btrim(model)) BETWEEN 1 AND 160),
+  input_tokens BIGINT CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  output_tokens BIGINT CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  total_tokens BIGINT CHECK (total_tokens IS NULL OR total_tokens >= 0),
+  cached_input_tokens BIGINT
+    CHECK (cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+  reasoning_tokens BIGINT
+    CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+  cost_amount NUMERIC(20, 8)
+    CHECK (cost_amount IS NULL OR cost_amount >= 0),
+  cost_currency TEXT
+    CHECK (
+      cost_currency IS NULL
+      OR length(btrim(cost_currency)) BETWEEN 1 AND 12
+    ),
+  usage_source TEXT NOT NULL
+    CHECK (usage_source IN (
+      'runtime-reported',
+      'derived',
+      'unavailable',
+      'mixed'
+    )),
+  unknown_fields TEXT[] NOT NULL DEFAULT '{}'::text[],
+  duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+  payload_digest TEXT NOT NULL CHECK (payload_digest ~ '^[a-f0-9]{64}$'),
+  recorded_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, run_attempt),
+  CHECK (
+    (cost_amount IS NULL AND cost_currency IS NULL)
+    OR (cost_amount IS NOT NULL AND cost_currency IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS run_runtime_usage_workspace_idx
+  ON run_runtime_usage_receipts(
+    workspace_id,
+    recorded_at DESC,
+    runtime_id
+  );
+
+CREATE INDEX IF NOT EXISTS run_runtime_usage_run_idx
+  ON run_runtime_usage_receipts(run_id, run_attempt);
+
+CREATE UNIQUE INDEX IF NOT EXISTS runtime_usage_outbox_idempotency_idx
+  ON domain_outbox(
+    (payload ->> 'runId'),
+    (payload ->> 'runAttempt')
+  )
+  WHERE topic = 'runtime.usage.recorded';
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_runtime_usage_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'runtime usage receipts are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS run_runtime_usage_receipts_immutable
+  ON run_runtime_usage_receipts;
+CREATE TRIGGER run_runtime_usage_receipts_immutable
+BEFORE UPDATE OR DELETE ON run_runtime_usage_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_runtime_usage_mutation();
+`;

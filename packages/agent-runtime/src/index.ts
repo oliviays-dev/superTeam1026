@@ -194,6 +194,7 @@ export {
 } from "./external-adapter-error.js";
 export type {
   ExternalRuntimeExecutionMetadata,
+  ExternalRuntimeReportedUsage,
   ExternalRuntimeLimitOptions,
   ExternalRuntimeProcessDiagnostics,
 } from "./external-runtime-types.js";

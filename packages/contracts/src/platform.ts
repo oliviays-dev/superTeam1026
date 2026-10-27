@@ -500,6 +500,7 @@ export const platformRunEventTypeSchema = z.enum([
   "run.interrupted",
   "runtime.effect_replayed",
   "runtime.effect_cancelled",
+  "runtime.usage_recorded",
   "job.retry_scheduled",
   "job.dead_lettered",
   "job.manually_recovered",

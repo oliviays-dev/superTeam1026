@@ -1,6 +1,6 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 13.1A、14A-17A 已完成；下一正式批次为 Batch 13.1B
+> 状态：Batch 13.1A、13.1B、14A-17A 已完成；下一正式批次为 Batch 17B
 >
 > Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
 >
@@ -127,7 +127,7 @@ Binding 完成。
 | 批次 | 优先级 | 依赖 | 核心范围 | 退出条件 |
 | --- | --- | --- | --- | --- |
 | 13.1A Runtime 兼容收口 | P1 | Batch 13 | WorkBuddy 通用 plain-text 决策；文档承诺纠偏 | 已完成：契约、回归和文档一致 |
-| 13.1B Runtime 经济与可见性 | P2 | 14C、15A、17A | Workspace Runtime 可见范围、Token/耗时统计 | 权限可见性、Token 对账和 Run 遥测测试通过 |
+| 13.1B Runtime 经济与可见性 | P2 | 14C、15A、17A | Workspace Runtime 可见范围、Token/耗时统计 | 已完成：权限可见性、Token 对账和 Run 遥测测试通过 |
 | 14A Principal 清点与模型 | P0 | Batch 13 | Human/AI Principal、Account、Alias、Grant 映射 | 旧数据来源和映射报告完整，模型/Migration 评审通过 |
 | 14B 认证与登录 Session | P0 | 14A | Bearer Session、登录、改密、启停、Credential | 无认证拒绝，账号状态与 Principal 状态同步 |
 | 14C RBAC 消费与审计 | P0 | 14B | Platform/Workspace/Project Grant、项目角色授权 | 越权写入拒绝，Grant 撤销立即生效，审计可追溯 |
@@ -159,12 +159,25 @@ Binding 完成。
 
 ### Batch 13.1B：Runtime 经济与可见性
 
+状态：已完成。交付记录见
+[v1-batch13.1b-runtime-economics.md](./v1-batch13.1b-runtime-economics.md)。
+
 依赖：Batch 14C、15A、17A。
 
 - 收口 Workspace 级 Runtime 可见范围。
 - 建立 Token、时长和成本遥测口径，并覆盖队列、Claim、等待与恢复。
 - 与 17A 的 Task Event / Run 时间线对账。
 - 必须早于 17B，避免 Teammate 统计和 Workspace 归属返工。
+
+交付：
+
+- Migration 29：Workspace Runtime scope、immutable usage receipt、执行历史索引与
+  usage Outbox 幂等边界。
+- Token、耗时、成本缺失、unknown、重复回执、重试、恢复与结算时间口径。
+- Task Event、Run Event、Job Attempt、Runtime Effect、Outbox 与 usage receipt 对账。
+- Workspace Runtime catalog、Runtime access projection、Run economics、Workspace
+  经济统计和 Cursor-bound execution history API。
+- 历史 Run 不伪造 usage；Batch 17B 可直接复用执行历史和统计查询边界。
 
 ### Batch 14A：身份、Principal 与迁移清点
 
@@ -541,7 +554,7 @@ HTTP Request
 
 - [x] Batch 13 Phase 6 发布门禁
 - [x] Batch 13.1A Runtime 兼容承诺收口
-- [ ] Batch 13.1B Runtime 经济与可见性
+- [x] Batch 13.1B Runtime 经济与可见性
 - [x] Batch 14A Principal 清点与模型
 - [x] Batch 14B 认证与登录 Session
 - [x] Batch 14C RBAC 消费与审计
@@ -571,17 +584,17 @@ HTTP Request
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 13.1B：Runtime 经济与可见性**。
-Batch 17A 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context 或 Task
-Execution Depth 绕过。13.1B 完成后进入 Batch 17B。
+下一执行批次为 **Batch 17B：AI Teammate**。
+Batch 13.1B 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context、Task
+Execution Depth 或 Runtime 统计查询绕过。
 Shared Space、sandbox 扩展和 Batch 17B 均未实现。
 
 建议在独立 worktree 执行：
 
 ```text
-worktree: 独立 `.tmp/pluginmax-platform-batch17a-*`
-branch:   `feat/v1-batch17a-*`
-base:     Batch 13.1A local commit（其基线为 Batch 16）
+worktree: 独立 `.tmp/pluginmax-platform-batch17b-*`
+branch:   `feat/v1-batch17b-*`
+base:     Batch 13.1B local commit
 ```
 
 ## 13. 参考文档
@@ -596,6 +609,7 @@ base:     Batch 13.1A local commit（其基线为 Batch 16）
 - [v1-batch15b-action-ticket-gate.md](./v1-batch15b-action-ticket-gate.md)
 - [v1-batch16-scene-context.md](./v1-batch16-scene-context.md)
 - [v1-batch17a-task-execution-depth.md](./v1-batch17a-task-execution-depth.md)
+- [v1-batch13.1b-runtime-economics.md](./v1-batch13.1b-runtime-economics.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)

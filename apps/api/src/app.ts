@@ -39,6 +39,7 @@ import {
   cosignWorkflowApprovalInputSchema,
   decideWorkflowApprovalInputSchema,
   decideExecutionGateInputSchema,
+  executionHistoryQuerySchema,
   generateProjectReportInputSchema,
   importWorkflowMarkdownInputSchema,
   idempotencyCleanupInputSchema,
@@ -92,6 +93,7 @@ import {
   validateWorkflowMarkdownInputSchema,
   workflowAuditQuerySchema,
   workflowReasonInputSchema,
+  workspaceRuntimeEconomicsQuerySchema,
   createRootTraceContext,
   formatTraceparent,
   parseTraceparent,
@@ -148,6 +150,9 @@ const workflowInstanceParamsSchema = z.object({
 const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
 const directChatParamsSchema = z.object({ threadId: z.string().uuid() });
 const runtimeParamsSchema = z.object({ runtimeId: z.string().uuid() });
+const workspaceParamsSchema = z.object({
+  workspaceId: z.string().trim().min(1).max(180),
+});
 const agentParamsSchema = z.object({ agentId: z.string().uuid() });
 const directChatTurnParamsSchema = directChatParamsSchema.extend({
   turnId: z.string().uuid(),
@@ -361,7 +366,7 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 28;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 29;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -1663,6 +1668,70 @@ export function buildApi(options: BuildApiOptions): {
       });
     },
   );
+
+  app.get("/api/v1/runtimes/:runtimeId/access", async (request, reply) => {
+    const { runtimeId } = runtimeParamsSchema.parse(request.params);
+    return reply.send(
+      await application.getRuntimeAccess(
+        runtimeId,
+        requestActorId(request.headers),
+        requestIsAdministrator(request.headers),
+      ),
+    );
+  });
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/runtimes",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const query = listRuntimesQuerySchema.parse(request.query);
+      return reply.send({
+        items: await application.listWorkspaceRuntimeCatalog({
+          workspaceId,
+          actorId: requestActorId(request.headers),
+          administrator: requestIsAdministrator(request.headers),
+          includeArchived: query.includeArchived,
+        }),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/runtime-economics",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const query = workspaceRuntimeEconomicsQuerySchema.parse(request.query);
+      return reply.send(
+        await application.getWorkspaceRuntimeEconomics(
+          workspaceId,
+          query,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/execution-history",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const query = executionHistoryQuerySchema.parse(request.query);
+      return reply.send(
+        await application.listExecutionHistory(
+          workspaceId,
+          query,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/runs/:runId/economics", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    return reply.send(
+      await application.getRunEconomics(runId, requestActorId(request.headers)),
+    );
+  });
 
   app.get("/api/v1/tasks", async (request, reply) => {
     const query = listTasksQuerySchema.parse(request.query);

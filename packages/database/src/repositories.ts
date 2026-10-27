@@ -87,6 +87,7 @@ import { AuthorizationRepository } from "./authorization-repository.js";
 import { TaskExecutionPolicyRepository } from "./task-execution-policy-repository.js";
 import { ActionTicketRepository } from "./action-ticket-repository.js";
 import { SceneContextRepository } from "./scene-context-repository.js";
+import { RuntimeEconomicsRepository } from "./runtime-economics-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2200,6 +2201,7 @@ export class PlatformRepositories {
   readonly workbenchReports: WorkbenchReportsRepository;
   readonly runtimeReliability: RuntimeReliabilityRepository;
   readonly runtimeEffects: RuntimeEffectRepository;
+  readonly runtimeEconomics: RuntimeEconomicsRepository;
   readonly traces: RuntimeTraceRepository;
   readonly externalRuntimes: ExternalRuntimeRepository;
   readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
@@ -2242,6 +2244,7 @@ export class PlatformRepositories {
     );
     this.runtimeReliability = new RuntimeReliabilityRepository(database);
     this.runtimeEffects = new RuntimeEffectRepository(database);
+    this.runtimeEconomics = new RuntimeEconomicsRepository(database);
     this.traces = new RuntimeTraceRepository(database);
     this.externalRuntimes = new ExternalRuntimeRepository(database);
     this.agentRuntimeBindings = new AgentRuntimeBindingRepository(database);

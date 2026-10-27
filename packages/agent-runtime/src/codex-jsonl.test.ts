@@ -107,6 +107,7 @@ describe("CodexJsonlAdapter", () => {
       authMode: "chatgpt",
       sandbox: "read-only / network restricted",
       sessionId: "codex-session-fixture",
+      usage: { outputTokens: 42 },
     });
     expect(completed.diagnostics).toMatchObject({
       exitCode: 0,

@@ -5,9 +5,12 @@ import {
   DshSdkAdapter,
   FakeRuntimeAdapter,
   PlainTextAdapter,
+  ExternalRuntimeAdapterFailure,
   type AgentRuntimeAdapter,
   type AgentRuntimeEvent,
   type DshSdkAdapterOptions,
+  type ExternalRuntimeExecutionMetadata,
+  type ExternalRuntimeProcessDiagnostics,
 } from "@pluginmax/agent-runtime";
 import type {
   ActionTicketAction,
@@ -146,6 +149,7 @@ export class RunExecutor {
       readonly leaseRenewIntervalMs?: number;
       readonly traceId?: string;
       readonly jobSpanId?: string;
+      readonly jobAttempt?: number;
     } = {},
   ): Promise<void> {
     if (options.jobId === undefined) {
@@ -283,6 +287,14 @@ export class RunExecutor {
         output,
         assertLease,
       );
+      await this.recordRuntimeUsageSafely({
+        run,
+        task,
+        meetingContext,
+        directChatContext,
+        jobId: options.jobId,
+        jobAttempt: options.jobAttempt,
+      });
       return;
     }
     if (effect.kind === "cancelled") {
@@ -563,6 +575,16 @@ export class RunExecutor {
             event.output,
             assertLease,
           );
+          await this.recordRuntimeUsageSafely({
+            run,
+            task,
+            meetingContext,
+            directChatContext,
+            jobId: options.jobId,
+            jobAttempt: options.jobAttempt,
+            execution: event.execution,
+            diagnostics: event.diagnostics,
+          });
           return;
         }
       }
@@ -637,6 +659,20 @@ export class RunExecutor {
         effectLeaseToken,
         message,
       );
+      await this.recordRuntimeUsageSafely({
+        run,
+        task,
+        meetingContext,
+        directChatContext,
+        jobId: options.jobId,
+        jobAttempt: options.jobAttempt,
+        ...(error instanceof ExternalRuntimeAdapterFailure
+          ? {
+              execution: error.details.execution,
+              diagnostics: error.details.diagnostics,
+            }
+          : {}),
+      });
       await this.repositories.runs.appendEvent(runId, "error", "Run 执行失败", {
         error: message,
       });
@@ -952,6 +988,94 @@ export class RunExecutor {
       action: writebackAction,
       idempotencyKey: writebackKey,
     });
+  }
+
+  private async recordRuntimeUsageSafely(input: {
+    readonly run: Run;
+    readonly task: Task | null;
+    readonly meetingContext: MeetingAiRunContext | null;
+    readonly directChatContext: DirectChatRunContext | null;
+    readonly jobId?: string | undefined;
+    readonly jobAttempt?: number | undefined;
+    readonly execution?: ExternalRuntimeExecutionMetadata | undefined;
+    readonly diagnostics?: ExternalRuntimeProcessDiagnostics | undefined;
+  }): Promise<void> {
+    const envelope = input.run.executionEnvelope;
+    const workspaceId =
+      envelope?.envelope.workspaceId ??
+      input.run.projectId ??
+      (input.directChatContext === null
+        ? `meeting/${input.meetingContext?.meeting.id ?? input.run.id}`
+        : `direct-chat/${input.directChatContext.thread.id}`);
+    const contextType =
+      envelope?.contextType ??
+      (input.directChatContext !== null
+        ? "direct-chat"
+        : input.meetingContext !== null
+          ? "meeting"
+          : input.run.workflowInstanceId !== null
+            ? "workflow-task"
+            : "task");
+    const contextId =
+      envelope?.contextId ??
+      input.run.taskId ??
+      input.run.meetingTurnId ??
+      input.run.directChatTurnId ??
+      input.run.id;
+    const runtimeId =
+      envelope?.runtime.id ??
+      input.execution?.provider ??
+      `builtin:${input.run.inputSnapshot.runtimeKind}`;
+    const provider =
+      input.execution?.provider ??
+      envelope?.envelope.launch.provider ??
+      input.run.externalRuntimeProvider ??
+      input.run.inputSnapshot.runtimeKind;
+    const model =
+      input.execution?.model === "unknown"
+        ? undefined
+        : (input.execution?.model ??
+          envelope?.envelope.launch.model ??
+          input.run.executionSnapshot?.model);
+    try {
+      await this.repositories.runtimeEconomics.recordUsage({
+        runId: input.run.id,
+        runAttempt: input.jobAttempt ?? input.run.attempt,
+        ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
+        ...(input.jobAttempt === undefined
+          ? {}
+          : { jobAttempt: input.jobAttempt }),
+        workspaceId,
+        projectId: input.run.projectId,
+        contextType,
+        contextId,
+        runtimeId,
+        ...(envelope === null
+          ? {}
+          : { runtimeRevision: envelope.runtime.revision }),
+        provider,
+        ...(typeof model === "string" && model.trim() !== "" ? { model } : {}),
+        ...(input.execution?.usage === undefined
+          ? {}
+          : { usage: input.execution.usage }),
+        ...(input.diagnostics === undefined
+          ? {}
+          : { durationMs: input.diagnostics.durationMs }),
+      });
+    } catch (error) {
+      try {
+        await this.repositories.runs.appendEventIfAbsent(
+          input.run.id,
+          "warning",
+          "Runtime usage receipt 持久化失败",
+          {
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+      } catch {
+        // Business completion remains authoritative when telemetry persistence fails.
+      }
+    }
   }
 
   private async persistEvent(

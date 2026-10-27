@@ -39,7 +39,7 @@ integration("task execution policy and run execution envelope", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 28,
+      expectedMigrationVersion: 29,
     });
     app = built.app;
     await app.ready();

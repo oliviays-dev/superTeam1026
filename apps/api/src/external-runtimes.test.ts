@@ -49,7 +49,7 @@ integration("external runtime management API", () => {
       ),
       logger: false,
       localActorId: administrator,
-      expectedMigrationVersion: 28,
+      expectedMigrationVersion: 29,
     }).app;
     await app.ready();
   });
@@ -106,25 +106,22 @@ integration("external runtime management API", () => {
     return response.json();
   }
 
-  async function completeProbeSuccessfully(
-    runtimeId: string,
-  ): Promise<void> {
+  async function completeProbeSuccessfully(runtimeId: string): Promise<void> {
     const claimed = await repositories.externalRuntimes.claimProbeJob(
       "external-runtime-test-worker",
       30,
       runtimeId,
     );
     expect(claimed).toBeDefined();
-    const completed =
-      await repositories.externalRuntimes.completeProbeJob({
-        jobId: claimed!.jobId,
-        owner: "external-runtime-test-worker",
-        leaseToken: claimed!.leaseToken,
-        exitCode: 0,
-        timedOut: false,
-        stdoutExcerpt: "fixture-cli 1.2.3",
-        stderrExcerpt: "",
-      });
+    const completed = await repositories.externalRuntimes.completeProbeJob({
+      jobId: claimed!.jobId,
+      owner: "external-runtime-test-worker",
+      leaseToken: claimed!.leaseToken,
+      exitCode: 0,
+      timedOut: false,
+      stdoutExcerpt: "fixture-cli 1.2.3",
+      stderrExcerpt: "",
+    });
     expect(completed).toBe(true);
   }
 
@@ -315,9 +312,9 @@ integration("external runtime management API", () => {
     });
     expect(capabilities.statusCode).toBe(200);
     expect(capabilities.json().items).toHaveLength(1);
-    expect(
-      capabilities.json().items[0].effectiveProfile.structuredPlan,
-    ).toBe("unsupported");
+    expect(capabilities.json().items[0].effectiveProfile.structuredPlan).toBe(
+      "unsupported",
+    );
     await expect(
       database.query(
         `UPDATE external_runtime_probes
@@ -446,8 +443,6 @@ integration("external runtime management API", () => {
       payload: { expectedRevision: runtime.revision + 2 },
     });
     expect(enableWithoutNewProbe.statusCode).toBe(409);
-    expect(enableWithoutNewProbe.json().code).toBe(
-      "runtime_probe_required",
-    );
+    expect(enableWithoutNewProbe.json().code).toBe("runtime_probe_required");
   });
 });

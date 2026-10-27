@@ -52,7 +52,7 @@ integration("context and memory closure", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 28,
+      expectedMigrationVersion: 29,
     });
     app = built.app;
     await app.ready();

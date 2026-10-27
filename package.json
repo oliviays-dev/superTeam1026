@@ -66,6 +66,8 @@
     "test:e2e:scene-context": "./scripts/scene-context-e2e.sh",
     "test:integration:task-depth": "./scripts/task-execution-depth-vitest.sh",
     "test:e2e:task-depth": "./scripts/task-execution-depth-e2e.sh",
+    "test:integration:runtime-economics": "./scripts/runtime-economics-vitest.sh",
+    "test:e2e:runtime-economics": "./scripts/runtime-economics-e2e.sh",
     "test:integration:project-templates": "./scripts/project-templates-vitest.sh",
     "test:integration:external-runtime": "./scripts/external-runtime-vitest.sh",
     "test:smoke:external-runtime-postgres": "./scripts/external-runtime-postgres-smoke.sh",

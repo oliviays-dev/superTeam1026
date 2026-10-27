@@ -36,6 +36,7 @@ interface ExternalRuntimeRow {
   sandbox_mode: ExternalRuntime["sandboxMode"];
   status: ExternalRuntimeStatus;
   visibility: ExternalRuntime["visibility"];
+  workspace_id: string | null;
   owner_id: string;
   revision: number;
   command_digest: string;
@@ -171,17 +172,14 @@ export function externalRuntimeArgsDigest(
   return digest(JSON.stringify([...managedArgs, ...customArgs]));
 }
 
-function probeSummary(row: ExternalRuntimeProbeRow): ExternalRuntimeProbeSummary {
+function probeSummary(
+  row: ExternalRuntimeProbeRow,
+): ExternalRuntimeProbeSummary {
   return {
     id: row.id,
     runtimeRevision: row.runtime_revision,
     status: row.status,
-    ok:
-      row.status === "passed"
-        ? true
-        : row.status === "failed"
-          ? false
-          : null,
+    ok: row.status === "passed" ? true : row.status === "failed" ? false : null,
     message: row.error_message,
     exitCode: row.exit_code,
     timedOut: row.timed_out,
@@ -211,6 +209,7 @@ function runtimeFromRow(
     sandboxMode: row.sandbox_mode,
     status: row.status,
     visibility: row.visibility,
+    workspaceId: row.workspace_id,
     ownerId: row.owner_id,
     revision: row.revision,
     commandDigest: row.command_digest,
@@ -297,6 +296,7 @@ function runtimeState(runtime: ExternalRuntime): Record<string, unknown> {
     sandboxMode: runtime.sandboxMode,
     status: runtime.status,
     visibility: runtime.visibility,
+    workspaceId: runtime.workspaceId,
     ownerId: runtime.ownerId,
     revision: runtime.revision,
     commandDigest: runtime.commandDigest,
@@ -330,10 +330,9 @@ function changedDefinitionFields(
     "networkMode",
     "sandboxMode",
     "visibility",
+    "workspaceId",
   ];
-  return fields.filter(
-    (field) => !sameJson(previous[field], next[field]),
-  );
+  return fields.filter((field) => !sameJson(previous[field], next[field]));
 }
 
 async function insertEvent(
@@ -442,6 +441,7 @@ export class ExternalRuntimeRepository {
        WHERE (
          $1::boolean
          OR runtime.visibility = 'platform'
+          OR runtime.visibility = 'workspace'
          OR runtime.owner_id = $2
        )
        AND ($3::boolean OR runtime.status <> 'archived')
@@ -497,12 +497,12 @@ export class ExternalRuntimeRepository {
            id, name, provider, protocol, command, managed_args, custom_args,
            supported_models, default_model, context_window_tokens,
            supported_tools, network_mode, sandbox_mode, status, visibility,
-           owner_id, revision, command_digest, args_digest,
+           workspace_id, owner_id, revision, command_digest, args_digest,
            created_at, updated_at
          ) VALUES (
            $1, $2, $3, $4, $5, $6::jsonb, $7::jsonb,
            $8::jsonb, $9, $10, $11::jsonb, $12, $13, 'disabled', $14,
-           $15, 1, $16, $17, NOW(), NOW()
+           $15, $16, 1, $17, $18, NOW(), NOW()
          )
          RETURNING *`,
         [
@@ -520,6 +520,7 @@ export class ExternalRuntimeRepository {
           input.networkMode,
           input.sandboxMode,
           input.visibility,
+          input.workspaceId ?? null,
           ownerId,
           commandDigest,
           argsDigest,
@@ -552,9 +553,7 @@ export class ExternalRuntimeRepository {
       if (locked.row.revision !== input.update.expectedRevision) {
         return { kind: "revision_conflict" } as const;
       }
-      const commandDigest = externalRuntimeCommandDigest(
-        input.merged.command,
-      );
+      const commandDigest = externalRuntimeCommandDigest(input.merged.command);
       const argsDigest = externalRuntimeArgsDigest(
         input.merged.managedArgs,
         input.merged.customArgs,
@@ -604,19 +603,20 @@ export class ExternalRuntimeRepository {
            network_mode = $12,
            sandbox_mode = $13,
            visibility = $14,
-           status = CASE WHEN $15::boolean THEN 'disabled' ELSE status END,
+           workspace_id = $15,
+           status = CASE WHEN $16::boolean THEN 'disabled' ELSE status END,
            revision = revision + 1,
-           command_digest = $16,
-           args_digest = $17,
-           last_probe_id = CASE WHEN $15::boolean THEN NULL ELSE last_probe_id END,
-           last_probe_at = CASE WHEN $15::boolean THEN NULL ELSE last_probe_at END,
-           last_probe_ok = CASE WHEN $15::boolean THEN NULL ELSE last_probe_ok END,
+           command_digest = $17,
+           args_digest = $18,
+           last_probe_id = CASE WHEN $16::boolean THEN NULL ELSE last_probe_id END,
+           last_probe_at = CASE WHEN $16::boolean THEN NULL ELSE last_probe_at END,
+           last_probe_ok = CASE WHEN $16::boolean THEN NULL ELSE last_probe_ok END,
            last_probe_message =
-             CASE WHEN $15::boolean THEN NULL ELSE last_probe_message END,
-           archived_at = CASE WHEN $15::boolean THEN NULL ELSE archived_at END,
+             CASE WHEN $16::boolean THEN NULL ELSE last_probe_message END,
+           archived_at = CASE WHEN $16::boolean THEN NULL ELSE archived_at END,
            updated_at = NOW()
          WHERE id = $1
-           AND revision = $18
+           AND revision = $19
          RETURNING *`,
         [
           input.runtimeId,
@@ -633,6 +633,7 @@ export class ExternalRuntimeRepository {
           input.merged.networkMode,
           input.merged.sandboxMode,
           input.merged.visibility,
+          input.merged.workspaceId,
           commandChanged,
           commandDigest,
           argsDigest,
@@ -700,10 +701,7 @@ export class ExternalRuntimeRepository {
           return { kind: "probe_required" } as const;
         }
       }
-      if (
-        input.nextStatus === "archived" ||
-        input.nextStatus === "disabled"
-      ) {
+      if (input.nextStatus === "archived" || input.nextStatus === "disabled") {
         await client.query(
           `UPDATE domain_outbox
            SET status = 'superseded', published_at = NOW()
@@ -993,16 +991,12 @@ export class ExternalRuntimeRepository {
         runtimeRow.args_digest !== probeRow.args_digest;
       const output = input.stdoutExcerpt.trim();
       const passed =
-        !stale &&
-        !input.timedOut &&
-        input.exitCode === 0 &&
-        output !== "";
-      let errorCode = passed ? null : input.errorCode ?? null;
-      let errorMessage = passed ? null : input.errorMessage ?? null;
+        !stale && !input.timedOut && input.exitCode === 0 && output !== "";
+      let errorCode = passed ? null : (input.errorCode ?? null);
+      let errorMessage = passed ? null : (input.errorMessage ?? null);
       if (stale) {
         errorCode = "probe_stale";
-        errorMessage =
-          "Runtime definition changed before the Probe completed";
+        errorMessage = "Runtime definition changed before the Probe completed";
       } else if (input.timedOut) {
         errorCode = "probe_timeout";
         errorMessage = "Runtime Probe exceeded its execution timeout";
@@ -1029,9 +1023,8 @@ export class ExternalRuntimeRepository {
           .find((line) => line !== "")
           ?.slice(0, 240) ?? null;
       const probeStatus = passed ? "passed" : "failed";
-      const updatedProbeResult =
-        await client.query<ExternalRuntimeProbeRow>(
-          `UPDATE external_runtime_probes
+      const updatedProbeResult = await client.query<ExternalRuntimeProbeRow>(
+        `UPDATE external_runtime_probes
            SET
              status = $2,
              completed_at = NOW(),
@@ -1045,19 +1038,19 @@ export class ExternalRuntimeRepository {
              error_message = $10
            WHERE id = $1
            RETURNING *`,
-          [
-            probeRow.id,
-            probeStatus,
-            durationMs,
-            input.exitCode,
-            input.timedOut,
-            runtimeVersion,
-            stdoutExcerpt,
-            stderrExcerpt,
-            errorCode,
-            errorMessage?.slice(0, 2_000) ?? null,
-          ],
-        );
+        [
+          probeRow.id,
+          probeStatus,
+          durationMs,
+          input.exitCode,
+          input.timedOut,
+          runtimeVersion,
+          stdoutExcerpt,
+          stderrExcerpt,
+          errorCode,
+          errorMessage?.slice(0, 2_000) ?? null,
+        ],
+      );
       const adapter = adapterCapabilityProfile(runtimeRow.protocol);
       const declared = declaredCapabilityProfile(
         runtimeRow.supported_tools,

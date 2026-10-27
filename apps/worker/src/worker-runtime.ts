@@ -256,6 +256,7 @@ export class WorkerRuntime {
         leaseRenewIntervalMs: this.options.leaseRenewIntervalMs,
         traceId: job.traceId,
         jobSpanId: job.spanId,
+        jobAttempt: job.attempts,
         assertLease: async () => {
           const owned = await this.dependencies.repositories.jobs.hasLease(
             job.id,

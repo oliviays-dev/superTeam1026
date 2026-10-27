@@ -650,6 +650,31 @@ export class AuthorizationRepository {
     };
   }
 
+  async authorizeExecutionWorkspace(input: {
+    readonly principalId: string;
+    readonly authSource: "bearer" | "local-development";
+    readonly workspaceId: string;
+    readonly permission: ScopedAuthorizationPermission;
+  }): Promise<ScopeAuthorizationDecision> {
+    const uuid =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    if (uuid.test(input.workspaceId)) {
+      const project = await this.database.query<{ id: string }>(
+        "SELECT id FROM projects WHERE id = $1",
+        [input.workspaceId],
+      );
+      if (project.rowCount === 1) {
+        return this.authorizeProject({
+          principalId: input.principalId,
+          authSource: input.authSource,
+          projectId: input.workspaceId,
+          permission: input.permission,
+        });
+      }
+    }
+    return this.authorizeWorkspace(input);
+  }
+
   async projectIdsForResource(
     resourceType: AuthorizationResourceType,
     resourceId: string,

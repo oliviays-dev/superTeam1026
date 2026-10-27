@@ -41,6 +41,7 @@ import {
   transitionExternalRuntime,
   updateExternalRuntime,
 } from "./api.js";
+import { WorkspaceRuntimeEconomicsPanel } from "./RuntimeEconomicsPanel.js";
 
 interface RuntimeFormState {
   name: string;
@@ -56,6 +57,7 @@ interface RuntimeFormState {
   networkMode: ExternalRuntimeNetworkMode;
   sandboxMode: ExternalRuntimeSandboxMode;
   visibility: ExternalRuntimeVisibility;
+  workspaceId: string;
 }
 
 const runtimeTools: ReadonlyArray<{
@@ -89,6 +91,7 @@ const emptyForm: RuntimeFormState = {
   networkMode: "unknown",
   sandboxMode: "read-only",
   visibility: "owner",
+  workspaceId: "",
 };
 
 function splitTokens(value: string): string[] {
@@ -133,6 +136,7 @@ function formFromRuntime(runtime: ExternalRuntime): RuntimeFormState {
     networkMode: runtime.networkMode,
     sandboxMode: runtime.sandboxMode,
     visibility: runtime.visibility,
+    workspaceId: runtime.workspaceId ?? "",
   };
 }
 
@@ -154,6 +158,7 @@ function inputFromForm(form: RuntimeFormState): CreateExternalRuntimeInput {
     networkMode: form.networkMode,
     sandboxMode: form.sandboxMode,
     visibility: form.visibility,
+    workspaceId: form.workspaceId.trim() || null,
   };
 }
 
@@ -294,7 +299,7 @@ function RuntimeDirectory({
   );
 }
 
-export function RuntimesView() {
+export function RuntimesView({ workspaceId }: { workspaceId: string }) {
   const queryClient = useQueryClient();
   const [includeArchived, setIncludeArchived] = useState(false);
   const [selectedId, setSelectedId] = useState("");
@@ -447,6 +452,8 @@ export function RuntimesView() {
           新建运行时
         </button>
       </header>
+
+      <WorkspaceRuntimeEconomicsPanel workspaceId={workspaceId} />
 
       <div className="runtime-layout">
         <RuntimeDirectory
@@ -801,8 +808,19 @@ export function RuntimesView() {
                     }
                   >
                     <option value="owner">Owner</option>
+                    <option value="workspace">Workspace</option>
                     <option value="platform">平台</option>
                   </select>
+                </label>
+                <label className="pm-field">
+                  <span>Workspace ID</span>
+                  <input
+                    value={form.workspaceId}
+                    onChange={(event) =>
+                      setForm({ ...form, workspaceId: event.target.value })
+                    }
+                    placeholder="Workspace 可见范围必填"
+                  />
                 </label>
                 <fieldset className="runtime-tools pm-field-wide">
                   <legend>能力声明</legend>

@@ -22,14 +22,36 @@ export const externalRuntimeStatusSchema = z.enum([
   "active",
   "archived",
 ]);
-export type ExternalRuntimeStatus = z.infer<
-  typeof externalRuntimeStatusSchema
->;
+export type ExternalRuntimeStatus = z.infer<typeof externalRuntimeStatusSchema>;
 
-export const externalRuntimeVisibilitySchema = z.enum(["platform", "owner"]);
+export const externalRuntimeVisibilitySchema = z.enum([
+  "platform",
+  "workspace",
+  "owner",
+]);
 export type ExternalRuntimeVisibility = z.infer<
   typeof externalRuntimeVisibilitySchema
 >;
+
+const externalRuntimeWorkspaceIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(180)
+  .refine(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.startsWith("\\") &&
+      !/^[a-zA-Z]:/.test(value) &&
+      !value
+        .split(/[\\/]/)
+        .some(
+          (segment) => segment === "" || segment === "." || segment === "..",
+        ) &&
+      // oxlint-disable-next-line no-control-regex
+      !/[\u0000-\u001f\u007f]/.test(value),
+    "workspaceId must identify a bounded execution workspace",
+  );
 
 export const externalRuntimeNetworkModeSchema = z.enum([
   "none",
@@ -354,12 +376,18 @@ const externalRuntimeFields = {
   customArgs: externalRuntimeArgvSchema.default([]),
   supportedModels: uniqueRuntimeModelsSchema,
   defaultModel: runtimeModelSchema.nullable().default(null),
-  contextWindowTokens: z.number().int().positive().max(10_000_000).nullable()
+  contextWindowTokens: z
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .nullable()
     .default(null),
   supportedTools: uniqueRuntimeToolsSchema,
   networkMode: externalRuntimeNetworkModeSchema.default("unknown"),
   sandboxMode: externalRuntimeSandboxModeSchema.default("unknown"),
   visibility: externalRuntimeVisibilitySchema.default("owner"),
+  workspaceId: externalRuntimeWorkspaceIdSchema.nullable().optional(),
 };
 
 function validateRuntimeDefinition(
@@ -368,6 +396,8 @@ function validateRuntimeDefinition(
     readonly protocol: ExternalRuntimeProtocol;
     readonly supportedModels: readonly string[];
     readonly defaultModel: string | null;
+    readonly visibility?: ExternalRuntimeVisibility | undefined;
+    readonly workspaceId?: string | null | undefined;
   },
   context: z.RefinementCtx,
 ): void {
@@ -380,6 +410,16 @@ function validateRuntimeDefinition(
       code: "custom",
       path: ["defaultModel"],
       message: "defaultModel must belong to supportedModels",
+    });
+  }
+  if (
+    input.visibility === "workspace" &&
+    (input.workspaceId === null || input.workspaceId === undefined)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["workspaceId"],
+      message: "workspace visibility requires workspaceId",
     });
   }
 }
@@ -404,12 +444,18 @@ export const updateExternalRuntimeInputSchema = z
     customArgs: externalRuntimeArgvSchema.optional(),
     supportedModels: uniqueRuntimeModelsSchema.optional(),
     defaultModel: runtimeModelSchema.nullable().optional(),
-    contextWindowTokens: z.number().int().positive().max(10_000_000).nullable()
+    contextWindowTokens: z
+      .number()
+      .int()
+      .positive()
+      .max(10_000_000)
+      .nullable()
       .optional(),
     supportedTools: uniqueRuntimeToolsSchema.optional(),
     networkMode: externalRuntimeNetworkModeSchema.optional(),
     sandboxMode: externalRuntimeSandboxModeSchema.optional(),
     visibility: externalRuntimeVisibilitySchema.optional(),
+    workspaceId: externalRuntimeWorkspaceIdSchema.nullable().optional(),
     expectedRevision: z.number().int().positive(),
   })
   .strict();
@@ -466,6 +512,7 @@ export const externalRuntimeSchema = z.object({
   sandboxMode: externalRuntimeSandboxModeSchema,
   status: externalRuntimeStatusSchema,
   visibility: externalRuntimeVisibilitySchema,
+  workspaceId: externalRuntimeWorkspaceIdSchema.nullable().optional(),
   ownerId: z.string().min(1).max(180),
   revision: z.number().int().positive(),
   commandDigest: z.string().length(64),
@@ -499,9 +546,7 @@ export const externalRuntimeProbeSchema = z.object({
   errorCode: z.string().max(160).nullable(),
   errorMessage: z.string().max(2_000).nullable(),
 });
-export type ExternalRuntimeProbe = z.infer<
-  typeof externalRuntimeProbeSchema
->;
+export type ExternalRuntimeProbe = z.infer<typeof externalRuntimeProbeSchema>;
 
 export const externalRuntimeCapabilitySnapshotSchema = z.object({
   id: z.string().uuid(),
@@ -553,8 +598,43 @@ export const externalRuntimeDetailSchema = z.object({
   runtime: externalRuntimeSchema,
   latestProbe: externalRuntimeProbeSchema.nullable(),
 });
-export type ExternalRuntimeDetail = z.infer<
-  typeof externalRuntimeDetailSchema
+export type ExternalRuntimeDetail = z.infer<typeof externalRuntimeDetailSchema>;
+
+export const runtimeAuthorizationSourceSchema = z.enum([
+  "platform-admin",
+  "owner",
+  "platform-visibility",
+  "workspace-grant",
+  "project-grant",
+  "none",
+]);
+export type RuntimeAuthorizationSource = z.infer<
+  typeof runtimeAuthorizationSourceSchema
+>;
+
+export const runtimeAccessProjectionSchema = z.object({
+  runtimeId: z.string().uuid(),
+  principalId: z.string().trim().min(1).max(180),
+  visibility: externalRuntimeVisibilitySchema,
+  workspaceId: z.string().trim().min(1).max(180).nullable(),
+  canRead: z.boolean(),
+  canManage: z.boolean(),
+  source: runtimeAuthorizationSourceSchema,
+  membershipId: z.string().nullable().optional(),
+  grantIds: z.array(z.string()).max(100).default([]),
+  effectivePermissions: z.array(z.string()).max(20).default([]),
+  reason: z.string().trim().max(500).optional(),
+});
+export type RuntimeAccessProjection = z.infer<
+  typeof runtimeAccessProjectionSchema
+>;
+
+export const workspaceRuntimeCatalogItemSchema = z.object({
+  runtime: externalRuntimeSchema,
+  access: runtimeAccessProjectionSchema,
+});
+export type WorkspaceRuntimeCatalogItem = z.infer<
+  typeof workspaceRuntimeCatalogItemSchema
 >;
 
 export const externalRuntimeProbeRequestResultSchema = z.object({

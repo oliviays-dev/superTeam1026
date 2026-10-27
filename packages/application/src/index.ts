@@ -161,6 +161,13 @@ import type {
   ExecutionGateRecord,
   UpdateExternalRuntimeInput,
   RemoveAgentRuntimeBindingInput,
+  ExecutionHistoryPage,
+  ExecutionHistoryQuery,
+  RunExecutionEconomics,
+  RuntimeAccessProjection,
+  WorkspaceRuntimeCatalogItem,
+  WorkspaceRuntimeEconomics,
+  WorkspaceRuntimeEconomicsQuery,
   TaskExecutionPolicyRecord,
   TaskExecutionPolicyContextType,
   ResolvedTaskExecutionPolicy,
@@ -211,12 +218,30 @@ import {
 } from "./task-execution-preflight.js";
 import { ExecutionGateService } from "./execution-gate.js";
 import { SceneContextService } from "./scene-context.js";
+import {
+  decodeExecutionHistoryCursor,
+  encodeExecutionHistoryCursor,
+  executionEconomics,
+  executionHistoryFingerprint,
+  executionHistoryItem,
+  workspaceEconomics,
+} from "./runtime-economics.js";
 
 export {
   TaskExecutionPreflightError,
   executionEnvelopeDigest,
 } from "./task-execution-preflight.js";
 export { ExecutionGateError, ExecutionGateService } from "./execution-gate.js";
+export {
+  buildRunTimeline,
+  decodeExecutionHistoryCursor,
+  encodeExecutionHistoryCursor,
+  executionEconomics,
+  executionHistoryFingerprint,
+  executionHistoryItem,
+  reconcileRunEconomics,
+  workspaceEconomics,
+} from "./runtime-economics.js";
 export {
   SceneContextService,
   type PreparedSceneContext,
@@ -949,16 +974,26 @@ export class PlatformApplication {
     return this.getAgent(id);
   }
 
-  listExternalRuntimes(
+  async listExternalRuntimes(
     actorId: string,
     administrator: boolean,
     includeArchived = false,
   ): Promise<ExternalRuntime[]> {
-    return this.repositories.externalRuntimes.list({
+    const candidates = await this.repositories.externalRuntimes.list({
       actorId,
       administrator,
       includeArchived,
     });
+    const visible: ExternalRuntime[] = [];
+    for (const runtime of candidates) {
+      const access = await this.projectRuntimeAccess(
+        runtime,
+        actorId,
+        administrator,
+      );
+      if (access.canRead) visible.push(runtime);
+    }
+    return visible;
   }
 
   async getExternalRuntime(
@@ -967,7 +1002,18 @@ export class PlatformApplication {
     administrator: boolean,
   ): Promise<ExternalRuntimeDetail> {
     const runtime = await this.requireExternalRuntime(runtimeId);
-    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    const access = await this.projectRuntimeAccess(
+      runtime,
+      actorId,
+      administrator,
+    );
+    if (!access.canRead) {
+      throw new ApplicationError(
+        "runtime_forbidden",
+        "The actor cannot access this external runtime",
+        403,
+      );
+    }
     return {
       runtime,
       latestProbe:
@@ -976,7 +1022,221 @@ export class PlatformApplication {
     };
   }
 
-  createExternalRuntime(
+  async getRuntimeAccess(
+    runtimeId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<RuntimeAccessProjection> {
+    const runtime = await this.requireExternalRuntime(runtimeId);
+    const access = await this.projectRuntimeAccess(
+      runtime,
+      actorId,
+      administrator,
+    );
+    if (!access.canRead) {
+      throw new ApplicationError(
+        "runtime_forbidden",
+        "The actor cannot access this external runtime",
+        403,
+      );
+    }
+    return access;
+  }
+
+  async listWorkspaceRuntimeCatalog(input: {
+    readonly workspaceId: string;
+    readonly actorId: string;
+    readonly administrator: boolean;
+    readonly includeArchived: boolean;
+  }): Promise<WorkspaceRuntimeCatalogItem[]> {
+    const [runtimes] = await Promise.all([
+      this.listExternalRuntimes(
+        input.actorId,
+        input.administrator,
+        input.includeArchived,
+      ),
+      this.requireExecutionWorkspacePermission(
+        input.workspaceId,
+        "read",
+        input.actorId,
+      ),
+    ]);
+    const items: WorkspaceRuntimeCatalogItem[] = [];
+    for (const runtime of runtimes) {
+      if (
+        runtime.visibility !== "platform" &&
+        runtime.visibility !== "workspace"
+      ) {
+        continue;
+      }
+      if (
+        runtime.visibility === "workspace" &&
+        runtime.workspaceId !== input.workspaceId
+      ) {
+        continue;
+      }
+      const access = await this.projectRuntimeAccess(
+        runtime,
+        input.actorId,
+        input.administrator,
+      );
+      if (!access.canRead) continue;
+      items.push({ runtime, access });
+    }
+    return items;
+  }
+
+  async getRunEconomics(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<RunExecutionEconomics> {
+    await this.getRunDetail(runId, actorId);
+    const source =
+      await this.repositories.runtimeEconomics.getRunSources(runId);
+    if (source === undefined) {
+      throw new ApplicationError("run_not_found", "Run not found", 404);
+    }
+    return executionEconomics(source);
+  }
+
+  async listExecutionHistory(
+    workspaceId: string,
+    query: ExecutionHistoryQuery,
+    actorId = "local-admin",
+  ): Promise<ExecutionHistoryPage> {
+    await this.requireExecutionWorkspacePermission(
+      workspaceId,
+      "read",
+      actorId,
+    );
+    const from = query.from === undefined ? undefined : new Date(query.from);
+    const to = query.to === undefined ? undefined : new Date(query.to);
+    if (
+      from !== undefined &&
+      to !== undefined &&
+      from.getTime() > to.getTime()
+    ) {
+      throw new ApplicationError(
+        "execution_history_range_invalid",
+        "Execution history range start must not be after its end",
+        400,
+      );
+    }
+    const fingerprint = executionHistoryFingerprint({
+      workspaceId,
+      from: query.from,
+      to: query.to,
+      runtimeId: query.runtimeId,
+      contextType: query.contextType,
+      status: query.status,
+    });
+    let boundary;
+    if (query.cursor !== undefined && query.cursor !== "") {
+      try {
+        const decoded = decodeExecutionHistoryCursor(query.cursor);
+        if (
+          decoded.workspaceId !== workspaceId ||
+          decoded.fingerprint !== fingerprint
+        ) {
+          throw new Error("execution_history_cursor_conflict");
+        }
+        boundary = {
+          createdAt: new Date(decoded.createdAt),
+          id: decoded.id,
+        };
+      } catch {
+        throw new ApplicationError(
+          "execution_history_cursor_conflict",
+          "Execution history cursor does not match this query",
+          409,
+        );
+      }
+    }
+    const page = await this.repositories.runtimeEconomics.listExecutionHistory({
+      workspaceId,
+      limit: query.limit,
+      ...(from === undefined ? {} : { from }),
+      ...(to === undefined ? {} : { to }),
+      ...(query.runtimeId === undefined ? {} : { runtimeId: query.runtimeId }),
+      ...(query.contextType === undefined
+        ? {}
+        : { contextType: query.contextType }),
+      ...(query.status === undefined ? {} : { status: query.status }),
+      ...(boundary === undefined ? {} : { boundary }),
+    });
+    const sources = await Promise.all(
+      page.items.map((item) =>
+        this.repositories.runtimeEconomics.getRunSources(item.runId),
+      ),
+    );
+    const items = sources
+      .filter(
+        (source): source is NonNullable<typeof source> => source !== undefined,
+      )
+      .map((source) => executionHistoryItem(source));
+    const last = page.items.at(-1);
+    return {
+      workspaceId,
+      items,
+      nextCursor:
+        page.hasMore && last !== undefined
+          ? encodeExecutionHistoryCursor({
+              workspaceId,
+              fingerprint,
+              createdAt: last.createdAt,
+              id: last.runId,
+            })
+          : null,
+      queryFingerprint: fingerprint,
+    };
+  }
+
+  async getWorkspaceRuntimeEconomics(
+    workspaceId: string,
+    query: WorkspaceRuntimeEconomicsQuery,
+    actorId = "local-admin",
+  ): Promise<WorkspaceRuntimeEconomics> {
+    if (
+      query.from !== undefined &&
+      query.to !== undefined &&
+      new Date(query.from).getTime() > new Date(query.to).getTime()
+    ) {
+      throw new ApplicationError(
+        "runtime_economics_range_invalid",
+        "Runtime economics range start must not be after its end",
+        400,
+      );
+    }
+    await this.requireExecutionWorkspacePermission(
+      workspaceId,
+      "read",
+      actorId,
+    );
+    const page = await this.repositories.runtimeEconomics.listExecutionHistory({
+      workspaceId,
+      limit: 100,
+      ...(query.from === undefined ? {} : { from: new Date(query.from) }),
+      ...(query.to === undefined ? {} : { to: new Date(query.to) }),
+      ...(query.runtimeId === undefined ? {} : { runtimeId: query.runtimeId }),
+    });
+    const sources = await Promise.all(
+      page.items.map((item) =>
+        this.repositories.runtimeEconomics.getRunSources(item.runId),
+      ),
+    );
+    return workspaceEconomics(
+      workspaceId,
+      sources.filter(
+        (source): source is NonNullable<typeof source> => source !== undefined,
+      ),
+      {
+        ...(query.from === undefined ? {} : { from: query.from }),
+        ...(query.to === undefined ? {} : { to: query.to }),
+      },
+    );
+  }
+
+  async createExternalRuntime(
     input: CreateExternalRuntimeInput,
     actorId: string,
     administrator: boolean,
@@ -993,6 +1253,13 @@ export class PlatformApplication {
       );
     }
     const ownerId = administrator ? (input.ownerId ?? actorId) : actorId;
+    if (input.visibility === "workspace" && !administrator) {
+      await this.requireExecutionWorkspacePermission(
+        input.workspaceId!,
+        "write",
+        actorId,
+      );
+    }
     return this.repositories.externalRuntimes.create(input, ownerId, actorId);
   }
 
@@ -1031,7 +1298,18 @@ export class PlatformApplication {
       networkMode: input.networkMode ?? current.networkMode,
       sandboxMode: input.sandboxMode ?? current.sandboxMode,
       visibility: input.visibility ?? current.visibility,
+      workspaceId:
+        input.workspaceId === undefined
+          ? current.workspaceId
+          : input.workspaceId,
     });
+    if (mergedInput.visibility === "workspace" && !administrator) {
+      await this.requireExecutionWorkspacePermission(
+        mergedInput.workspaceId!,
+        "write",
+        actorId,
+      );
+    }
     const merged: ExternalRuntime = {
       ...current,
       ...mergedInput,
@@ -1148,7 +1426,18 @@ export class PlatformApplication {
     administrator: boolean,
   ): Promise<ExternalRuntimeEvent[]> {
     const runtime = await this.requireExternalRuntime(runtimeId);
-    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    const access = await this.projectRuntimeAccess(
+      runtime,
+      actorId,
+      administrator,
+    );
+    if (!access.canRead) {
+      throw new ApplicationError(
+        "runtime_forbidden",
+        "The actor cannot access this external runtime",
+        403,
+      );
+    }
     return this.repositories.externalRuntimes.listEvents(runtimeId);
   }
 
@@ -1158,7 +1447,18 @@ export class PlatformApplication {
     administrator: boolean,
   ): Promise<ExternalRuntimeCapabilitySnapshot[]> {
     const runtime = await this.requireExternalRuntime(runtimeId);
-    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    const access = await this.projectRuntimeAccess(
+      runtime,
+      actorId,
+      administrator,
+    );
+    if (!access.canRead) {
+      throw new ApplicationError(
+        "runtime_forbidden",
+        "The actor cannot access this external runtime",
+        403,
+      );
+    }
     return this.repositories.externalRuntimes.listCapabilities(runtimeId);
   }
 
@@ -1177,7 +1477,18 @@ export class PlatformApplication {
       return { agentId, binding: null, runtime: null };
     }
     const runtime = await this.requireExternalRuntime(binding.runtimeId);
-    assertExternalRuntimeReadable(runtime, actorId, administrator);
+    const access = await this.projectRuntimeAccess(
+      runtime,
+      actorId,
+      administrator,
+    );
+    if (!access.canRead) {
+      throw new ApplicationError(
+        "runtime_forbidden",
+        "The actor cannot access this external runtime",
+        403,
+      );
+    }
     return { agentId, binding, runtime };
   }
 
@@ -3770,6 +4081,128 @@ export class PlatformApplication {
       throw new ApplicationError("project_not_found", "Project not found", 404);
     }
     return project;
+  }
+
+  private async requireExecutionWorkspacePermission(
+    workspaceId: string,
+    permission: ScopedAuthorizationPermission,
+    actorId: string,
+  ) {
+    const principal =
+      await this.repositories.authorization.getPrincipal(actorId);
+    const decision =
+      await this.repositories.authorization.authorizeExecutionWorkspace({
+        principalId: actorId,
+        authSource:
+          principal?.source === "local" ? "local-development" : "bearer",
+        workspaceId,
+        permission,
+      });
+    if (!decision.allowed) {
+      throw new ApplicationError(
+        "forbidden",
+        "Workspace permission is required",
+        403,
+        {
+          reason: decision.reason ?? "permission_missing",
+          workspaceId,
+          permission,
+        },
+      );
+    }
+    return decision;
+  }
+
+  private async projectRuntimeAccess(
+    runtime: ExternalRuntime,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<RuntimeAccessProjection> {
+    if (administrator) {
+      return {
+        runtimeId: runtime.id,
+        principalId: actorId,
+        visibility: runtime.visibility,
+        workspaceId: runtime.workspaceId ?? null,
+        canRead: true,
+        canManage: true,
+        source: "platform-admin",
+        grantIds: [],
+        effectivePermissions: [],
+      };
+    }
+    if (runtime.ownerId === actorId) {
+      return {
+        runtimeId: runtime.id,
+        principalId: actorId,
+        visibility: runtime.visibility,
+        workspaceId: runtime.workspaceId ?? null,
+        canRead: true,
+        canManage: true,
+        source: "owner",
+        grantIds: [],
+        effectivePermissions: [],
+      };
+    }
+    if (runtime.visibility === "platform") {
+      return {
+        runtimeId: runtime.id,
+        principalId: actorId,
+        visibility: runtime.visibility,
+        workspaceId: runtime.workspaceId ?? null,
+        canRead: true,
+        canManage: false,
+        source: "platform-visibility",
+        grantIds: [],
+        effectivePermissions: [],
+      };
+    }
+    if (
+      runtime.visibility === "workspace" &&
+      typeof runtime.workspaceId === "string"
+    ) {
+      const principal =
+        await this.repositories.authorization.getPrincipal(actorId);
+      const decision =
+        await this.repositories.authorization.authorizeExecutionWorkspace({
+          principalId: actorId,
+          authSource:
+            principal?.source === "local" ? "local-development" : "bearer",
+          workspaceId: runtime.workspaceId,
+          permission: "read",
+        });
+      return {
+        runtimeId: runtime.id,
+        principalId: actorId,
+        visibility: runtime.visibility,
+        workspaceId: runtime.workspaceId,
+        canRead: decision.allowed,
+        canManage: false,
+        source: decision.allowed
+          ? decision.scopeType === "project"
+            ? "project-grant"
+            : "workspace-grant"
+          : "none",
+        ...(decision.membershipId === undefined
+          ? {}
+          : { membershipId: decision.membershipId }),
+        grantIds: [...decision.grantIds],
+        effectivePermissions: [...decision.effectivePermissions],
+        ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      };
+    }
+    return {
+      runtimeId: runtime.id,
+      principalId: actorId,
+      visibility: runtime.visibility,
+      workspaceId: runtime.workspaceId ?? null,
+      canRead: false,
+      canManage: false,
+      source: "none",
+      grantIds: [],
+      effectivePermissions: [],
+      reason: "runtime_owner_scope_mismatch",
+    };
   }
 
   private async requireProjectReadAccess(
@@ -7310,24 +7743,6 @@ function translateProjectTemplateError(error: unknown): Error {
     );
   }
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function assertExternalRuntimeReadable(
-  runtime: ExternalRuntime,
-  actorId: string,
-  administrator: boolean,
-): void {
-  if (
-    !administrator &&
-    runtime.ownerId !== actorId &&
-    runtime.visibility !== "platform"
-  ) {
-    throw new ApplicationError(
-      "runtime_forbidden",
-      "The actor cannot access this external runtime",
-      403,
-    );
-  }
 }
 
 function assertExternalRuntimeManageable(
