@@ -17,6 +17,10 @@ describe("task transitions", () => {
     expect(canTransitionTask("queued", "in_progress")).toBe(true);
     expect(canTransitionTask("in_progress", "review")).toBe(true);
     expect(canTransitionTask("review", "done")).toBe(true);
+    expect(canTransitionTask("queued", "paused")).toBe(true);
+    expect(canTransitionTask("paused", "queued")).toBe(true);
+    expect(canTransitionTask("blocked", "queued")).toBe(true);
+    expect(canTransitionTask("needs_input", "queued")).toBe(true);
   });
 
   it("rejects terminal task changes", () => {

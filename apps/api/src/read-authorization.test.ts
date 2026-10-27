@@ -218,8 +218,10 @@ integration("RBAC read authorization API", () => {
     await database.query(
       `INSERT INTO task_attachments (
          id, task_id, project_id, name, mime_type, size, sha256,
-         storage_key, uploaded_by, archived_at, created_at
-       ) VALUES ($1, $2, $3, $4, 'text/plain', $5, $6, $7, $8, NULL, NOW())`,
+         storage_key, uploaded_by, document_path, archived_at, created_at
+       ) VALUES (
+         $1, $2, $3, $4, 'text/plain', $5, $6, $7, $8, $9, NULL, NOW()
+       )`,
       [
         attachmentId,
         taskId,
@@ -229,6 +231,7 @@ integration("RBAC read authorization API", () => {
         stored.sha256,
         stored.storageKey,
         owner.principalId,
+        `documents/${taskId}/${stored.id}/read-authorization.txt`,
       ],
     );
     await database.query(
@@ -366,7 +369,7 @@ integration("RBAC read authorization API", () => {
       fileStoreRoot: join(directory, "files"),
       logger: false,
       authMode: "bearer",
-      expectedMigrationVersion: 27,
+      expectedMigrationVersion: 28,
     });
     app = built.app;
     await app.ready();

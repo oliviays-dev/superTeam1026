@@ -3,6 +3,7 @@ import type {
   ActionTicket,
   Agent,
   AgentEvent,
+  ClaimTaskInput,
   CreateAgentInput,
   CreateProjectInput,
   CreateTaskInput,
@@ -19,7 +20,10 @@ import type {
   RunInputSnapshot,
   RunObservability,
   Task,
+  TaskClaim,
+  TaskExecutionKind,
   TaskMessage,
+  TaskQueueItem,
   TaskStatus,
   TraceContext,
   UpdateAgentInput,
@@ -427,6 +431,264 @@ export class TaskRepository {
     return result.rows.map(taskFromRow);
   }
 
+  async listQueue(projectId: string): Promise<TaskQueueItem[]> {
+    const result = await this.database.query<
+      TaskRow & {
+        project_status: Project["status"];
+        dependency_blocked: boolean;
+        active_run: boolean;
+        active_claim: boolean;
+      }
+    >(
+      `SELECT
+         task.*,
+         project.status AS project_status,
+         ARRAY(
+           SELECT dependency.depends_on_task_id::text
+           FROM task_dependencies AS dependency
+           WHERE dependency.task_id = task.id
+           ORDER BY dependency.created_at, dependency.depends_on_task_id
+         ) AS depends_on
+       FROM tasks AS task
+       JOIN projects AS project ON project.id = task.project_id
+       WHERE task.project_id = $1
+         AND task.status IN ('queued', 'paused', 'blocked', 'needs_input')
+       ORDER BY
+         CASE task.priority
+           WHEN 'urgent' THEN 4
+           WHEN 'high' THEN 3
+           WHEN 'medium' THEN 2
+           ELSE 1
+         END DESC,
+         task.created_at,
+         task.id`,
+      [projectId],
+    );
+    const dependencyResult = await this.database.query<{
+      task_id: string;
+      blocked: boolean;
+    }>(
+      `SELECT
+         task_id,
+         EXISTS (
+           SELECT 1
+           FROM task_dependencies AS dependency
+           JOIN tasks AS prerequisite
+             ON prerequisite.id = dependency.depends_on_task_id
+           WHERE dependency.task_id = task_dependencies.task_id
+             AND prerequisite.status <> 'done'
+         ) AS blocked
+       FROM task_dependencies
+       WHERE project_id = $1`,
+      [projectId],
+    );
+    const runResult = await this.database.query<{
+      task_id: string;
+    }>(
+      `SELECT DISTINCT task_id
+       FROM runs
+       WHERE project_id = $1
+         AND status IN ('queued', 'running', 'waiting_approval', 'interrupted')
+         AND task_id IS NOT NULL`,
+      [projectId],
+    );
+    const blockedDependencies = new Set(
+      dependencyResult.rows
+        .filter((row) => row.blocked)
+        .map((row) => row.task_id),
+    );
+    const activeRuns = new Set(runResult.rows.map((row) => row.task_id));
+    return result.rows.map((row, index) => {
+      const task = taskFromRow(row);
+      const blockedReasons: TaskQueueItem["blockedReasons"] = [];
+      if (row.project_status !== "active")
+        blockedReasons.push("project-archived");
+      if (task.status === "paused") blockedReasons.push("paused");
+      if (task.status === "blocked") blockedReasons.push("blocked");
+      if (task.status === "needs_input") blockedReasons.push("needs-input");
+      if (blockedDependencies.has(task.id)) blockedReasons.push("dependency");
+      if (activeRuns.has(task.id)) blockedReasons.push("active-run");
+      if (
+        task.claimedBy !== null &&
+        task.claimExpiresAt !== null &&
+        Date.parse(task.claimExpiresAt) > Date.now()
+      ) {
+        blockedReasons.push("active-claim");
+      }
+      return {
+        task,
+        eligible: task.status === "queued" && blockedReasons.length === 0,
+        blockedReasons,
+        position: index + 1,
+      };
+    });
+  }
+
+  async claimNext(
+    projectId: string,
+    input: ClaimTaskInput,
+  ): Promise<TaskClaim | undefined> {
+    return this.database.transaction(async (client) => {
+      await client.query(
+        `UPDATE tasks
+         SET
+           execution_claim_token = NULL,
+           execution_claim_owner = NULL,
+           execution_claim_expires_at = NULL,
+           revision = revision + 1,
+           updated_at = NOW()
+         WHERE project_id = $1
+           AND execution_claim_token IS NOT NULL
+           AND execution_claim_expires_at <= NOW()`,
+        [projectId],
+      );
+      const candidate = await client.query<TaskRow>(
+        `${this.selectSql}
+         JOIN projects AS project ON project.id = task.project_id
+         WHERE task.project_id = $1
+           AND task.status = 'queued'
+           AND project.status = 'active'
+           AND task.execution_claim_token IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM task_dependencies AS dependency
+             JOIN tasks AS prerequisite
+               ON prerequisite.id = dependency.depends_on_task_id
+             WHERE dependency.task_id = task.id
+               AND prerequisite.status <> 'done'
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM runs
+             WHERE runs.task_id = task.id
+               AND runs.status IN (
+                 'queued',
+                 'running',
+                 'waiting_approval',
+                 'interrupted'
+               )
+           )
+         ORDER BY
+           CASE task.priority
+             WHEN 'urgent' THEN 4
+             WHEN 'high' THEN 3
+             WHEN 'medium' THEN 2
+             ELSE 1
+           END DESC,
+           task.created_at,
+           task.id
+         FOR UPDATE OF task SKIP LOCKED
+         LIMIT 1`,
+        [projectId],
+      );
+      const row = candidate.rows[0];
+      if (row === undefined) return undefined;
+      const claimToken = randomUUID();
+      const updated = await client.query<TaskRow>(
+        `UPDATE tasks
+         SET
+           execution_claim_token = $2,
+           execution_claim_owner = $3,
+           execution_claim_expires_at =
+             NOW() + ($4 || ' seconds')::interval,
+           revision = revision + 1,
+           updated_at = NOW()
+         WHERE id = $1
+           AND execution_claim_token IS NULL
+         RETURNING *`,
+        [row.id, claimToken, input.ownerId, input.leaseSeconds],
+      );
+      const claimed = updated.rows[0];
+      if (claimed === undefined) return undefined;
+      await client.query(
+        `INSERT INTO task_events (
+           id, task_id, kind, actor_id, actor_name, summary, data, created_at
+         ) VALUES (
+           $1, $2, 'claim', $3, $3, $4, $5::jsonb, NOW()
+         )`,
+        [
+          randomUUID(),
+          row.id,
+          input.ownerId,
+          `任务已由 ${input.ownerId} 领取`,
+          JSON.stringify({ claimToken, leaseSeconds: input.leaseSeconds }),
+        ],
+      );
+      const task = taskFromRow({
+        ...claimed,
+        depends_on: row.depends_on,
+      });
+      return {
+        task,
+        claimToken,
+        ownerId: input.ownerId,
+        expiresAt: task.claimExpiresAt!,
+        revision: task.revision,
+      };
+    });
+  }
+
+  async releaseClaim(
+    id: string,
+    claimToken: string,
+  ): Promise<Task | undefined> {
+    const result = await this.database.query<TaskRow>(
+      `UPDATE tasks
+       SET
+         execution_claim_token = NULL,
+         execution_claim_owner = NULL,
+         execution_claim_expires_at = NULL,
+         revision = revision + 1,
+         updated_at = NOW()
+       WHERE id = $1
+         AND execution_claim_token = $2
+       RETURNING *`,
+      [id, claimToken],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return undefined;
+    return this.get(id);
+  }
+
+  async transitionControl(input: {
+    readonly id: string;
+    readonly from: readonly TaskStatus[];
+    readonly to: TaskStatus;
+    readonly expectedRevision?: number;
+    readonly needsInputPrompt?: string | null;
+    readonly blockedReason?: string | null;
+    readonly pausedReason?: string | null;
+  }): Promise<Task | undefined> {
+    const result = await this.database.query<TaskRow>(
+      `UPDATE tasks
+       SET
+         status = $3,
+         needs_input_prompt = $4,
+         blocked_reason = $5,
+         paused_reason = $6,
+         execution_claim_token = NULL,
+         execution_claim_owner = NULL,
+         execution_claim_expires_at = NULL,
+         revision = revision + 1,
+         updated_at = NOW()
+       WHERE id = $1
+         AND status = ANY($2::text[])
+         AND ($7::integer IS NULL OR revision = $7)
+       RETURNING *`,
+      [
+        input.id,
+        [...input.from],
+        input.to,
+        input.needsInputPrompt ?? null,
+        input.blockedReason ?? null,
+        input.pausedReason ?? null,
+        input.expectedRevision ?? null,
+      ],
+    );
+    if (result.rows[0] === undefined) return undefined;
+    return this.get(input.id);
+  }
+
   async get(id: string): Promise<Task | undefined> {
     const result = await this.database.query<TaskRow>(
       `${this.selectSql} WHERE task.id = $1`,
@@ -446,8 +708,12 @@ export class TaskRepository {
       await client.query(
         `INSERT INTO tasks (
            id, project_id, title, description, acceptance, status,
-           agent_id, role_id, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5::jsonb, 'queued', $6, $7, NOW(), NOW())`,
+           agent_id, role_id, priority, auto_submit, auto_accept,
+           auto_redispatch_on_return, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5::jsonb, 'queued', $6, $7, $8, $9, $10, $11,
+           NOW(), NOW()
+         )`,
         [
           taskId,
           input.projectId,
@@ -456,13 +722,17 @@ export class TaskRepository {
           JSON.stringify(input.acceptance),
           agentId,
           roleId ?? null,
+          input.priority ?? "medium",
+          input.autoSubmit ?? true,
+          input.autoAccept ?? false,
+          input.autoRedispatchOnReturn ?? false,
         ],
       );
       await this.replaceDependenciesWithClient(
         client,
         taskId,
         input.projectId,
-        input.dependsOn,
+        input.dependsOn ?? [],
       );
     });
     const task = await this.get(taskId);
@@ -480,6 +750,12 @@ export class TaskRepository {
            title = COALESCE($2, title),
            description = COALESCE($3, description),
            acceptance = COALESCE($4::jsonb, acceptance),
+           priority = COALESCE($5, priority),
+           auto_submit = COALESCE($6, auto_submit),
+           auto_accept = COALESCE($7, auto_accept),
+           auto_redispatch_on_return =
+             COALESCE($8, auto_redispatch_on_return),
+           revision = revision + 1,
            updated_at = NOW()
          WHERE id = $1`,
         [
@@ -489,6 +765,10 @@ export class TaskRepository {
           input.acceptance === undefined
             ? null
             : JSON.stringify(input.acceptance),
+          input.priority ?? null,
+          input.autoSubmit ?? null,
+          input.autoAccept ?? null,
+          input.autoRedispatchOnReturn ?? null,
         ],
       );
       if (input.dependsOn !== undefined) {
@@ -520,9 +800,20 @@ export class TaskRepository {
   ): Promise<Task | undefined> {
     const result = await this.database.query(
       `UPDATE tasks
-       SET agent_id = $2, role_id = $3, updated_at = NOW()
+       SET
+         agent_id = $2,
+         role_id = $3,
+         revision = revision + 1,
+         updated_at = NOW()
        WHERE id = $1
-         AND status IN ('queued', 'in_progress', 'review')
+         AND status IN (
+           'queued',
+           'in_progress',
+           'review',
+           'paused',
+           'blocked',
+           'needs_input'
+         )
          AND NOT EXISTS (
            SELECT 1
            FROM runs
@@ -550,8 +841,11 @@ export class TaskRepository {
     const result = await this.database.query<TaskMessageRow>(
       `INSERT INTO task_messages (
          id, task_id, author_type, author_id, author_name,
-         content, reply_to_id, is_key_consensus, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+         content, reply_to_id, is_key_consensus, delivery_target,
+         mention_agent_ids, created_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::uuid[], NOW()
+       )
        RETURNING *`,
       [
         randomUUID(),
@@ -562,9 +856,26 @@ export class TaskRepository {
         input.content,
         input.replyToId ?? null,
         input.isKeyConsensus ?? false,
+        input.deliveryTarget ?? null,
+        input.mentions ?? [],
       ],
     );
     return taskMessageFromRow(result.rows[0]!);
+  }
+
+  async setMessageTriggeredRuns(
+    id: string,
+    runIds: readonly string[],
+  ): Promise<TaskMessage | undefined> {
+    const result = await this.database.query<TaskMessageRow>(
+      `UPDATE task_messages
+       SET triggered_run_ids = $2::uuid[]
+       WHERE id = $1
+       RETURNING *`,
+      [id, runIds],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : taskMessageFromRow(row);
   }
 
   async setStatus(
@@ -604,6 +915,9 @@ export class TaskRepository {
 export interface EnqueueRunInput {
   readonly runId: string;
   readonly task: Task;
+  readonly agentId?: string;
+  readonly taskExecutionKind?: TaskExecutionKind;
+  readonly taskTriggerMessageId?: string;
   readonly inputSnapshot: RunInputSnapshot;
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
   readonly executionEnvelope?: RunExecutionEnvelope;
@@ -631,7 +945,8 @@ export class RunRepository {
     return this.database.transaction(async (client) => {
       const result = await client.query<RunRow>(
         `INSERT INTO runs (
-           id, project_id, task_id, agent_id, status, input_snapshot,
+           id, project_id, task_id, agent_id, task_execution_kind,
+           task_trigger_message_id, status, input_snapshot,
            execution_snapshot, execution_context_type, execution_context_id,
            execution_policy_id, execution_policy_revision,
            execution_binding_revision, execution_runtime_revision,
@@ -641,17 +956,20 @@ export class RunRepository {
            workflow_instance_id, workflow_node_id, trace_id,
            trace_root_span_id, created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, $26, $5::jsonb,
-           $6::jsonb, $7, $8, $9, $10, $11, $12, $13::jsonb,
-           $14, $15, $16, $17, $18::jsonb,
-           $19, $20, $21, $22, $23, $24, $25, NOW(), NOW()
+           $1, $2, $3, $4, $5, $6, $7, $8::jsonb,
+           $9::jsonb, $10, $11, $12, $13, $14, $15, $16::jsonb,
+           $17, $18, $19, $20, $21::jsonb,
+           $22, $23, $24, $25, $26, $27, $28, NOW(), NOW()
          )
          RETURNING *`,
         [
           input.runId,
           input.task.projectId,
           input.task.id,
-          input.task.agentId,
+          input.agentId ?? input.task.agentId,
+          input.taskExecutionKind ?? "owner",
+          input.taskTriggerMessageId ?? null,
+          input.executionStatus ?? "queued",
           JSON.stringify(input.inputSnapshot),
           input.executionSnapshot === undefined
             ? null
@@ -684,7 +1002,6 @@ export class RunRepository {
           input.workflowNodeId ?? null,
           trace.traceId,
           trace.spanId,
-          input.executionStatus ?? "queued",
         ],
       );
       await client.query(
@@ -723,10 +1040,24 @@ export class RunRepository {
       } else if ((input.executionGates ?? []).length > 0) {
         throw new Error("execution gates require an Action Ticket");
       }
-      await client.query(
-        "UPDATE tasks SET status = 'in_progress', updated_at = NOW() WHERE id = $1",
-        [input.task.id],
-      );
+      if ((input.taskExecutionKind ?? "owner") === "owner") {
+        await client.query(
+          `UPDATE tasks
+           SET
+             status = CASE
+               WHEN status IN ('queued', 'paused', 'blocked', 'needs_input')
+                 THEN 'in_progress'
+               ELSE status
+             END,
+             execution_claim_token = NULL,
+             execution_claim_owner = NULL,
+             execution_claim_expires_at = NULL,
+             revision = revision + 1,
+             updated_at = NOW()
+           WHERE id = $1`,
+          [input.task.id],
+        );
+      }
       return runFromRow(result.rows[0]!);
     });
   }
@@ -1083,6 +1414,8 @@ export class JobRepository {
         max_attempts: number;
         run_status: string;
         task_id: string | null;
+        task_execution_kind: TaskExecutionKind;
+        task_status: Task["status"] | null;
         trace_id: string | null;
         trace_root_span_id: string | null;
       }>(
@@ -1093,10 +1426,14 @@ export class JobRepository {
            job.max_attempts,
            run.status AS run_status,
            run.task_id,
+           run.task_execution_kind,
+           task.status AS task_status,
            COALESCE(job.trace_id, run.trace_id) AS trace_id,
            run.trace_root_span_id
          FROM jobs AS job
          JOIN runs AS run ON run.id = job.run_id
+         LEFT JOIN tasks AS task ON task.id = run.task_id
+         LEFT JOIN projects AS project ON project.id = run.project_id
          WHERE job.status = 'queued'
            AND job.available_at <= NOW()
            AND job.attempts < job.max_attempts
@@ -1109,6 +1446,21 @@ export class JobRepository {
                  FROM runtime_effect_receipts AS effect
                  WHERE effect.run_id = run.id
                    AND effect.status = 'completed'
+               )
+             )
+           )
+           AND (
+             run.task_id IS NULL
+             OR (
+               task.status IN ('queued', 'in_progress')
+               AND project.status = 'active'
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM task_dependencies AS dependency
+                 JOIN tasks AS prerequisite
+                   ON prerequisite.id = dependency.depends_on_task_id
+                 WHERE dependency.task_id = task.id
+                   AND prerequisite.status <> 'done'
                )
              )
            )
@@ -1192,7 +1544,7 @@ export class JobRepository {
           ],
         );
       }
-      if (row.task_id !== null) {
+      if (row.task_id !== null && row.task_execution_kind === "owner") {
         await client.query(
           `UPDATE tasks
            SET status = 'in_progress', updated_at = NOW()

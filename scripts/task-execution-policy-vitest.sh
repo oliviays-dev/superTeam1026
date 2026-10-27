@@ -116,7 +116,7 @@ upgrade_run="$(
      FROM runs
      WHERE id = '00000000-0000-4000-8000-000000000102';"
 )"
-[[ "$upgrade_version" == "27" ]]
+[[ "$upgrade_version" == "28" ]]
 [[ "$upgrade_project" == "MIG24-FIXTURE" ]]
 [[ "$upgrade_table" == "t" ]]
 [[ "$upgrade_run" == "migration-24-output|true" ]]
@@ -127,7 +127,7 @@ fresh_version="$(
   psql_database "$FRESH_DATABASE" \
     "SELECT MAX(version) FROM platform_migrations;"
 )"
-[[ "$fresh_version" == "27" ]]
+[[ "$fresh_version" == "28" ]]
 
 TEST_DATABASE_URL="$FRESH_URL" CI=true \
   node_modules/.bin/vitest run \

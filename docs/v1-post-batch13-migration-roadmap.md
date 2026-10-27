@@ -1,6 +1,6 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 13.1A、14A-16 已完成；下一正式批次为 Batch 17A
+> 状态：Batch 13.1A、14A-17A 已完成；下一正式批次为 Batch 13.1B
 >
 > Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
 >
@@ -549,7 +549,7 @@ HTTP Request
 - [x] Batch 15A TaskExecutionPolicy 与 Envelope
 - [x] Batch 15B Action Ticket 与 Execution Gate
 - [x] Batch 16 Context 与 Scene Session
-- [ ] Batch 17A Task Execution Depth
+- [x] Batch 17A Task Execution Depth
 - [ ] Batch 17B AI Teammate
 - [ ] Batch 18 Meeting Collaboration
 - [ ] Batch 19 Shared Space
@@ -571,10 +571,10 @@ HTTP Request
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 17A：Task Execution Depth**。
-Batch 13.1A 与 Batch 16 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context
-绕过。17A 完成后先执行 13.1B，再进入 17B。
-Shared Space、sandbox 扩展和 Batch 17 均未实现。
+下一执行批次为 **Batch 13.1B：Runtime 经济与可见性**。
+Batch 17A 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context 或 Task
+Execution Depth 绕过。13.1B 完成后进入 Batch 17B。
+Shared Space、sandbox 扩展和 Batch 17B 均未实现。
 
 建议在独立 worktree 执行：
 
@@ -595,6 +595,7 @@ base:     Batch 13.1A local commit（其基线为 Batch 16）
 - [v1-batch15a-task-execution-policy.md](./v1-batch15a-task-execution-policy.md)
 - [v1-batch15b-action-ticket-gate.md](./v1-batch15b-action-ticket-gate.md)
 - [v1-batch16-scene-context.md](./v1-batch16-scene-context.md)
+- [v1-batch17a-task-execution-depth.md](./v1-batch17a-task-execution-depth.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)

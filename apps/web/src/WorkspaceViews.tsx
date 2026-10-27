@@ -8,12 +8,14 @@ import type {
   TaskMessage,
   WorkbenchSourceRef,
 } from "@pluginmax/contracts";
+import { compareTaskQueuePriority } from "@pluginmax/contracts";
 import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Archive,
   ArrowRight,
+  Ban,
   Bot,
   Check,
   Edit3,
@@ -23,8 +25,11 @@ import {
   ListTodo,
   LoaderCircle,
   MessageSquare,
+  MessageSquarePlus,
   Network,
   Paperclip,
+  Pause,
+  Play,
   Plus,
   RotateCcw,
   Search,
@@ -37,6 +42,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   addMemoryClaim,
+  blockTask,
   createProject,
   createMemoryTopic,
   createTask,
@@ -51,7 +57,14 @@ import {
   listTasks,
   listWorkbenchFollows,
   postTaskMessage,
+  provideTaskInput,
   publishMemoryTruth,
+  pauseTask,
+  requestTaskInput,
+  resetTaskSession,
+  resumeTask,
+  revealTaskDocument,
+  submitTask,
   reviewTask,
   setWorkbenchFollow,
   updateProject,
@@ -79,6 +92,9 @@ const taskStatusLabel: Record<Task["status"], string> = {
   queued: "待处理",
   in_progress: "进行中",
   review: "待验收",
+  paused: "已暂停",
+  blocked: "已阻断",
+  needs_input: "待补充输入",
   done: "已完成",
   cancelled: "已取消",
 };
@@ -87,8 +103,18 @@ const statusTone: Record<Task["status"], string> = {
   queued: "neutral",
   in_progress: "progress",
   review: "review",
+  paused: "neutral",
+  blocked: "warn",
+  needs_input: "review",
   done: "done",
   cancelled: "warn",
+};
+
+const taskPriorityLabel: Record<Task["priority"], string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
+  urgent: "紧急",
 };
 
 function ProjectCreateForm({
@@ -384,7 +410,10 @@ export function ProjectsView({
   const project = projects.find((item) => item.id === selectedProjectId);
   const canWrite = capability?.capabilities.write ?? false;
   const canApprove = capability?.capabilities.approve ?? false;
-  const tasks = tasksQuery.data ?? [];
+  const tasks = useMemo(
+    () => [...(tasksQuery.data ?? [])].sort(compareTaskQueuePriority),
+    [tasksQuery.data],
+  );
   const memory = memoryQuery.data?.items ?? [];
   useEffect(() => {
     if (initialReportId !== undefined) {
@@ -1055,6 +1084,10 @@ function CreateTaskDialog({
   const [agentId, setAgentId] = useState(availableAgents[0]?.id ?? "");
   const [roleId, setRoleId] = useState("");
   const [dependsOn, setDependsOn] = useState<string[]>([]);
+  const [priority, setPriority] = useState<Task["priority"]>("medium");
+  const [autoSubmit, setAutoSubmit] = useState(true);
+  const [autoAccept, setAutoAccept] = useState(false);
+  const [autoRedispatchOnReturn, setAutoRedispatchOnReturn] = useState(false);
   const mutation = useMutation({
     mutationFn: () =>
       createTask({
@@ -1067,6 +1100,10 @@ function CreateTaskDialog({
           .filter(Boolean),
         ...(roleId === "" ? (agentId === "" ? {} : { agentId }) : { roleId }),
         dependsOn,
+        priority,
+        autoSubmit,
+        autoAccept: autoSubmit && autoAccept,
+        autoRedispatchOnReturn,
       }),
     onSuccess: (task) => {
       void queryClient.invalidateQueries({ queryKey: ["tasks"] });
@@ -1151,6 +1188,56 @@ function CreateTaskDialog({
             </select>
           </label>
           <label className="pm-field">
+            <span>优先级</span>
+            <select
+              value={priority}
+              onChange={(event) =>
+                setPriority(event.target.value as Task["priority"])
+              }
+            >
+              {Object.entries(taskPriorityLabel).map(([value, label]) => (
+                <option value={value} key={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <fieldset className="pm-field task-dependency-picker">
+            <legend>自动执行</legend>
+            <div>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={autoSubmit}
+                  onChange={(event) => {
+                    setAutoSubmit(event.target.checked);
+                    if (!event.target.checked) setAutoAccept(false);
+                  }}
+                />
+                <span>运行完成后自动提交验收</span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={autoAccept}
+                  disabled={!autoSubmit}
+                  onChange={(event) => setAutoAccept(event.target.checked)}
+                />
+                <span>运行成功后自动完成</span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={autoRedispatchOnReturn}
+                  onChange={(event) =>
+                    setAutoRedispatchOnReturn(event.target.checked)
+                  }
+                />
+                <span>验收退回后自动重新派发</span>
+              </label>
+            </div>
+          </fieldset>
+          <label className="pm-field">
             <span>验收标准</span>
             <textarea
               rows={3}
@@ -1222,7 +1309,11 @@ const taskColumns: Array<{
   label: string;
   statuses: Task["status"][];
 }> = [
-  { key: "todo", label: "待处理", statuses: ["queued"] },
+  {
+    key: "todo",
+    label: "待处理",
+    statuses: ["queued", "paused", "blocked", "needs_input"],
+  },
   { key: "progress", label: "进行中", statuses: ["in_progress"] },
   { key: "review", label: "待验收", statuses: ["review"] },
   { key: "done", label: "已完成", statuses: ["done", "cancelled"] },
@@ -1267,7 +1358,10 @@ export function TasksView({
     queryFn: () => listProjectRoles(selectedProjectId),
     enabled: selectedProjectId !== "",
   });
-  const tasks = tasksQuery.data ?? [];
+  const tasks = useMemo(
+    () => [...(tasksQuery.data ?? [])].sort(compareTaskQueuePriority),
+    [tasksQuery.data],
+  );
   const roles = rolesQuery.data ?? [];
   const selectedTask = tasks.find((task) => task.id === selectedTaskId);
 
@@ -1382,7 +1476,10 @@ export function TasksView({
                         <span className={`pm-pill ${statusTone[task.status]}`}>
                           {taskStatusLabel[task.status]}
                         </span>
-                        <small>{task.acceptance.length} 项验收</small>
+                        <small>
+                          {taskPriorityLabel[task.priority]}优先级 ·{" "}
+                          {task.acceptance.length} 项验收
+                        </small>
                       </div>
                       <strong>{task.title}</strong>
                       <p>{task.description}</p>
@@ -1413,6 +1510,7 @@ export function TasksView({
         <TaskDetailDrawer
           task={selectedTask}
           tasks={tasks}
+          agents={agents}
           roles={roles}
           canWrite={canWrite}
           canApprove={canApprove}
@@ -1443,6 +1541,7 @@ export function TasksView({
 function TaskDetailDrawer({
   task,
   tasks,
+  agents,
   roles,
   canWrite,
   canApprove,
@@ -1451,6 +1550,7 @@ function TaskDetailDrawer({
 }: {
   task: Task;
   tasks: Task[];
+  agents: Agent[];
   roles: ProjectRole[];
   canWrite: boolean;
   canApprove: boolean;
@@ -1470,6 +1570,12 @@ function TaskDetailDrawer({
   );
   const [comment, setComment] = useState("");
   const [replyingTo, setReplyingTo] = useState<TaskMessage | null>(null);
+  const [controlReason, setControlReason] = useState("");
+  const [supplementalInput, setSupplementalInput] = useState("");
+  const [mentionIds, setMentionIds] = useState<string[]>([]);
+  const [deliveryTarget, setDeliveryTarget] = useState<
+    "receiver" | "collaborators" | "broadcast" | ""
+  >("");
   const projectTasks = tasks.filter(
     (candidate) =>
       candidate.projectId === task.projectId && candidate.id !== task.id,
@@ -1546,6 +1652,71 @@ function TaskDetailDrawer({
       });
     },
   });
+  const taskControlMutation = useMutation({
+    mutationFn: async (
+      action: "pause" | "block" | "request-input" | "resume",
+    ) => {
+      if (action === "pause") {
+        return pauseTask(
+          task.id,
+          controlReason || "用户暂停任务",
+          task.revision,
+        );
+      }
+      if (action === "block") {
+        return blockTask(task.id, controlReason, task.revision);
+      }
+      if (action === "request-input") {
+        return requestTaskInput(task.id, controlReason, task.revision);
+      }
+      return resumeTask(task.id, controlReason, task.revision);
+    },
+    onSuccess: () => {
+      setControlReason("");
+      onTaskChanged();
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
+  const provideInputMutation = useMutation({
+    mutationFn: () =>
+      provideTaskInput(task.id, supplementalInput, task.revision),
+    onSuccess: () => {
+      setSupplementalInput("");
+      onTaskChanged();
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
+  const resetSessionMutation = useMutation({
+    mutationFn: () =>
+      resetTaskSession(task.id, controlReason || "工单详情手动重置"),
+    onSuccess: () => {
+      setControlReason("");
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
+  const submitMutation = useMutation({
+    mutationFn: () => submitTask(task.id, controlReason, task.revision),
+    onSuccess: () => {
+      setControlReason("");
+      onTaskChanged();
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
+  const revealDocumentMutation = useMutation({
+    mutationFn: (attachmentId: string) =>
+      revealTaskDocument(task.id, attachmentId),
+    onSuccess: async ({ revealPath }) => {
+      await navigator.clipboard?.writeText(revealPath);
+    },
+  });
   const updateMutation = useMutation({
     mutationFn: () =>
       updateTask(task.id, {
@@ -1577,10 +1748,14 @@ function TaskDetailDrawer({
       postTaskMessage(task.id, {
         content: comment,
         ...(replyingTo === null ? {} : { replyToId: replyingTo.id }),
+        mentions: mentionIds,
+        ...(deliveryTarget === "" ? {} : { deliveryTarget }),
       }),
     onSuccess: () => {
       setComment("");
       setReplyingTo(null);
+      setMentionIds([]);
+      setDeliveryTarget("");
       void queryClient.invalidateQueries({
         queryKey: ["task-detail", task.id],
       });
@@ -1637,11 +1812,22 @@ function TaskDetailDrawer({
               <span className={`pm-pill ${statusTone[task.status]}`}>
                 {taskStatusLabel[task.status]}
               </span>
+              <span>{taskPriorityLabel[task.priority]}优先级</span>
               <span>{task.acceptance.length} 项验收标准</span>
+              <span>执行修订 {task.revision}</span>
               {role !== undefined && <span>项目角色 · {role.name}</span>}
             </div>
             <h2>{task.title}</h2>
             <p>{task.description}</p>
+            {(task.needsInputPrompt !== null ||
+              task.blockedReason !== null ||
+              task.pausedReason !== null) && (
+              <p className="task-control-reason">
+                {task.needsInputPrompt ??
+                  task.blockedReason ??
+                  task.pausedReason}
+              </p>
+            )}
           </div>
           <div className="task-detail-head-actions">
             <button
@@ -1843,6 +2029,120 @@ function TaskDetailDrawer({
               前置任务未完成，暂不能派发
             </span>
           )}
+          {(task.status === "queued" || task.status === "review") && (
+            <>
+              <button
+                className="pm-btn secondary"
+                type="button"
+                disabled={!canWrite || taskControlMutation.isPending}
+                onClick={() => taskControlMutation.mutate("pause")}
+                title="暂停任务执行"
+              >
+                <Pause size={14} />
+                暂停
+              </button>
+              <button
+                className="pm-btn secondary"
+                type="button"
+                disabled={
+                  !canWrite ||
+                  controlReason.trim() === "" ||
+                  taskControlMutation.isPending
+                }
+                onClick={() => taskControlMutation.mutate("block")}
+                title="阻断任务执行"
+              >
+                <Ban size={14} />
+                阻断
+              </button>
+              <input
+                value={controlReason}
+                onChange={(event) => setControlReason(event.target.value)}
+                placeholder="暂停、阻断或补充输入说明"
+              />
+              <button
+                className="pm-btn secondary"
+                type="button"
+                disabled={
+                  !canWrite ||
+                  controlReason.trim() === "" ||
+                  taskControlMutation.isPending
+                }
+                onClick={() => taskControlMutation.mutate("request-input")}
+              >
+                <MessageSquarePlus size={14} />
+                等待输入
+              </button>
+            </>
+          )}
+          {task.status === "needs_input" && (
+            <>
+              <input
+                value={supplementalInput}
+                onChange={(event) => setSupplementalInput(event.target.value)}
+                placeholder="补充任务输入"
+              />
+              <button
+                className="pm-btn primary"
+                type="button"
+                disabled={
+                  !canWrite ||
+                  supplementalInput.trim() === "" ||
+                  provideInputMutation.isPending
+                }
+                onClick={() => provideInputMutation.mutate()}
+              >
+                <MessageSquarePlus size={14} />
+                补充并恢复
+              </button>
+            </>
+          )}
+          {(task.status === "paused" ||
+            task.status === "blocked" ||
+            task.status === "needs_input") && (
+            <button
+              className="pm-btn primary"
+              type="button"
+              disabled={!canWrite || taskControlMutation.isPending}
+              onClick={() => taskControlMutation.mutate("resume")}
+            >
+              <Play size={14} />
+              恢复任务
+            </button>
+          )}
+          {task.status === "in_progress" && (
+            <button
+              className="pm-btn primary"
+              type="button"
+              disabled={!canWrite || submitMutation.isPending}
+              onClick={() => submitMutation.mutate()}
+            >
+              <Send size={14} />
+              提交验收
+            </button>
+          )}
+          <button
+            className="pm-btn secondary"
+            type="button"
+            disabled={
+              !canWrite ||
+              resetSessionMutation.isPending ||
+              runsQuery.data?.some((run) =>
+                [
+                  "queued",
+                  "running",
+                  "waiting_approval",
+                  "interrupted",
+                ].includes(run.status),
+              ) === true
+            }
+            title="重置任务 Scene Session 到下一代"
+            aria-label="重置任务 Session"
+            onClick={() => resetSessionMutation.mutate()}
+          >
+            <RotateCcw size={14} />
+            重置 Session
+          </button>
           {task.status === "review" && (
             <>
               <input
@@ -1886,6 +2186,21 @@ function TaskDetailDrawer({
         </div>
         {dispatchMutation.error !== null && (
           <div className="pm-error">{dispatchMutation.error.message}</div>
+        )}
+        {(taskControlMutation.error !== null ||
+          provideInputMutation.error !== null ||
+          resetSessionMutation.error !== null ||
+          submitMutation.error !== null) && (
+          <div className="pm-error">
+            {
+              (
+                taskControlMutation.error ??
+                provideInputMutation.error ??
+                resetSessionMutation.error ??
+                submitMutation.error
+              )?.message
+            }
+          </div>
         )}
 
         <div className="task-run-body">
@@ -1935,8 +2250,17 @@ function TaskDetailDrawer({
                   </button>
                   <small>
                     {Math.max(1, Math.round(attachment.size / 1024))} KB ·{" "}
-                    {attachment.uploadedBy}
+                    {attachment.documentPath}
                   </small>
+                  <button
+                    type="button"
+                    disabled={attachment.archivedAt !== null}
+                    title="复制文档位置"
+                    aria-label="显示文档位置"
+                    onClick={() => revealDocumentMutation.mutate(attachment.id)}
+                  >
+                    <Search size={13} />
+                  </button>
                   <button
                     type="button"
                     disabled={!canWrite}
@@ -2038,6 +2362,46 @@ function TaskDetailDrawer({
                   </button>
                 </div>
               )}
+              <div className="task-delivery-controls">
+                <select
+                  aria-label="消息投递目标"
+                  value={deliveryTarget}
+                  onChange={(event) =>
+                    setDeliveryTarget(
+                      event.target.value as
+                        "receiver" | "collaborators" | "broadcast" | "",
+                    )
+                  }
+                >
+                  <option value="">未指定</option>
+                  <option value="receiver">责任人</option>
+                  <option value="collaborators">协作 Agent</option>
+                  <option value="broadcast">责任人与协作 Agent</option>
+                </select>
+                <details>
+                  <summary>@ Agent</summary>
+                  <div>
+                    {agents
+                      .filter((agent) => agent.status === "active")
+                      .map((agent) => (
+                        <label key={agent.id}>
+                          <input
+                            type="checkbox"
+                            checked={mentionIds.includes(agent.id)}
+                            onChange={(event) =>
+                              setMentionIds((current) =>
+                                event.target.checked
+                                  ? [...new Set([...current, agent.id])]
+                                  : current.filter((id) => id !== agent.id),
+                              )
+                            }
+                          />
+                          <span>{agent.name}</span>
+                        </label>
+                      ))}
+                  </div>
+                </details>
+              </div>
               <textarea
                 rows={2}
                 value={comment}

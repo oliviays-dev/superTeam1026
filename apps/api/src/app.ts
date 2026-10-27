@@ -7,6 +7,8 @@ import {
   cancelExecutionGateInputSchema,
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
+  blockTaskInputSchema,
+  claimTaskInputSchema,
   confirmHandoffCardInputSchema,
   createDirectChatInputSchema,
   createExternalRuntimeInputSchema,
@@ -48,9 +50,15 @@ import {
   projectReportQuerySchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
+  pauseTaskInputSchema,
+  provideTaskInputSchema,
   refreshWorkbenchBriefInputSchema,
   removeAgentRuntimeBindingInputSchema,
   reviewMemoryClaimsInputSchema,
+  requestTaskInputSchema,
+  resetTaskSessionInputSchema,
+  resumeTaskInputSchema,
+  releaseTaskClaimInputSchema,
   setWorkbenchFollowInputSchema,
   sendDirectChatMessageInputSchema,
   taskReviewInputSchema,
@@ -61,6 +69,7 @@ import {
   runtimeRevisionInputSchema,
   setAgentRuntimeBindingInputSchema,
   startWorkflowInputSchema,
+  submitTaskInputSchema,
   uploadTaskAttachmentInputSchema,
   updateAgentInputSchema,
   updateExternalRuntimeInputSchema,
@@ -206,6 +215,12 @@ const meetingCloseInputSchema = z.object({
 const listTasksQuerySchema = z.object({
   projectId: z.string().uuid().optional(),
 });
+const taskDocumentsQuerySchema = z.object({
+  includeArchived: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+});
 const listAgentsQuerySchema = z.object({
   includeDisabled: z
     .enum(["0", "1", "true", "false"])
@@ -346,7 +361,7 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 27;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 28;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -665,7 +680,13 @@ export function buildApi(options: BuildApiOptions): {
           ),
         );
     }
-    request.log.error({ error }, "request failed");
+    request.log.error(
+      {
+        err: error,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      },
+      "request failed",
+    );
     return reply
       .status(500)
       .send(apiError(String(request.id), "internal_error", "Internal error"));
@@ -1666,6 +1687,28 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send({ items: await application.listTasks(query.projectId) });
   });
 
+  app.get("/api/v1/projects/:projectId/task-queue", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listTaskQueue(projectId, actorId),
+    });
+  });
+
+  app.post(
+    "/api/v1/projects/:projectId/task-queue/claim",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = claimTaskInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      const claim = await application.claimNextTask(projectId, input, actorId);
+      if (claim === undefined) {
+        return reply.status(204).send();
+      }
+      return reply.status(200).send(claim);
+    },
+  );
+
   app.post("/api/v1/tasks", async (request, reply) => {
     const input = createTaskInputSchema.parse(request.body);
     return reply.status(201).send(await application.createTask(input));
@@ -1702,6 +1745,125 @@ export function buildApi(options: BuildApiOptions): {
       );
   });
 
+  app.post("/api/v1/tasks/:id/claim/release", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = releaseTaskClaimInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.releaseTaskClaim(id, input, actorId));
+  });
+
+  app.post("/api/v1/tasks/:id/pause", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = pauseTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.pause",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.pauseTask(id, input, actorId),
+    });
+  });
+
+  app.post("/api/v1/tasks/:id/block", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = blockTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.block",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.blockTask(id, input, actorId),
+    });
+  });
+
+  app.post("/api/v1/tasks/:id/request-input", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = requestTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.request_input",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.requestTaskInput(id, input, actorId),
+    });
+  });
+
+  app.post("/api/v1/tasks/:id/input", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = provideTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.provide_input",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.provideTaskInput(id, input, actorId),
+    });
+  });
+
+  app.post("/api/v1/tasks/:id/resume", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = resumeTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.resume",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.resumeTask(id, input, actorId),
+    });
+  });
+
+  app.post("/api/v1/tasks/:id/submit", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = submitTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.submit",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.submitTask(id, input, actorId),
+    });
+  });
+
+  app.post("/api/v1/tasks/:id/session-reset", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = resetTaskSessionInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `task:${id}`,
+      operation: "task.session_reset",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () => application.resetTaskSession(id, input, actorId),
+    });
+  });
+
   app.post("/api/v1/tasks/:id/transfer", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const input = transferTaskInputSchema.parse(request.body);
@@ -1721,7 +1883,8 @@ export function buildApi(options: BuildApiOptions): {
   app.post("/api/v1/tasks/:id/review", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const input = taskReviewInputSchema.parse(request.body);
-    return reply.send(await application.reviewTask(id, input));
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.reviewTask(id, input, actorId));
   });
 
   app.get("/api/v1/tasks/:id/runs", async (request, reply) => {
@@ -1769,6 +1932,9 @@ export function buildApi(options: BuildApiOptions): {
           name: input.name,
           mimeType: input.mimeType,
           content,
+          ...(input.documentPath === undefined
+            ? {}
+            : { documentPath: input.documentPath }),
         },
         actorId,
       ),
@@ -1791,6 +1957,27 @@ export function buildApi(options: BuildApiOptions): {
           `attachment; filename="${attachment.name.replaceAll('"', "")}"`,
         )
         .send(Buffer.from(content));
+    },
+  );
+
+  app.get("/api/v1/tasks/:id/documents", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const query = taskDocumentsQuerySchema.parse(request.query);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.listTaskDocuments(id, query.includeArchived, actorId),
+    );
+  });
+
+  app.post(
+    "/api/v1/tasks/:id/documents/:attachmentId/reveal",
+    async (request, reply) => {
+      const { id } = idParamsSchema.parse(request.params);
+      const { attachmentId } = taskAttachmentParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.revealTaskDocument(id, attachmentId, actorId),
+      );
     },
   );
 

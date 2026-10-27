@@ -27,6 +27,7 @@ interface TaskAttachmentRow {
   sha256: string;
   storage_key: string;
   uploaded_by: string;
+  document_path: string;
   archived_at: Date | null;
   created_at: Date;
 }
@@ -77,13 +78,15 @@ export class TaskCollaborationRepository {
     readonly projectId: string;
     readonly ref: FileRef;
     readonly uploadedBy: string;
+    readonly documentPath: string;
   }): Promise<TaskAttachment> {
     const result = await this.database.query<TaskAttachmentRow>(
       `INSERT INTO task_attachments (
          id, task_id, project_id, name, mime_type, size,
-         sha256, storage_key, uploaded_by, archived_at, created_at
+         sha256, storage_key, uploaded_by, document_path, archived_at,
+         created_at
        ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NOW()
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, NOW()
        )
        RETURNING *`,
       [
@@ -96,6 +99,7 @@ export class TaskCollaborationRepository {
         input.ref.sha256,
         input.ref.storageKey,
         input.uploadedBy,
+        input.documentPath,
       ],
     );
     return taskAttachmentFromRow(result.rows[0]!);
@@ -159,6 +163,7 @@ function taskAttachmentFromRow(row: TaskAttachmentRow): TaskAttachment {
     size: Number(row.size),
     sha256: row.sha256,
     storageKey: row.storage_key,
+    documentPath: row.document_path,
     uploadedBy: row.uploaded_by,
     archivedAt: row.archived_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),

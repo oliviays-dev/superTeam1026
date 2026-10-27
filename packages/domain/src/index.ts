@@ -6,9 +6,12 @@ import type {
 } from "@pluginmax/contracts";
 
 const taskTransitions: Record<TaskStatus, readonly TaskStatus[]> = {
-  queued: ["in_progress", "cancelled"],
-  in_progress: ["review", "cancelled"],
-  review: ["done", "queued"],
+  queued: ["in_progress", "paused", "blocked", "needs_input", "cancelled"],
+  in_progress: ["review", "paused", "blocked", "needs_input", "cancelled"],
+  review: ["done", "queued", "blocked", "needs_input", "cancelled"],
+  paused: ["queued", "blocked", "cancelled"],
+  blocked: ["queued", "cancelled"],
+  needs_input: ["queued", "blocked", "cancelled"],
   done: [],
   cancelled: [],
 };

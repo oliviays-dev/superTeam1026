@@ -90,7 +90,10 @@ import type {
   OperationsSnapshot,
   Task,
   TaskDetail,
+  TaskDocumentDiscovery,
   TaskMessage,
+  TaskQueueItem,
+  RevealTaskDocumentResult,
   TransferWorkflowApprovalInput,
   TriggerMeetingAiInput,
   TriggerMeetingAiResult,
@@ -622,6 +625,16 @@ export async function listTasks(projectId?: string): Promise<Task[]> {
   return (await request<ListResponse<Task>>(`/tasks${query}`)).items;
 }
 
+export async function listTaskQueue(
+  projectId: string,
+): Promise<TaskQueueItem[]> {
+  return (
+    await request<{ items: TaskQueueItem[] }>(
+      `/projects/${projectId}/task-queue`,
+    )
+  ).items;
+}
+
 export function createTask(input: CreateTaskInput): Promise<Task> {
   return request("/tasks", {
     method: "POST",
@@ -689,6 +702,118 @@ export function dispatchTask(
   taskId: string,
 ): Promise<{ readonly runId: string }> {
   return request(`/tasks/${taskId}/dispatch`, { method: "POST" });
+}
+
+export function pauseTask(
+  taskId: string,
+  reason: string,
+  expectedRevision?: number,
+): Promise<Task> {
+  return request(`/tasks/${taskId}/pause`, {
+    method: "POST",
+    body: JSON.stringify({
+      reason,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }),
+  });
+}
+
+export function blockTask(
+  taskId: string,
+  reason: string,
+  expectedRevision?: number,
+): Promise<Task> {
+  return request(`/tasks/${taskId}/block`, {
+    method: "POST",
+    body: JSON.stringify({
+      reason,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }),
+  });
+}
+
+export function requestTaskInput(
+  taskId: string,
+  prompt: string,
+  expectedRevision?: number,
+): Promise<TaskDetail> {
+  return request(`/tasks/${taskId}/request-input`, {
+    method: "POST",
+    body: JSON.stringify({
+      prompt,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }),
+  });
+}
+
+export function provideTaskInput(
+  taskId: string,
+  content: string,
+  expectedRevision?: number,
+): Promise<TaskDetail> {
+  return request(`/tasks/${taskId}/input`, {
+    method: "POST",
+    body: JSON.stringify({
+      content,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }),
+  });
+}
+
+export function resumeTask(
+  taskId: string,
+  note: string,
+  expectedRevision?: number,
+): Promise<Task> {
+  return request(`/tasks/${taskId}/resume`, {
+    method: "POST",
+    body: JSON.stringify({
+      note,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }),
+  });
+}
+
+export function submitTask(
+  taskId: string,
+  note: string,
+  expectedRevision?: number,
+): Promise<Task> {
+  return request(`/tasks/${taskId}/submit`, {
+    method: "POST",
+    body: JSON.stringify({
+      note,
+      ...(expectedRevision === undefined ? {} : { expectedRevision }),
+    }),
+  });
+}
+
+export function resetTaskSession(
+  taskId: string,
+  reason: string,
+): Promise<{ readonly session: { readonly generation: number } }> {
+  return request(`/tasks/${taskId}/session-reset`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export async function listTaskDocuments(
+  taskId: string,
+  includeArchived = false,
+): Promise<TaskDocumentDiscovery> {
+  return request(
+    `/tasks/${taskId}/documents${includeArchived ? "?includeArchived=1" : ""}`,
+  );
+}
+
+export function revealTaskDocument(
+  taskId: string,
+  attachmentId: string,
+): Promise<RevealTaskDocumentResult> {
+  return request(`/tasks/${taskId}/documents/${attachmentId}/reveal`, {
+    method: "POST",
+  });
 }
 
 export function reviewTask(

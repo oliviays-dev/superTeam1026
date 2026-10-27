@@ -3308,3 +3308,154 @@ BEFORE UPDATE OR DELETE ON context_packs
 FOR EACH ROW
 EXECUTE FUNCTION pluginmax_guard_scene_context_pack_mutation();
 `;
+
+export const TASK_EXECUTION_DEPTH_SCHEMA_SQL = `
+ALTER TABLE tasks
+  DROP CONSTRAINT IF EXISTS tasks_status_check;
+
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_status_check
+  CHECK (status IN (
+    'queued',
+    'in_progress',
+    'review',
+    'paused',
+    'blocked',
+    'needs_input',
+    'done',
+    'cancelled'
+  ));
+
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'medium'
+    CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
+  ADD COLUMN IF NOT EXISTS auto_submit BOOLEAN NOT NULL DEFAULT TRUE,
+  ADD COLUMN IF NOT EXISTS auto_accept BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS auto_redispatch_on_return BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1
+    CHECK (revision > 0),
+  ADD COLUMN IF NOT EXISTS needs_input_prompt TEXT,
+  ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
+  ADD COLUMN IF NOT EXISTS paused_reason TEXT,
+  ADD COLUMN IF NOT EXISTS execution_claim_token UUID,
+  ADD COLUMN IF NOT EXISTS execution_claim_owner TEXT
+    CHECK (
+      execution_claim_owner IS NULL
+      OR length(btrim(execution_claim_owner)) BETWEEN 1 AND 180
+    ),
+  ADD COLUMN IF NOT EXISTS execution_claim_expires_at TIMESTAMPTZ;
+
+ALTER TABLE tasks
+  DROP CONSTRAINT IF EXISTS tasks_claim_fields_check;
+
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_claim_fields_check
+  CHECK (
+    (execution_claim_token IS NULL
+      AND execution_claim_owner IS NULL
+      AND execution_claim_expires_at IS NULL)
+    OR
+    (execution_claim_token IS NOT NULL
+      AND execution_claim_owner IS NOT NULL
+      AND execution_claim_expires_at IS NOT NULL)
+  );
+
+CREATE INDEX IF NOT EXISTS tasks_execution_queue_idx
+  ON tasks(
+    project_id,
+    priority,
+    created_at,
+    id
+  )
+  WHERE status IN ('queued', 'paused', 'blocked', 'needs_input');
+
+CREATE INDEX IF NOT EXISTS tasks_active_claim_idx
+  ON tasks(execution_claim_expires_at)
+  WHERE execution_claim_token IS NOT NULL;
+
+ALTER TABLE runs
+  ADD COLUMN IF NOT EXISTS task_execution_kind TEXT NOT NULL DEFAULT 'owner'
+    CHECK (task_execution_kind IN ('owner', 'collaborator')),
+  ADD COLUMN IF NOT EXISTS task_trigger_message_id UUID;
+
+ALTER TABLE runs
+  DROP CONSTRAINT IF EXISTS runs_task_trigger_message_fkey;
+
+ALTER TABLE runs
+  ADD CONSTRAINT runs_task_trigger_message_fkey
+    FOREIGN KEY (task_trigger_message_id)
+    REFERENCES task_messages(id)
+    ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS runs_task_trigger_message_idx
+  ON runs(task_trigger_message_id)
+  WHERE task_trigger_message_id IS NOT NULL;
+
+ALTER TABLE task_messages
+  ADD COLUMN IF NOT EXISTS delivery_target TEXT
+    CHECK (
+      delivery_target IS NULL
+      OR delivery_target IN ('receiver', 'collaborators', 'broadcast')
+    ),
+  ADD COLUMN IF NOT EXISTS mention_agent_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+  ADD COLUMN IF NOT EXISTS triggered_run_ids UUID[] NOT NULL DEFAULT '{}'::uuid[];
+
+CREATE INDEX IF NOT EXISTS task_messages_delivery_target_idx
+  ON task_messages(task_id, delivery_target, created_at)
+  WHERE delivery_target IS NOT NULL;
+
+ALTER TABLE task_attachments
+  ADD COLUMN IF NOT EXISTS document_path TEXT;
+
+UPDATE task_attachments
+SET document_path = 'documents/' || id::text || '/content'
+WHERE document_path IS NULL;
+
+ALTER TABLE task_attachments
+  ALTER COLUMN document_path SET NOT NULL;
+
+ALTER TABLE task_attachments
+  DROP CONSTRAINT IF EXISTS task_attachments_document_path_check;
+
+ALTER TABLE task_attachments
+  ADD CONSTRAINT task_attachments_document_path_check
+  CHECK (
+    length(document_path) BETWEEN 1 AND 800
+    AND document_path !~ '(^|/)\\.\\.?(/|$)'
+    AND document_path !~ '^/'
+    AND document_path !~ '\\\\'
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS task_attachments_project_path_idx
+  ON task_attachments(project_id, document_path);
+
+ALTER TABLE scene_sessions
+  ADD COLUMN IF NOT EXISTS reset_reason TEXT,
+  ADD COLUMN IF NOT EXISTS reset_by TEXT
+    CHECK (
+      reset_by IS NULL
+      OR length(btrim(reset_by)) BETWEEN 1 AND 180
+    ),
+  ADD COLUMN IF NOT EXISTS reset_at TIMESTAMPTZ;
+
+ALTER TABLE task_events
+  DROP CONSTRAINT IF EXISTS task_events_kind_check;
+
+ALTER TABLE task_events
+  ADD CONSTRAINT task_events_kind_check
+  CHECK (kind IN (
+    'created',
+    'updated',
+    'status',
+    'message',
+    'review',
+    'dependency',
+    'attachment',
+    'dispatch',
+    'transfer',
+    'claim',
+    'control',
+    'input',
+    'session'
+  ));
+`;

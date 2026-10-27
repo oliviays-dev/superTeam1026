@@ -47,7 +47,7 @@ integration("AI direct chat", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 27,
+      expectedMigrationVersion: 28,
     });
     app = built.app;
     await app.ready();

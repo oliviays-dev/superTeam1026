@@ -57,8 +57,18 @@ export interface TaskRow {
   description: string;
   acceptance: string[];
   status: Task["status"];
+  priority: Task["priority"];
   agent_id: string;
   role_id: string | null;
+  auto_submit: boolean;
+  auto_accept: boolean;
+  auto_redispatch_on_return: boolean;
+  revision: number;
+  needs_input_prompt: string | null;
+  blocked_reason: string | null;
+  paused_reason: string | null;
+  execution_claim_owner: string | null;
+  execution_claim_expires_at: Date | null;
   depends_on: string[] | null;
   created_at: Date;
   updated_at: Date;
@@ -73,6 +83,9 @@ export interface TaskMessageRow {
   content: string;
   reply_to_id: string | null;
   is_key_consensus: boolean;
+  delivery_target: TaskMessage["deliveryTarget"];
+  mention_agent_ids: string[];
+  triggered_run_ids: string[];
   created_at: Date;
 }
 
@@ -83,6 +96,8 @@ export interface RunRow {
   meeting_turn_id: string | null;
   direct_chat_turn_id: string | null;
   agent_id: string;
+  task_execution_kind: Run["taskExecutionKind"];
+  task_trigger_message_id: string | null;
   status: Run["status"];
   context_pack_id: string | null;
   input_snapshot: Run["inputSnapshot"];
@@ -191,9 +206,19 @@ export function taskFromRow(row: TaskRow): Task {
     description: row.description,
     acceptance: row.acceptance,
     status: row.status,
+    priority: row.priority,
     agentId: row.agent_id,
     ...(row.role_id === null ? {} : { roleId: row.role_id }),
     dependsOn: row.depends_on ?? [],
+    autoSubmit: row.auto_submit,
+    autoAccept: row.auto_accept,
+    autoRedispatchOnReturn: row.auto_redispatch_on_return,
+    revision: row.revision,
+    needsInputPrompt: row.needs_input_prompt,
+    blockedReason: row.blocked_reason,
+    pausedReason: row.paused_reason,
+    claimedBy: row.execution_claim_owner,
+    claimExpiresAt: row.execution_claim_expires_at?.toISOString() ?? null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -209,6 +234,9 @@ export function taskMessageFromRow(row: TaskMessageRow): TaskMessage {
     content: row.content,
     replyToId: row.reply_to_id,
     isKeyConsensus: row.is_key_consensus,
+    deliveryTarget: row.delivery_target,
+    mentionAgentIds: row.mention_agent_ids,
+    triggeredRunIds: row.triggered_run_ids,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -221,6 +249,8 @@ export function runFromRow(row: RunRow): Run {
     meetingTurnId: row.meeting_turn_id,
     directChatTurnId: row.direct_chat_turn_id,
     agentId: row.agent_id,
+    taskExecutionKind: row.task_execution_kind,
+    taskTriggerMessageId: row.task_trigger_message_id,
     status: row.status,
     contextPackId: row.context_pack_id,
     inputSnapshot: row.input_snapshot,

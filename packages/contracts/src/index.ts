@@ -14,3 +14,4 @@ export * from "./external-runtime.js";
 export * from "./agent-runtime-binding.js";
 export * from "./identity.js";
 export * from "./scene-context.js";
+export * from "./task-execution-depth.js";

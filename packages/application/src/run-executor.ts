@@ -865,7 +865,88 @@ export class RunExecutor {
         size: artifact.size,
       },
     );
+    if (run.taskExecutionKind === "collaborator") {
+      const collaborator = await this.repositories.agents.get(run.agentId);
+      await this.repositories.tasks.addMessage(
+        task!.id,
+        {
+          content: output,
+          deliveryTarget: "receiver",
+          mentions: [],
+        },
+        "agent",
+        run.agentId,
+        collaborator?.name ?? run.agentId,
+      );
+      await this.repositories.runs.appendEventIfAbsent(
+        runId,
+        "run.completed",
+        "协作 Agent 已完成本轮输出，任务状态保持由责任人推进",
+        { output, taskExecutionKind: "collaborator" },
+      );
+      await this.executionGates.completeRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+      });
+      return;
+    }
+    if (!task!.autoSubmit) {
+      await this.repositories.tasks.setStatus(task!.id, "in_progress");
+      await this.repositories.taskCollaboration.appendEvent({
+        taskId: task!.id,
+        kind: "review",
+        actorId: "system:auto-submit",
+        actorName: "Pluginmax",
+        summary: "Run 已完成，自动提交已关闭，等待人工提交验收",
+        data: { runId, autoSubmit: false },
+      });
+      await this.executionGates.completeRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+      });
+      return;
+    }
+    if (task!.autoAccept) {
+      await this.repositories.reviews.save(task!.id, "system:auto-accept", {
+        decision: "approve",
+        note: "Automatically accepted after a successful Run",
+        redispatch: false,
+      });
+      await this.repositories.tasks.setStatus(task!.id, "done");
+      await this.repositories.meetingDecisions.syncTaskStatus(task!.id, "done");
+      await this.repositories.memory.publishTask({
+        projectId: task!.projectId,
+        taskId: task!.id,
+        title: task!.title,
+        content: output,
+      });
+      await this.repositories.taskCollaboration.appendEvent({
+        taskId: task!.id,
+        kind: "review",
+        actorId: "system:auto-accept",
+        actorName: "Pluginmax",
+        summary: "自动验收通过并发布项目产出",
+        data: { runId, decision: "approve", automatic: true },
+      });
+      await this.executionGates.completeRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+      });
+      return;
+    }
     await this.repositories.tasks.setStatus(task!.id, "review");
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: task!.id,
+      kind: "review",
+      actorId: "system:auto-submit",
+      actorName: "Pluginmax",
+      summary: "Run 已完成，自动提交人工验收",
+      data: { runId, automatic: true },
+    });
+    await this.repositories.meetingDecisions.syncTaskStatus(task!.id, "review");
     await this.executionGates.completeRunAction({
       runId,
       action: writebackAction,

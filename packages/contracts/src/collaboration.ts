@@ -131,6 +131,7 @@ export type UpdateProjectMemberInput = z.infer<
 export const taskReviewInputSchema = z.object({
   decision: z.enum(["approve", "return"]),
   note: z.string().trim().max(4_000).default(""),
+  redispatch: z.boolean().default(false),
 });
 export type TaskReviewInput = z.infer<typeof taskReviewInputSchema>;
 

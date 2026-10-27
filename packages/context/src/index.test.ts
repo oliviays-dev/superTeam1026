@@ -10,6 +10,18 @@ const projectId = "00000000-0000-4000-8000-000000000001";
 const taskId = "00000000-0000-4000-8000-000000000002";
 const agentId = "00000000-0000-4000-8000-000000000003";
 const runId = "00000000-0000-4000-8000-000000000010";
+const taskExecutionDefaults = {
+  priority: "medium",
+  autoSubmit: true,
+  autoAccept: false,
+  autoRedispatchOnReturn: false,
+  revision: 1,
+  needsInputPrompt: null,
+  blockedReason: null,
+  pausedReason: null,
+  claimedBy: null,
+  claimExpiresAt: null,
+} as const;
 
 function binding(
   overrides: Partial<SceneSessionBinding> = {},
@@ -137,6 +149,7 @@ describe("buildTaskContext", () => {
         description: "Review the supplier risk.",
         acceptance: ["Provide evidence"],
         status: "queued",
+        ...taskExecutionDefaults,
         agentId: "00000000-0000-4000-8000-000000000003",
         dependsOn: [],
         createdAt: "2026-01-01T00:00:00.000Z",
@@ -211,6 +224,7 @@ describe("buildTaskContext", () => {
         description: "Review the supplier risk.",
         acceptance: ["Provide evidence"],
         status: "queued" as const,
+        ...taskExecutionDefaults,
         agentId,
         dependsOn: [],
         createdAt: "2026-01-01T00:00:00.000Z",
@@ -280,6 +294,7 @@ describe("buildTaskContext", () => {
         description: "",
         acceptance: [],
         status: "queued" as const,
+        ...taskExecutionDefaults,
         agentId,
         dependsOn: [],
         createdAt: "2026-01-01T00:00:00.000Z",
@@ -362,6 +377,7 @@ describe("buildTaskContext", () => {
         description: "",
         acceptance: [],
         status: "queued",
+        ...taskExecutionDefaults,
         agentId,
         dependsOn: [],
         createdAt: "2026-01-01T00:00:00.000Z",
@@ -406,6 +422,7 @@ describe("buildTaskContext", () => {
               description: "",
               acceptance: [],
               status: "queued",
+              ...taskExecutionDefaults,
               agentId,
               dependsOn: [],
               createdAt: "2026-01-01T00:00:00.000Z",

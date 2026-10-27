@@ -21,6 +21,7 @@ interface SceneSessionRow {
   agent_id: string;
   agent_principal_id: string | null;
   owner_principal_id: string | null;
+  principal_scope: string;
   channel_id: string | null;
   session_handle: string;
   generation: number;
@@ -143,6 +144,7 @@ function sessionHandle(
   sceneType: SceneType,
   sceneId: string,
   agentId: string,
+  generation = 0,
 ): string {
   const prefix =
     sceneType === "task"
@@ -153,7 +155,8 @@ function sessionHandle(
           ? "de-meeting"
           : "de-chat";
   const readable = sceneId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
-  return `${prefix}-${readable}-${digest(`${sceneType}:${sceneId}:${agentId}`).slice(0, 16)}`.slice(
+  const suffix = generation === 0 ? "" : `-r${String(generation).slice(0, 20)}`;
+  return `${prefix}-${readable}-${digest(`${sceneType}:${sceneId}:${agentId}`).slice(0, 16)}${suffix}`.slice(
     0,
     240,
   );
@@ -308,57 +311,177 @@ export class SceneContextRepository {
     readonly ownerPrincipalId?: string | null;
     readonly channelId?: string | null;
   }): Promise<SceneSessionBinding> {
-    const principalScope =
-      input.agentPrincipalId ?? input.ownerPrincipalId ?? "";
-    const identity = [
-      input.sceneType,
-      input.sceneId,
-      input.agentId,
-      principalScope,
-      0,
-    ].join(":");
-    const id = deterministicUuid("scene-session", identity);
-    await this.database.query<SceneSessionRow>(
-      `INSERT INTO scene_sessions (
-         id, scene_type, scene_id, project_id, agent_id,
-         agent_principal_id, owner_principal_id, principal_scope, channel_id,
-         session_handle, generation, status, created_at, updated_at
-       ) VALUES (
-         $1, $2, $3, $4, $5, $6, $7, $8, $9,
-         $10, 0, 'active', NOW(), NOW()
-       )
-       ON CONFLICT (scene_type, scene_id, agent_id, principal_scope, generation)
-       DO NOTHING`,
-      [
-        id,
+    return this.database.transaction(async (client) => {
+      const principalScope =
+        input.agentPrincipalId ?? input.ownerPrincipalId ?? "";
+      const latest = await client.query<SceneSessionRow>(
+        `SELECT * FROM scene_sessions
+         WHERE scene_type = $1
+           AND scene_id = $2
+           AND agent_id = $3
+           AND principal_scope = $4
+         ORDER BY generation DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [input.sceneType, input.sceneId, input.agentId, principalScope],
+      );
+      const latestRow = latest.rows[0];
+      if (latestRow?.status === "active") {
+        return sessionFromRow(latestRow);
+      }
+      const generation = latestRow === undefined ? 0 : latestRow.generation + 1;
+      const identity = [
         input.sceneType,
         input.sceneId,
-        input.projectId,
         input.agentId,
-        input.agentPrincipalId,
-        input.ownerPrincipalId ?? null,
         principalScope,
-        input.channelId ?? null,
-        sessionHandle(input.sceneType, input.sceneId, input.agentId),
-      ],
-    );
-    const result = await this.database.query<SceneSessionRow>(
-      `SELECT * FROM scene_sessions
-       WHERE scene_type = $1
-         AND scene_id = $2
-         AND agent_id = $3
-         AND principal_scope = $4
-         AND generation = 0`,
-      [input.sceneType, input.sceneId, input.agentId, principalScope],
-    );
-    const row = result.rows[0];
-    if (row === undefined) {
-      throw new SceneContextRepositoryError(
-        "scene_session_not_found",
-        "Scene session could not be created",
+        generation,
+      ].join(":");
+      const id = deterministicUuid("scene-session", identity);
+      await client.query<SceneSessionRow>(
+        `INSERT INTO scene_sessions (
+           id, scene_type, scene_id, project_id, agent_id,
+           agent_principal_id, owner_principal_id, principal_scope, channel_id,
+           session_handle, generation, status, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8, $9,
+           $10, $11, 'active', NOW(), NOW()
+         )
+         ON CONFLICT (
+           scene_type,
+           scene_id,
+           agent_id,
+           principal_scope,
+           generation
+         ) DO NOTHING`,
+        [
+          id,
+          input.sceneType,
+          input.sceneId,
+          input.projectId,
+          input.agentId,
+          input.agentPrincipalId,
+          input.ownerPrincipalId ?? null,
+          principalScope,
+          input.channelId ?? null,
+          sessionHandle(
+            input.sceneType,
+            input.sceneId,
+            input.agentId,
+            generation,
+          ),
+          generation,
+        ],
       );
-    }
-    return sessionFromRow(row);
+      const result = await client.query<SceneSessionRow>(
+        `SELECT * FROM scene_sessions
+         WHERE scene_type = $1
+           AND scene_id = $2
+           AND agent_id = $3
+           AND principal_scope = $4
+           AND generation = $5`,
+        [
+          input.sceneType,
+          input.sceneId,
+          input.agentId,
+          principalScope,
+          generation,
+        ],
+      );
+      const row = result.rows[0];
+      if (row === undefined) {
+        throw new SceneContextRepositoryError(
+          "scene_session_not_found",
+          "Scene session could not be created",
+        );
+      }
+      return sessionFromRow(row);
+    });
+  }
+
+  async resetSceneSessions(input: {
+    readonly sceneType: SceneType;
+    readonly sceneId: string;
+    readonly projectId: string | null;
+    readonly reason: string;
+    readonly actorId: string;
+  }): Promise<{
+    readonly previousSessionId: string | null;
+    readonly sessions: SceneSessionBinding[];
+  }> {
+    return this.database.transaction(async (client) => {
+      const active = await client.query<SceneSessionRow>(
+        `SELECT * FROM scene_sessions
+         WHERE scene_type = $1
+           AND scene_id = $2
+           AND project_id IS NOT DISTINCT FROM $3::uuid
+           AND status = 'active'
+         ORDER BY generation DESC, id
+         FOR UPDATE`,
+        [input.sceneType, input.sceneId, input.projectId],
+      );
+      if (active.rows.length === 0) {
+        return { previousSessionId: null, sessions: [] };
+      }
+      const sessions: SceneSessionBinding[] = [];
+      for (const previous of active.rows) {
+        await client.query(
+          `UPDATE scene_sessions
+           SET
+             status = 'reset',
+             reset_reason = $2,
+             reset_by = $3,
+             reset_at = NOW(),
+             updated_at = NOW()
+           WHERE id = $1
+             AND status = 'active'`,
+          [previous.id, input.reason, input.actorId],
+        );
+        const generation = previous.generation + 1;
+        const identity = [
+          previous.scene_type,
+          previous.scene_id,
+          previous.agent_id,
+          previous.principal_scope,
+          generation,
+        ].join(":");
+        const result = await client.query<SceneSessionRow>(
+          `INSERT INTO scene_sessions (
+             id, scene_type, scene_id, project_id, agent_id,
+             agent_principal_id, owner_principal_id, principal_scope,
+             channel_id, session_handle, generation, status,
+             created_at, updated_at
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+             'active', NOW(), NOW()
+           )
+           RETURNING *`,
+          [
+            deterministicUuid("scene-session", identity),
+            previous.scene_type,
+            previous.scene_id,
+            previous.project_id,
+            previous.agent_id,
+            previous.agent_principal_id,
+            previous.owner_principal_id,
+            previous.principal_scope,
+            previous.channel_id,
+            sessionHandle(
+              previous.scene_type,
+              previous.scene_id,
+              previous.agent_id,
+              generation,
+            ),
+            generation,
+          ],
+        );
+        sessions.push(sessionFromRow(result.rows[0]!));
+      }
+      return {
+        previousSessionId: active.rows[0]!.id,
+        sessions,
+      };
+    });
   }
 
   async session(id: string): Promise<SceneSessionBinding | undefined> {

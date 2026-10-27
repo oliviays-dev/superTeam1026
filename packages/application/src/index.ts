@@ -9,6 +9,8 @@ import type {
   AgentRuntimePreflightResult,
   ApprovalSlaSweepResult,
   Artifact,
+  BlockTaskInput,
+  ClaimTaskInput,
   ConfirmHandoffCardInput,
   ConvertMeetingActionItemInput,
   CosignWorkflowApprovalInput,
@@ -65,6 +67,8 @@ import type {
   ProjectReportSummary,
   PublishMemoryTruthInput,
   PublishMeetingMinutesInput,
+  ProvideTaskInput,
+  PauseTaskInput,
   ReviewMemoryClaimsInput,
   CreateProjectTemplateInput,
   CreateSceneContextContributionInput,
@@ -88,13 +92,24 @@ import type {
   SceneContextReplayResult,
   SceneContextSnapshot,
   RunInputSnapshot,
+  SceneSessionResetResult,
   SendDirectChatMessageInput,
   SetAgentRuntimeBindingInput,
   RetryWorkflowNodeInput,
   StartWorkflowInput,
+  SubmitTaskInput,
   Task,
+  TaskClaim,
   TaskDetail,
+  TaskDocument,
+  TaskDocumentDiscovery,
   TaskMessage,
+  TaskQueueItem,
+  RevealTaskDocumentResult,
+  RequestTaskInput,
+  ResetTaskSessionInput,
+  ResumeTaskInput,
+  ReleaseTaskClaimInput,
   TaskReviewInput,
   TraceContext,
   TriggerMeetingAiInput,
@@ -152,13 +167,13 @@ import type {
   UpdateTaskExecutionPolicyInput,
 } from "@pluginmax/contracts";
 import {
+  inferDeliveryTarget,
   createExternalRuntimeInputSchema,
   createRootTraceContext,
 } from "@pluginmax/contracts";
 import {
   assertProjectMemberCanBeRemoved,
   assertValidTaskDependencies,
-  canTransitionTask,
   deriveWorkflowInstanceStatus,
   initializeWorkflowRuntime,
   isTerminalRunStatus,
@@ -1488,6 +1503,353 @@ export class PlatformApplication {
     return this.repositories.tasks.list(projectId, readableProjectIds);
   }
 
+  async listTaskQueue(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<TaskQueueItem[]> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    return this.repositories.tasks.listQueue(projectId);
+  }
+
+  async claimNextTask(
+    projectId: string,
+    input: ClaimTaskInput,
+    actorId = "local-admin",
+  ): Promise<TaskClaim | undefined> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    return this.repositories.tasks.claimNext(projectId, input);
+  }
+
+  async releaseTaskClaim(
+    taskId: string,
+    input: ReleaseTaskClaimInput,
+    actorId = "local-admin",
+  ): Promise<Task> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    if (task.claimedBy === null && task.claimExpiresAt === null) {
+      return task;
+    }
+    const released = await this.repositories.tasks.releaseClaim(
+      taskId,
+      input.claimToken,
+    );
+    if (released === undefined) {
+      throw new ApplicationError(
+        "task_claim_conflict",
+        "The task claim token is stale or already released",
+        409,
+      );
+    }
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: "claim",
+      actorId,
+      actorName: actorId,
+      summary: "释放任务领取租约",
+      data: { claimToken: input.claimToken },
+    });
+    return released;
+  }
+
+  async pauseTask(
+    taskId: string,
+    input: PauseTaskInput,
+    actorId = "local-admin",
+  ): Promise<Task> {
+    return this.setTaskControl(taskId, actorId, {
+      expectedRevision: input.expectedRevision,
+      from: ["queued", "review"],
+      to: "paused",
+      eventKind: "control",
+      summary: "暂停任务",
+      reason: input.reason,
+      pausedReason: input.reason,
+    });
+  }
+
+  async blockTask(
+    taskId: string,
+    input: BlockTaskInput,
+    actorId = "local-admin",
+  ): Promise<Task> {
+    return this.setTaskControl(taskId, actorId, {
+      expectedRevision: input.expectedRevision,
+      from: ["queued", "review"],
+      to: "blocked",
+      eventKind: "control",
+      summary: "阻断任务",
+      reason: input.reason,
+      blockedReason: input.reason,
+    });
+  }
+
+  async requestTaskInput(
+    taskId: string,
+    input: RequestTaskInput,
+    actorId = "local-admin",
+  ): Promise<TaskDetail> {
+    await this.setTaskControl(taskId, actorId, {
+      expectedRevision: input.expectedRevision,
+      from: ["queued", "review"],
+      to: "needs_input",
+      eventKind: "input",
+      summary: "任务等待补充输入",
+      reason: input.prompt,
+      needsInputPrompt: input.prompt,
+    });
+    await this.repositories.tasks.addMessage(
+      taskId,
+      {
+        content: input.prompt,
+        mentions: [],
+        deliveryTarget: "receiver",
+      },
+      "system",
+      "system",
+      "Pluginmax",
+    );
+    return this.getTaskDetail(taskId);
+  }
+
+  async provideTaskInput(
+    taskId: string,
+    input: ProvideTaskInput,
+    actorId = "local-admin",
+  ): Promise<TaskDetail> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    if (task.status === "queued") {
+      return this.getTaskDetail(taskId);
+    }
+    if (task.status !== "needs_input") {
+      throw new ApplicationError(
+        "task_not_waiting_for_input",
+        "Task is not waiting for input",
+        409,
+      );
+    }
+    await this.repositories.tasks.addMessage(
+      taskId,
+      {
+        content: input.content,
+        mentions: [],
+        deliveryTarget: "receiver",
+      },
+      "human",
+      actorId,
+      actorId,
+    );
+    const resumed = await this.repositories.tasks.transitionControl({
+      id: taskId,
+      from: ["needs_input"],
+      to: "queued",
+      ...(input.expectedRevision === undefined
+        ? {}
+        : { expectedRevision: input.expectedRevision }),
+    });
+    if (resumed === undefined) {
+      throw new ApplicationError(
+        "task_execution_revision_conflict",
+        "Task execution state changed before input was applied",
+        409,
+      );
+    }
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: "input",
+      actorId,
+      actorName: actorId,
+      summary: "补充输入并恢复任务",
+      data: { content: input.content },
+    });
+    return this.getTaskDetail(taskId);
+  }
+
+  async resumeTask(
+    taskId: string,
+    input: ResumeTaskInput,
+    actorId = "local-admin",
+  ): Promise<Task> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    if (task.status === "queued") return task;
+    return this.setTaskControl(taskId, actorId, {
+      expectedRevision: input.expectedRevision,
+      from: ["paused", "blocked", "needs_input"],
+      to: "queued",
+      eventKind: "control",
+      summary: "恢复任务执行",
+      reason: input.note,
+    });
+  }
+
+  async submitTask(
+    taskId: string,
+    input: SubmitTaskInput,
+    actorId = "local-admin",
+  ): Promise<Task> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    if (task.status !== "in_progress") {
+      throw new ApplicationError(
+        "task_not_in_progress",
+        "Only an in-progress task can be submitted for review",
+        409,
+      );
+    }
+    const runs = await this.repositories.runs.listByTask(taskId);
+    const latestCompleted = runs.find(
+      (run) =>
+        run.taskExecutionKind === "owner" &&
+        run.status === "completed" &&
+        run.output !== null,
+    );
+    if (latestCompleted === undefined) {
+      throw new ApplicationError(
+        "run_output_missing",
+        "A completed owner Run is required before submission",
+        409,
+      );
+    }
+    const updated = await this.repositories.tasks.transitionControl({
+      id: taskId,
+      from: ["in_progress"],
+      to: "review",
+      ...(input.expectedRevision === undefined
+        ? {}
+        : { expectedRevision: input.expectedRevision }),
+    });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "task_execution_revision_conflict",
+        "Task execution state changed before submission",
+        409,
+      );
+    }
+    await this.repositories.meetingDecisions.syncTaskStatus(taskId, "review");
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: "review",
+      actorId,
+      actorName: actorId,
+      summary: "人工提交任务验收",
+      data: { runId: latestCompleted.id, note: input.note },
+    });
+    return updated;
+  }
+
+  async resetTaskSession(
+    taskId: string,
+    input: ResetTaskSessionInput,
+    actorId = "local-admin",
+  ): Promise<SceneSessionResetResult> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    if (await this.taskHasActiveRun(taskId)) {
+      throw new ApplicationError(
+        "task_run_active",
+        "Session reset requires the task to have no active Run",
+        409,
+      );
+    }
+    const reset = await this.repositories.sceneContext.resetSceneSessions({
+      sceneType: "task",
+      sceneId: task.id,
+      projectId: task.projectId,
+      reason: input.reason,
+      actorId,
+    });
+    const session = reset.sessions[0];
+    if (session === undefined) {
+      throw new ApplicationError(
+        "scene_session_not_found",
+        "The task has no Scene Session to reset",
+        404,
+      );
+    }
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: "session",
+      actorId,
+      actorName: actorId,
+      summary: `重置任务 Session 至 generation ${session.generation}`,
+      data: {
+        previousSessionId: reset.previousSessionId,
+        sessionId: session.id,
+        generation: session.generation,
+        reason: input.reason,
+      },
+    });
+    return {
+      sceneType: "task",
+      sceneId: taskId,
+      previousSessionId: reset.previousSessionId,
+      session: {
+        id: session.id,
+        sessionHandle: session.sessionHandle,
+        generation: session.generation,
+        status: session.status,
+        createdAt: session.createdAt,
+      },
+    };
+  }
+
+  async listTaskDocuments(
+    taskId: string,
+    includeArchived = false,
+    actorId = "local-admin",
+  ): Promise<TaskDocumentDiscovery> {
+    const task = await this.getTask(taskId);
+    await this.requireProjectReadAccess(task.projectId, actorId);
+    const attachments =
+      await this.repositories.taskCollaboration.listAttachments(taskId);
+    return {
+      items: attachments
+        .filter(
+          (attachment) => includeArchived || attachment.archivedAt === null,
+        )
+        .map(taskDocumentFromAttachment),
+      scope: "task",
+      includeArchived,
+    };
+  }
+
+  async revealTaskDocument(
+    taskId: string,
+    attachmentId: string,
+    actorId = "local-admin",
+  ): Promise<RevealTaskDocumentResult> {
+    const task = await this.getTask(taskId);
+    await this.requireProjectReadAccess(task.projectId, actorId);
+    const attachment =
+      await this.repositories.taskCollaboration.getAttachment(attachmentId);
+    if (
+      attachment === undefined ||
+      attachment.taskId !== taskId ||
+      attachment.projectId !== task.projectId
+    ) {
+      throw new ApplicationError(
+        "task_attachment_not_found",
+        "Task document not found",
+        404,
+      );
+    }
+    if (attachment.archivedAt !== null) {
+      throw new ApplicationError(
+        "task_document_archived",
+        "An archived task document cannot be revealed",
+        409,
+      );
+    }
+    assertTaskDocumentPath(taskId, attachment.documentPath);
+    return {
+      document: taskDocumentFromAttachment(attachment),
+      revealPath: attachment.documentPath,
+      scopedTo: { projectId: task.projectId, taskId },
+    };
+  }
+
   async getTask(id: string): Promise<Task> {
     const task = await this.repositories.tasks.get(id);
     if (task === undefined) {
@@ -1534,13 +1896,20 @@ export class PlatformApplication {
         409,
       );
     }
+    if (input.autoAccept && !input.autoSubmit) {
+      throw new ApplicationError(
+        "task_auto_accept_requires_submit",
+        "Automatic acceptance requires automatic submission",
+        400,
+      );
+    }
     const projectTasks = await this.repositories.tasks.list(input.projectId);
     const candidateTaskId = randomUUID();
     guardTaskDependencyRule(() =>
       assertValidTaskDependencies({
         taskId: candidateTaskId,
         projectId: input.projectId,
-        dependsOn: input.dependsOn,
+        dependsOn: input.dependsOn ?? [],
         tasks: projectTasks,
       }),
     );
@@ -1567,6 +1936,16 @@ export class PlatformApplication {
 
   async updateTask(id: string, input: UpdateTaskInput): Promise<TaskDetail> {
     const existing = await this.getTask(id);
+    if (
+      (input.autoSubmit ?? existing.autoSubmit) === false &&
+      (input.autoAccept ?? existing.autoAccept) === true
+    ) {
+      throw new ApplicationError(
+        "task_auto_accept_requires_submit",
+        "Automatic acceptance requires automatic submission",
+        400,
+      );
+    }
     if (input.dependsOn !== undefined) {
       const projectTasks = await this.repositories.tasks.list(
         existing.projectId,
@@ -1709,7 +2088,7 @@ export class PlatformApplication {
     actorId = "local-admin",
     actorName = "Local Admin",
   ): Promise<TaskMessage> {
-    await this.getTask(id);
+    const task = await this.getTask(id);
     if (input.replyToId !== undefined) {
       const messages = await this.repositories.tasks.listMessages(id);
       if (!messages.some((message) => message.id === input.replyToId)) {
@@ -1720,9 +2099,45 @@ export class PlatformApplication {
         );
       }
     }
-    const message = await this.repositories.tasks.addMessage(
+    const mentions = input.mentions ?? [];
+    if (mentions.length > 0) {
+      const members = await this.repositories.projectMemberships.listMembers(
+        task.projectId,
+      );
+      const activeAgentIds = new Set(
+        members
+          .filter(
+            (member) => member.kind === "agent" && member.status === "active",
+          )
+          .map((member) => member.actorId),
+      );
+      const invalid = mentions.find((agentId) => !activeAgentIds.has(agentId));
+      if (invalid !== undefined) {
+        throw new ApplicationError(
+          "task_mention_not_found",
+          "Every mentioned Agent must be an active project member",
+          409,
+          { agentId: invalid },
+        );
+      }
+    }
+    const deliveryTarget = inferDeliveryTarget({
+      assigneeAgentId: task.agentId,
+      mentions,
+      ...(input.deliveryTarget === undefined
+        ? {}
+        : { explicit: input.deliveryTarget }),
+    });
+    let message = await this.repositories.tasks.addMessage(
       id,
-      input,
+      {
+        ...input,
+        mentions,
+        deliveryTarget:
+          mentions.length > 0 || input.deliveryTarget !== undefined
+            ? deliveryTarget
+            : undefined,
+      },
       "human",
       actorId,
       actorName,
@@ -1736,11 +2151,69 @@ export class PlatformApplication {
       data: {
         messageId: message.id,
         isKeyConsensus: message.isKeyConsensus,
+        deliveryTarget,
+        mentionAgentIds: mentions,
         ...(input.replyToId === undefined
           ? {}
           : { replyToId: input.replyToId }),
       },
     });
+    if (mentions.length > 0 || input.deliveryTarget !== undefined) {
+      const triggerIds: string[] = [];
+      if (deliveryTarget === "receiver" || deliveryTarget === "broadcast") {
+        triggerIds.push(task.agentId);
+      }
+      if (
+        deliveryTarget === "collaborators" ||
+        deliveryTarget === "broadcast"
+      ) {
+        triggerIds.push(
+          ...mentions.filter((agentId) => agentId !== task.agentId),
+        );
+      }
+      const uniqueTriggerIds = [...new Set(triggerIds)];
+      if (uniqueTriggerIds.length === 0) {
+        throw new ApplicationError(
+          "task_delivery_target_has_no_agent",
+          "The delivery target does not resolve to an executable Agent",
+          409,
+        );
+      }
+      const runIds: string[] = [];
+      for (const agentId of uniqueTriggerIds) {
+        try {
+          const dispatched = await this.dispatchTaskExecution({
+            taskId: id,
+            agentId,
+            kind: agentId === task.agentId ? "owner" : "collaborator",
+            deliveryTarget,
+            triggerMessageId: message.id,
+            mentionedAgentIds: mentions,
+            instruction: input.content,
+            trace: createRootTraceContext(),
+            actorId,
+            administrator: actorId === "local-admin",
+          });
+          runIds.push(dispatched.runId);
+        } catch (error) {
+          if (
+            error instanceof ApplicationError &&
+            error.code === "task_run_active" &&
+            agentId === task.agentId
+          ) {
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (runIds.length > 0) {
+        message =
+          (await this.repositories.tasks.setMessageTriggeredRuns(
+            message.id,
+            runIds,
+          )) ?? message;
+      }
+    }
     return message;
   }
 
@@ -1750,6 +2223,7 @@ export class PlatformApplication {
       readonly name: string;
       readonly mimeType: string;
       readonly content: Uint8Array;
+      readonly documentPath?: string;
     },
     actorId = "local-admin",
   ) {
@@ -1762,25 +2236,45 @@ export class PlatformApplication {
         503,
       );
     }
+    if (input.documentPath !== undefined) {
+      assertTaskDocumentPath(taskId, input.documentPath);
+    }
     const ref = await this.files.put({
       workspaceId: task.projectId,
       name: input.name,
       mimeType: input.mimeType,
       content: input.content,
     });
-    const attachment = await this.repositories.taskCollaboration.saveAttachment(
-      {
+    const documentPath = taskDocumentPath({
+      taskId,
+      attachmentId: ref.id,
+      name: input.name,
+      requestedPath: input.documentPath,
+    });
+    let attachment: TaskAttachment;
+    try {
+      attachment = await this.repositories.taskCollaboration.saveAttachment({
         taskId,
         projectId: task.projectId,
         ref,
-        uploadedBy: "Local Admin",
-      },
-    );
+        uploadedBy: actorId,
+        documentPath,
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ApplicationError(
+          "task_document_path_conflict",
+          "A task document already uses this path",
+          409,
+        );
+      }
+      throw error;
+    }
     await this.repositories.taskCollaboration.appendEvent({
       taskId,
       kind: "attachment",
-      actorId: "local-admin",
-      actorName: "Local Admin",
+      actorId,
+      actorName: actorId,
       summary: `上传任务附件“${attachment.name}”`,
       data: { attachmentId: attachment.id },
     });
@@ -1870,8 +2364,33 @@ export class PlatformApplication {
     actorId = "local-admin",
     administrator = actorId === "local-admin",
   ): Promise<{ runId: string }> {
+    return this.dispatchTaskExecution({
+      taskId,
+      agentId: undefined,
+      kind: "owner",
+      trace,
+      actorId,
+      administrator,
+    });
+  }
+
+  private async dispatchTaskExecution(input: {
+    readonly taskId: string;
+    readonly agentId: string | undefined;
+    readonly kind: "owner" | "collaborator";
+    readonly deliveryTarget?: "receiver" | "collaborators" | "broadcast";
+    readonly triggerMessageId?: string;
+    readonly mentionedAgentIds?: readonly string[];
+    readonly instruction?: string;
+    readonly trace: TraceContext;
+    readonly actorId: string;
+    readonly administrator: boolean;
+  }): Promise<{ runId: string }> {
+    const { taskId, trace, actorId, administrator } = input;
     const task = await this.getTask(taskId);
-    if (!canTransitionTask(task.status, "in_progress")) {
+    const dispatchableStatuses =
+      input.kind === "owner" ? ["queued"] : ["queued", "in_progress"];
+    if (!dispatchableStatuses.includes(task.status)) {
       throw new ApplicationError(
         "invalid_task_status",
         `Task cannot be dispatched from status ${task.status}`,
@@ -1886,7 +2405,33 @@ export class PlatformApplication {
         409,
       );
     }
-    const agent = await this.repositories.agents.get(task.agentId);
+    const projectTasks = await this.repositories.tasks.list(task.projectId);
+    const unresolved = unresolvedTaskDependencies(task, projectTasks);
+    if (unresolved.length > 0) {
+      throw new ApplicationError(
+        "task_dependencies_unresolved",
+        "All prerequisite tasks must be done before dispatch",
+        409,
+      );
+    }
+    const runs = await this.repositories.runs.listByTask(task.id);
+    const targetAgentId = input.agentId ?? task.agentId;
+    const activeRuns = runs.filter((run) =>
+      ["queued", "running", "waiting_approval", "interrupted"].includes(
+        run.status,
+      ),
+    );
+    if (
+      (input.kind === "owner" && activeRuns.length > 0) ||
+      activeRuns.some((run) => run.agentId === targetAgentId)
+    ) {
+      throw new ApplicationError(
+        "task_run_active",
+        "A task with an active or recoverable Run cannot be dispatched again",
+        409,
+      );
+    }
+    const agent = await this.repositories.agents.get(targetAgentId);
     if (agent === undefined) {
       throw new ApplicationError(
         "agent_unavailable",
@@ -1907,27 +2452,35 @@ export class PlatformApplication {
       runId,
     });
     const executionSnapshot = prepared.executionSnapshot;
-    const projectTasks = await this.repositories.tasks.list(task.projectId);
-    const unresolved = unresolvedTaskDependencies(task, projectTasks);
-    if (unresolved.length > 0) {
-      throw new ApplicationError(
-        "task_dependencies_unresolved",
-        "All prerequisite tasks must be done before dispatch",
-        409,
-      );
-    }
 
     const inputSnapshot: RunInputSnapshot = {
       taskTitle: task.title,
       taskDescription: task.description,
       acceptance: task.acceptance,
-      instruction: task.description,
+      instruction: input.instruction ?? task.description,
       agentName: agent.name,
       runtimeKind: agent.runtimeKind,
+      taskExecution: {
+        kind: input.kind,
+        ...(input.deliveryTarget === undefined
+          ? {}
+          : { deliveryTarget: input.deliveryTarget }),
+        ...(input.triggerMessageId === undefined
+          ? {}
+          : { triggerMessageId: input.triggerMessageId }),
+        ...(input.mentionedAgentIds === undefined
+          ? {}
+          : { mentionedAgentIds: [...input.mentionedAgentIds] }),
+      },
     };
     await this.repositories.runs.enqueue({
       runId,
       task,
+      agentId: targetAgentId,
+      taskExecutionKind: input.kind,
+      ...(input.triggerMessageId === undefined
+        ? {}
+        : { taskTriggerMessageId: input.triggerMessageId }),
       inputSnapshot,
       ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
       executionEnvelope: prepared.executionEnvelope,
@@ -1956,7 +2509,14 @@ export class PlatformApplication {
       actorId: "local-admin",
       actorName: "Local Admin",
       summary: "派发任务执行",
-      data: { runId },
+      data: {
+        runId,
+        agentId: targetAgentId,
+        executionKind: input.kind,
+        ...(input.triggerMessageId === undefined
+          ? {}
+          : { triggerMessageId: input.triggerMessageId }),
+      },
     });
     return { runId };
   }
@@ -2328,7 +2888,11 @@ export class PlatformApplication {
     }
   }
 
-  async reviewTask(taskId: string, input: TaskReviewInput): Promise<Task> {
+  async reviewTask(
+    taskId: string,
+    input: TaskReviewInput,
+    actorId = "local-admin",
+  ): Promise<Task> {
     const task = await this.getTask(taskId);
     if (task.status !== "review") {
       throw new ApplicationError(
@@ -2346,18 +2910,39 @@ export class PlatformApplication {
     }
     const runs = await this.repositories.runs.listByTask(taskId);
     const latestRun = runs.find((run) => run.status === "completed");
-    await this.repositories.reviews.save(taskId, "local-admin", input);
+    await this.repositories.reviews.save(taskId, actorId, input);
     await this.repositories.taskCollaboration.appendEvent({
       taskId,
       kind: "review",
-      actorId: "local-admin",
-      actorName: "Local Admin",
+      actorId,
+      actorName: actorId,
       summary: input.decision === "approve" ? "验收通过" : "退回任务并补充说明",
       data: { note: input.note, decision: input.decision },
     });
     if (input.decision === "return") {
+      if (input.note.trim() !== "") {
+        await this.repositories.tasks.addMessage(
+          taskId,
+          {
+            content: input.note,
+            deliveryTarget: "receiver",
+            mentions: [],
+          },
+          "system",
+          actorId,
+          actorId,
+        );
+      }
       await this.repositories.tasks.setStatus(taskId, "queued");
       await this.repositories.meetingDecisions.syncTaskStatus(taskId, "queued");
+      if (input.redispatch || task.autoRedispatchOnReturn) {
+        await this.dispatchTask(
+          taskId,
+          createRootTraceContext(),
+          actorId,
+          actorId === "local-admin",
+        );
+      }
       return this.getTask(taskId);
     }
     if (latestRun === undefined || latestRun.output === null) {
@@ -3099,6 +3684,84 @@ export class PlatformApplication {
       input,
       options,
     );
+  }
+
+  private async taskHasActiveRun(taskId: string): Promise<boolean> {
+    const runs = await this.repositories.runs.listByTask(taskId);
+    return runs.some((run) =>
+      ["queued", "running", "waiting_approval", "interrupted"].includes(
+        run.status,
+      ),
+    );
+  }
+
+  private async setTaskControl(
+    taskId: string,
+    actorId: string,
+    input: {
+      readonly expectedRevision?: number | undefined;
+      readonly from: readonly Task["status"][];
+      readonly to: Task["status"];
+      readonly eventKind: "control" | "input";
+      readonly summary: string;
+      readonly reason: string;
+      readonly needsInputPrompt?: string | null;
+      readonly blockedReason?: string | null;
+      readonly pausedReason?: string | null;
+    },
+  ): Promise<Task> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    if (
+      input.expectedRevision !== undefined &&
+      task.revision !== input.expectedRevision
+    ) {
+      throw new ApplicationError(
+        "task_execution_revision_conflict",
+        "Task execution state changed by another request",
+        409,
+        { currentRevision: task.revision },
+      );
+    }
+    if (await this.taskHasActiveRun(taskId)) {
+      throw new ApplicationError(
+        "task_run_active",
+        "Task control actions require no active Run",
+        409,
+      );
+    }
+    const updated = await this.repositories.tasks.transitionControl({
+      id: taskId,
+      from: input.from,
+      to: input.to,
+      ...(input.expectedRevision === undefined
+        ? {}
+        : { expectedRevision: input.expectedRevision }),
+      needsInputPrompt: input.needsInputPrompt ?? null,
+      blockedReason: input.blockedReason ?? null,
+      pausedReason: input.pausedReason ?? null,
+    });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "invalid_task_status",
+        `Task cannot change from status ${task.status} to ${input.to}`,
+        409,
+      );
+    }
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId,
+      kind: input.eventKind,
+      actorId,
+      actorName: actorId,
+      summary: input.summary,
+      data: {
+        from: task.status,
+        to: input.to,
+        reason: input.reason,
+        revision: updated.revision,
+      },
+    });
+    return updated;
   }
 
   private async requireProject(projectId: string): Promise<Project> {
@@ -6424,6 +7087,62 @@ function guardTaskDependencyRule(operation: () => void): void {
     }
     throw error;
   }
+}
+
+function taskDocumentFromAttachment(attachment: TaskAttachment): TaskDocument {
+  return {
+    attachmentId: attachment.id,
+    taskId: attachment.taskId,
+    projectId: attachment.projectId,
+    name: attachment.name,
+    documentPath: attachment.documentPath,
+    mimeType: attachment.mimeType,
+    size: attachment.size,
+    sha256: attachment.sha256,
+    archivedAt: attachment.archivedAt,
+    createdAt: attachment.createdAt,
+  };
+}
+
+function assertTaskDocumentPath(taskId: string, documentPath: string): void {
+  const segments = documentPath.split("/");
+  const safe =
+    documentPath.length <= 800 &&
+    !documentPath.startsWith("/") &&
+    !documentPath.includes("\\") &&
+    !documentPath.includes("\0") &&
+    segments.every(
+      (segment) =>
+        segment !== "" &&
+        segment !== "." &&
+        segment !== ".." &&
+        /^[a-zA-Z0-9._-]+$/.test(segment),
+    ) &&
+    documentPath.startsWith(`documents/${taskId}/`);
+  if (!safe) {
+    throw new ApplicationError(
+      "task_document_path_forbidden",
+      "Task documents must stay under the task document scope",
+      403,
+    );
+  }
+}
+
+function taskDocumentPath(input: {
+  readonly taskId: string;
+  readonly attachmentId: string;
+  readonly name: string;
+  readonly requestedPath?: string | undefined;
+}): string {
+  if (input.requestedPath !== undefined) {
+    assertTaskDocumentPath(input.taskId, input.requestedPath);
+    return input.requestedPath;
+  }
+  const name = input.name
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 160);
+  return `documents/${input.taskId}/${input.attachmentId}/${name || "document"}`;
 }
 
 function isUuid(value: string): boolean {

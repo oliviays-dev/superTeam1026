@@ -68,10 +68,19 @@ export const taskStatusSchema = z.enum([
   "queued",
   "in_progress",
   "review",
+  "paused",
+  "blocked",
+  "needs_input",
   "done",
   "cancelled",
 ]);
 export type TaskStatus = z.infer<typeof taskStatusSchema>;
+
+export const taskPrioritySchema = z.enum(["low", "medium", "high", "urgent"]);
+export type TaskPriority = z.infer<typeof taskPrioritySchema>;
+
+export const taskExecutionKindSchema = z.enum(["owner", "collaborator"]);
+export type TaskExecutionKind = z.infer<typeof taskExecutionKindSchema>;
 
 export const taskSchema = z.object({
   id: z.string().uuid(),
@@ -80,9 +89,19 @@ export const taskSchema = z.object({
   description: z.string().trim().min(1).max(20_000),
   acceptance: z.array(z.string().trim().min(1).max(1_000)).max(50),
   status: taskStatusSchema,
+  priority: taskPrioritySchema,
   agentId: z.string().uuid(),
   roleId: z.string().uuid().optional(),
   dependsOn: z.array(z.string().uuid()),
+  autoSubmit: z.boolean(),
+  autoAccept: z.boolean(),
+  autoRedispatchOnReturn: z.boolean(),
+  revision: z.number().int().positive(),
+  needsInputPrompt: z.string().nullable(),
+  blockedReason: z.string().nullable(),
+  pausedReason: z.string().nullable(),
+  claimedBy: z.string().nullable(),
+  claimExpiresAt: z.string().datetime({ offset: true }).nullable(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
@@ -106,6 +125,10 @@ export const createTaskInputSchema = z
     agentId: z.string().uuid().optional(),
     roleId: z.string().uuid().optional(),
     dependsOn: taskDependencyIdsSchema,
+    priority: taskPrioritySchema.default("medium"),
+    autoSubmit: z.boolean().default(true),
+    autoAccept: z.boolean().default(false),
+    autoRedispatchOnReturn: z.boolean().default(false),
   })
   .superRefine((input, context) => {
     if (input.agentId !== undefined && input.roleId !== undefined) {
@@ -116,13 +139,17 @@ export const createTaskInputSchema = z
       });
     }
   });
-export type CreateTaskInput = z.infer<typeof createTaskInputSchema>;
+export type CreateTaskInput = z.input<typeof createTaskInputSchema>;
 
 export const updateTaskInputSchema = z.object({
   title: z.string().trim().min(1).max(240).optional(),
   description: z.string().trim().min(1).max(20_000).optional(),
   acceptance: z.array(z.string().trim().min(1).max(1_000)).max(50).optional(),
   dependsOn: taskDependencyIdsSchema.optional(),
+  priority: taskPrioritySchema.optional(),
+  autoSubmit: z.boolean().optional(),
+  autoAccept: z.boolean().optional(),
+  autoRedispatchOnReturn: z.boolean().optional(),
 });
 export type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
 
@@ -150,6 +177,12 @@ export const taskMessageSchema = z.object({
   content: z.string().min(1).max(20_000),
   replyToId: z.string().uuid().nullable(),
   isKeyConsensus: z.boolean().default(false),
+  deliveryTarget: z
+    .enum(["receiver", "collaborators", "broadcast"])
+    .nullable()
+    .default(null),
+  mentionAgentIds: z.array(z.string().uuid()).max(20).default([]),
+  triggeredRunIds: z.array(z.string().uuid()).max(20).default([]),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type TaskMessage = z.infer<typeof taskMessageSchema>;
@@ -158,8 +191,14 @@ export const createTaskMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
   replyToId: z.string().uuid().optional(),
   isKeyConsensus: z.boolean().optional(),
+  mentions: z
+    .array(z.string().uuid())
+    .max(20)
+    .default([])
+    .transform((ids) => [...new Set(ids)]),
+  deliveryTarget: z.enum(["receiver", "collaborators", "broadcast"]).optional(),
 });
-export type CreateTaskMessageInput = z.infer<
+export type CreateTaskMessageInput = z.input<
   typeof createTaskMessageInputSchema
 >;
 
@@ -187,6 +226,10 @@ export const taskDetailSchema = z.object({
         "attachment",
         "dispatch",
         "transfer",
+        "claim",
+        "control",
+        "input",
+        "session",
       ]),
       actorId: z.string(),
       actorName: z.string(),
@@ -205,6 +248,7 @@ export const taskDetailSchema = z.object({
       size: z.number().int().nonnegative(),
       sha256: z.string().length(64),
       storageKey: z.string(),
+      documentPath: z.string(),
       uploadedBy: z.string(),
       archivedAt: z.string().datetime({ offset: true }).nullable(),
       createdAt: z.string().datetime({ offset: true }),
@@ -222,6 +266,22 @@ export const uploadTaskAttachmentInputSchema = z.object({
     .max(200)
     .default("application/octet-stream"),
   contentBase64: z.string().min(1).max(32_000_000),
+  documentPath: z
+    .string()
+    .trim()
+    .min(1)
+    .max(800)
+    .regex(/^[a-zA-Z0-9._/-]+$/)
+    .refine(
+      (value) =>
+        !value.startsWith("/") &&
+        !value.includes("\\") &&
+        !value
+          .split("/")
+          .some((segment) => segment === ".." || segment === "."),
+      "documentPath must stay inside the task document scope",
+    )
+    .optional(),
 });
 export type UploadTaskAttachmentInput = z.infer<
   typeof uploadTaskAttachmentInputSchema
@@ -353,6 +413,16 @@ export const runInputSnapshotSchema = z.object({
       agentId: z.string().uuid(),
     })
     .optional(),
+  taskExecution: z
+    .object({
+      kind: taskExecutionKindSchema,
+      deliveryTarget: z
+        .enum(["receiver", "collaborators", "broadcast"])
+        .optional(),
+      triggerMessageId: z.string().uuid().optional(),
+      mentionedAgentIds: z.array(z.string().uuid()).max(20).optional(),
+    })
+    .optional(),
   runtimeOptions: z
     .object({
       fault: z.enum(["fail", "timeout"]).optional(),
@@ -369,6 +439,8 @@ export const runSchema = z.object({
   meetingTurnId: z.string().uuid().nullable(),
   directChatTurnId: z.string().uuid().nullable(),
   agentId: z.string().uuid(),
+  taskExecutionKind: taskExecutionKindSchema.default("owner"),
+  taskTriggerMessageId: z.string().uuid().nullable().default(null),
   status: runStatusSchema,
   contextPackId: z.string().uuid().nullable(),
   inputSnapshot: runInputSnapshotSchema,

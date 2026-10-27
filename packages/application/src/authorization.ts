@@ -175,6 +175,13 @@ function resourceRequirement(
       permission: "approve",
     };
   }
+  if (route.startsWith("/api/v1/tasks/:id/")) {
+    return {
+      resourceType: "task",
+      resourceId: parameter(params, "id"),
+      permission: "write",
+    };
+  }
   if (
     route === "/api/v1/tasks/:id/messages" ||
     route === "/api/v1/tasks/:id/attachments"

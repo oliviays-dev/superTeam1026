@@ -122,6 +122,8 @@ function fixture() {
     meetingTurnId: null,
     directChatTurnId: null,
     agentId: "00000000-0000-4000-8000-000000000001",
+    taskExecutionKind: "owner",
+    taskTriggerMessageId: null,
     status: "queued",
     contextPackId: null,
     inputSnapshot: {
