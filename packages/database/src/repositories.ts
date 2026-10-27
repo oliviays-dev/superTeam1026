@@ -88,6 +88,7 @@ import { TaskExecutionPolicyRepository } from "./task-execution-policy-repositor
 import { ActionTicketRepository } from "./action-ticket-repository.js";
 import { SceneContextRepository } from "./scene-context-repository.js";
 import { RuntimeEconomicsRepository } from "./runtime-economics-repository.js";
+import { IdentityAdministrationRepository } from "./identity-administration-repository.js";
 import { TeammateRepository } from "./teammate-repository.js";
 import { MeetingCollaborationRepository } from "./meeting-collaboration-repository.js";
 
@@ -2176,6 +2177,7 @@ async function appendRunEventWithClient(
 }
 
 export class PlatformRepositories {
+  readonly identityAdministration: IdentityAdministrationRepository;
   readonly actionTickets: ActionTicketRepository;
   readonly authorization: AuthorizationRepository;
   readonly taskExecutionPolicies: TaskExecutionPolicyRepository;
@@ -2212,6 +2214,9 @@ export class PlatformRepositories {
   readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
 
   constructor(database: Database) {
+    this.identityAdministration = new IdentityAdministrationRepository(
+      database,
+    );
     this.actionTickets = new ActionTicketRepository(database);
     this.authorization = new AuthorizationRepository(database);
     this.taskExecutionPolicies = new TaskExecutionPolicyRepository(database);

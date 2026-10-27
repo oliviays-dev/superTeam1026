@@ -355,4 +355,75 @@ describe("authorization route policy", () => {
       "project-policy:write",
     ]);
   });
+
+  it("allows platform administrators or the corresponding Workspace Grant", async () => {
+    const calls: string[] = [];
+    const repository = {
+      authorizePlatform: async () => {
+        calls.push("platform");
+        return {
+          ...allowedDecision("platform", "platform", "platform.manage"),
+          allowed: false,
+          reason: "grant_missing",
+          grantIds: [],
+          effectivePermissions: [],
+          grantSource: "none",
+        } as ScopeAuthorizationDecision;
+      },
+      authorizeWorkspace: async (input: {
+        workspaceId: string;
+        permission: string;
+      }) => {
+        calls.push(`${input.workspaceId}:${input.permission}`);
+        return allowedDecision(
+          "workspace",
+          input.workspaceId,
+          input.permission as ScopeAuthorizationDecision["permission"],
+        );
+      },
+      audit: async (_input: AuthorizationAuditInput) => undefined,
+    } as unknown as AuthorizationRepository;
+    const service = new AuthorizationService(repository);
+
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-workspace-write",
+        method: "POST",
+        route: "/api/v1/workspaces/:workspaceId/grants",
+        principal,
+        params: { workspaceId: "workspace-one" },
+        body: {},
+      }),
+    ).resolves.toMatchObject({ required: true, allowed: true });
+    expect(calls).toEqual(["platform", "workspace-one:manage_roles"]);
+  });
+
+  it("fails closed on platform administration reads for non-admins", async () => {
+    const repository = {
+      authorizePlatform: async () => ({
+        ...allowedDecision("platform", "platform", "platform.manage"),
+        allowed: false,
+        reason: "grant_missing",
+        grantIds: [],
+        effectivePermissions: [],
+        grantSource: "none",
+      }),
+      audit: async (_input: AuthorizationAuditInput) => undefined,
+    } as unknown as AuthorizationRepository;
+    const service = new AuthorizationService(repository);
+
+    await expect(
+      service.authorizeRoute({
+        requestId: "request-account-directory",
+        method: "GET",
+        route: "/api/v1/admin/accounts",
+        principal,
+        params: {},
+      }),
+    ).resolves.toMatchObject({
+      required: true,
+      allowed: false,
+      reason: "grant_missing",
+    });
+  });
 });

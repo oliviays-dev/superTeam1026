@@ -59,11 +59,17 @@ const SELF_WRITE_ROUTES = new Set([
 
 const PLATFORM_ADMIN_WRITE_PREFIXES = [
   "/api/v1/accounts/",
+  "/api/v1/admin/",
   "/api/v1/jobs/",
   "/api/v1/operations/",
   "/api/v1/project-templates",
   "/api/v1/template-roles",
   "/api/v1/workflow-templates",
+] as const;
+
+const PLATFORM_ADMIN_READ_PREFIXES = [
+  "/api/v1/accounts/",
+  "/api/v1/admin/",
 ] as const;
 
 const PLATFORM_ACCESS_WRITE_PREFIXES = [
@@ -143,8 +149,7 @@ function resourceRequirement(
       : { projectId, permission: "write" };
   }
   if (
-    (route === "/api/v1/teammate-templates" ||
-      route === "/api/v1/teammates") &&
+    (route === "/api/v1/teammate-templates" || route === "/api/v1/teammates") &&
     method === "POST"
   ) {
     const projectId = bodyProjectId(body);
@@ -430,6 +435,20 @@ function readProjectRequirement(
   return undefined;
 }
 
+function workspaceRoutePermission(
+  method: string,
+  route: string,
+): ScopedAuthorizationPermission | undefined {
+  const base = "/api/v1/workspaces/:workspaceId";
+  if (!route.startsWith(base)) return undefined;
+  if (route === base) {
+    return method === "GET" || method === "HEAD" ? "read" : "manage_roles";
+  }
+  if (route.startsWith(`${base}/members`)) return "manage_members";
+  if (route.startsWith(`${base}/grants`)) return "manage_roles";
+  return undefined;
+}
+
 export class AuthorizationService {
   constructor(private readonly repository: AuthorizationRepository) {}
 
@@ -485,6 +504,41 @@ export class AuthorizationService {
     return decision;
   }
 
+  async authorizeWorkspaceOrPlatform(input: {
+    readonly principal: AuthorizedRequestPrincipal;
+    readonly workspaceId: string;
+    readonly permission: ScopedAuthorizationPermission;
+    readonly action: string;
+    readonly requestId: string;
+  }): Promise<ScopeAuthorizationDecision> {
+    const platformDecision = await this.repository.authorizePlatform({
+      principalId: input.principal.principalId,
+      authSource: input.principal.authSource,
+    });
+    if (platformDecision.allowed) {
+      await this.auditDecision(
+        input.action,
+        input.requestId,
+        input.principal,
+        platformDecision,
+      );
+      return platformDecision;
+    }
+    const decision = await this.repository.authorizeWorkspace({
+      principalId: input.principal.principalId,
+      authSource: input.principal.authSource,
+      workspaceId: input.workspaceId,
+      permission: input.permission,
+    });
+    await this.auditDecision(
+      input.action,
+      input.requestId,
+      input.principal,
+      decision,
+    );
+    return decision;
+  }
+
   async authorizePlatform(input: {
     readonly principal: AuthorizedRequestPrincipal;
     readonly permission?: AuthorizationPermission;
@@ -517,6 +571,47 @@ export class AuthorizationService {
     }
 
     if (method === "GET" || method === "HEAD") {
+      if (
+        PLATFORM_ADMIN_READ_PREFIXES.some((prefix) =>
+          input.route.startsWith(prefix),
+        )
+      ) {
+        const decision = await this.authorizePlatform({
+          principal: input.principal,
+          action,
+          requestId: input.requestId,
+        });
+        return {
+          required: true,
+          allowed: decision.allowed,
+          decision,
+          ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+        };
+      }
+      const workspacePermission = workspaceRoutePermission(method, input.route);
+      if (workspacePermission !== undefined) {
+        const workspaceId = parameter(input.params, "workspaceId");
+        if (workspaceId === undefined) {
+          return {
+            required: true,
+            allowed: false,
+            reason: "workspace_id_required",
+          };
+        }
+        const decision = await this.authorizeWorkspaceOrPlatform({
+          principal: input.principal,
+          workspaceId,
+          permission: workspacePermission,
+          action,
+          requestId: input.requestId,
+        });
+        return {
+          required: true,
+          allowed: decision.allowed,
+          decision,
+          ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+        };
+      }
       const requirement = readProjectRequirement(
         method,
         input.route,
@@ -587,6 +682,31 @@ export class AuthorizationService {
 
     if (!["POST", "PUT", "PATCH", "DELETE"].includes(method)) {
       return { required: false };
+    }
+
+    const workspacePermission = workspaceRoutePermission(method, input.route);
+    if (workspacePermission !== undefined) {
+      const workspaceId = parameter(input.params, "workspaceId");
+      if (workspaceId === undefined) {
+        return {
+          required: true,
+          allowed: false,
+          reason: "workspace_id_required",
+        };
+      }
+      const decision = await this.authorizeWorkspaceOrPlatform({
+        principal: input.principal,
+        workspaceId,
+        permission: workspacePermission,
+        action,
+        requestId: input.requestId,
+      });
+      return {
+        required: true,
+        allowed: decision.allowed,
+        decision,
+        ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      };
     }
 
     const resource = resourceRequirement(

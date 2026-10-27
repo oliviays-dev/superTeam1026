@@ -17,7 +17,7 @@ integration("identity principal migration", () => {
     await database.close();
   });
 
-  it("applies migration 24 and preserves it through migration 25", async () => {
+  it("applies identity migrations and preserves legacy fields through migration 32", async () => {
     const schema = `batch14a_${randomUUID().replaceAll("-", "")}`;
     await database.query(`CREATE SCHEMA ${schema}`);
     const separator = databaseUrl!.includes("?") ? "&" : "?";
@@ -49,7 +49,7 @@ integration("identity principal migration", () => {
       const version = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(version.rows[0]?.version).toBe(31);
+      expect(version.rows[0]?.version).toBe(32);
 
       const tables = await isolated.query<{ table_name: string }>(
         `SELECT table_name
@@ -69,6 +69,7 @@ integration("identity principal migration", () => {
             "principals",
             "role_grants",
             "workspace_members",
+            "workspaces",
           ],
         ],
       );
@@ -82,6 +83,7 @@ integration("identity principal migration", () => {
         "principals",
         "role_grants",
         "workspace_members",
+        "workspaces",
       ]);
 
       const preserved = await isolated.query<{

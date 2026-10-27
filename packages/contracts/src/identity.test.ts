@@ -3,7 +3,11 @@ import {
   accountStatusInputSchema,
   authenticatedPrincipalSchema,
   changePasswordInputSchema,
+  createManagedAccountInputSchema,
   evaluateHumanSessionAccess,
+  platformPermissionsForRole,
+  workspacePermissionsForRole,
+  workspaceMemberSchema,
   loginInputSchema,
   loginResultSchema,
   parsePrincipalReference,
@@ -141,5 +145,50 @@ describe("identity principal contracts", () => {
     expect(accountStatusInputSchema.parse({ status: "disabled" })).toEqual({
       status: "disabled",
     });
+  });
+
+  it("defines non-inheriting platform and workspace roles", () => {
+    expect(platformPermissionsForRole("ADMIN")).toEqual([
+      "platform.access",
+      "platform.manage",
+    ]);
+    expect(platformPermissionsForRole("MEMBER")).toEqual(["platform.access"]);
+    expect(workspacePermissionsForRole("ADMIN")).toEqual([
+      "read",
+      "manage_members",
+      "manage_roles",
+    ]);
+    expect(workspacePermissionsForRole("MEMBER")).toEqual(["read"]);
+  });
+
+  it("validates invitation, password initialization, and membership versions", () => {
+    expect(
+      createManagedAccountInputSchema.parse({
+        loginId: " alice ",
+        displayName: "Alice",
+        credential: { mode: "invitation" },
+      }),
+    ).toMatchObject({
+      loginId: "alice",
+      credential: { mode: "invitation", expiresInSeconds: 604_800 },
+    });
+    expect(
+      createManagedAccountInputSchema.safeParse({
+        loginId: "alice",
+        displayName: "Alice",
+        credential: { mode: "password", password: "short" },
+      }).success,
+    ).toBe(false);
+    expect(
+      workspaceMemberSchema.safeParse({
+        id: "00000000-0000-4000-8000-000000000001",
+        workspaceId: "workspace-main",
+        principalId: "principal-human-alice",
+        status: "active",
+        version: 1,
+        createdAt: "2026-10-26T00:00:00.000Z",
+        updatedAt: "2026-10-26T00:00:00.000Z",
+      }).success,
+    ).toBe(true);
   });
 });

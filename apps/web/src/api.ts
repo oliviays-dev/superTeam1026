@@ -1,4 +1,8 @@
 import type {
+  AcceptCredentialActivationInput,
+  AccountDirectoryPage,
+  AccountDirectoryQuery,
+  AddWorkspaceMemberInput,
   ActionTicketBundle,
   Agent,
   AgentDetail,
@@ -16,6 +20,8 @@ import type {
   CreateAgentInput,
   CreateExternalRuntimeInput,
   CreateHandoffCardInput,
+  CreateManagedAccountInput,
+  CreateManagedAccountResult,
   CreateMeetingActionItemInput,
   CreateMemoryClaimInput,
   CreateMemoryTopicInput,
@@ -30,8 +36,11 @@ import type {
   ArchiveTaskAttachmentInput,
   CreateProjectInput,
   CreateProjectTemplateInput,
+  CreatePlatformGrantInput,
   CreateTaskInput,
   CreateTemplateRoleInput,
+  CreateWorkspaceGrantInput,
+  CreateWorkspaceInput,
   CreateWorkflowTemplateInput,
   CreateWorkflowInput,
   CosignWorkflowApprovalInput,
@@ -40,6 +49,7 @@ import type {
   DirectChatThread,
   DirectChatThreadListItem,
   DirectChatTurn,
+  CredentialActivationResult,
   ExternalRuntime,
   ExternalRuntimeCapabilitySnapshot,
   ExternalRuntimeDetail,
@@ -53,6 +63,8 @@ import type {
   Job,
   LoginInput,
   LoginResult,
+  IdentityAuditPage,
+  IdentityAuditQuery,
   HandoffCard,
   Meeting,
   MeetingActionItem,
@@ -98,6 +110,7 @@ import type {
   Run,
   RunDelta,
   RunDetail,
+  RoleGrant,
   RunExecutionEconomics,
   RuntimeAccessProjection,
   OperationsSnapshot,
@@ -114,6 +127,8 @@ import type {
   UpdateAgentInput,
   UpdateExternalRuntimeInput,
   UpdateHandoffCardInput,
+  UpdateGrantExpiryInput,
+  UpdateManagedAccountInput,
   UpdateMeetingAiPolicyInput,
   UpdateMemoryClaimInput,
   UpdateProjectMemberInput,
@@ -124,6 +139,8 @@ import type {
   UpdateWorkflowTemplateInput,
   UpdateTaskInput,
   UpdateWorkbenchBriefSettingsInput,
+  UpdateWorkspaceInput,
+  UpdateWorkspaceMemberStatusInput,
   ValidateWorkflowMarkdownInput,
   WorkbenchSummary,
   WorkbenchBriefGenerationResult,
@@ -145,6 +162,12 @@ import type {
   WorkspaceRuntimeCatalogItem,
   WorkspaceRuntimeEconomics,
   WorkspaceRuntimeEconomicsQuery,
+  Workspace,
+  WorkspaceDetail,
+  PlatformGrantPage,
+  PlatformGrantQuery,
+  PlatformRoleDefinition,
+  ManagedAccountDetail,
   ChangeTeammateStatusInput,
   CreateTeammateInput,
   CreateTeammateTemplateInput,
@@ -262,6 +285,239 @@ export async function logout(): Promise<void> {
 
 export async function currentPrincipal(): Promise<AuthenticatedPrincipal> {
   return request<AuthenticatedPrincipal>("/auth/me");
+}
+
+export async function acceptCredentialActivation(
+  input: AcceptCredentialActivationInput,
+): Promise<void> {
+  await request<void>("/auth/credential-activations", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function listManagedAccounts(
+  query: AccountDirectoryQuery,
+): Promise<AccountDirectoryPage> {
+  const params = new URLSearchParams();
+  if (query.query !== undefined && query.query !== "") {
+    params.set("query", query.query);
+  }
+  if (query.status !== undefined) params.set("status", query.status);
+  if (query.principalStatus !== undefined) {
+    params.set("principalStatus", query.principalStatus);
+  }
+  if (query.cursor !== undefined) params.set("cursor", query.cursor);
+  params.set("limit", String(query.limit));
+  return request(`/admin/accounts?${params.toString()}`);
+}
+
+export function getManagedAccount(
+  accountId: string,
+): Promise<ManagedAccountDetail> {
+  return request(`/admin/accounts/${encodeURIComponent(accountId)}`);
+}
+
+export function createManagedAccount(
+  input: CreateManagedAccountInput,
+): Promise<CreateManagedAccountResult> {
+  return request("/admin/accounts", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateManagedAccount(
+  accountId: string,
+  input: UpdateManagedAccountInput,
+): Promise<ManagedAccountDetail> {
+  return request(`/admin/accounts/${encodeURIComponent(accountId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function issueCredentialActivation(
+  accountId: string,
+  expiresInSeconds = 604_800,
+  reason = "administrator_reset",
+): Promise<CredentialActivationResult> {
+  return request(
+    `/admin/accounts/${encodeURIComponent(accountId)}/credential`,
+    {
+      method: "POST",
+      body: JSON.stringify({ expiresInSeconds, reason }),
+    },
+  );
+}
+
+export function setManagedAccountStatus(
+  accountId: string,
+  status: "active" | "disabled",
+): Promise<unknown> {
+  return request(`/accounts/${encodeURIComponent(accountId)}/status`, {
+    method: "POST",
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function listPlatformRoles(): Promise<PlatformRoleDefinition[]> {
+  return (
+    await request<{ items: PlatformRoleDefinition[] }>("/admin/platform-roles")
+  ).items;
+}
+
+export function listPlatformGrants(
+  query: PlatformGrantQuery,
+): Promise<PlatformGrantPage> {
+  const params = new URLSearchParams();
+  if (query.principalId !== undefined) {
+    params.set("principalId", query.principalId);
+  }
+  if (query.status !== undefined) params.set("status", query.status);
+  if (query.cursor !== undefined) params.set("cursor", query.cursor);
+  params.set("limit", String(query.limit));
+  return request(`/admin/platform-grants?${params.toString()}`);
+}
+
+export function createPlatformGrant(
+  input: CreatePlatformGrantInput,
+): Promise<RoleGrant> {
+  return request("/admin/platform-grants", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updatePlatformGrantExpiry(
+  grantId: string,
+  input: UpdateGrantExpiryInput,
+): Promise<RoleGrant> {
+  return request(`/admin/platform-grants/${grantId}/expiry`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function revokePlatformGrant(
+  grantId: string,
+  expectedVersion: number,
+  reason = "administrator_revoke",
+): Promise<RoleGrant> {
+  return request(`/admin/platform-grants/${grantId}/revoke`, {
+    method: "POST",
+    body: JSON.stringify({ expectedVersion, reason }),
+  });
+}
+
+export async function listWorkspaces(): Promise<Workspace[]> {
+  return (
+    await request<{ items: Workspace[] }>("/workspaces?includeArchived=true")
+  ).items;
+}
+
+export function getWorkspace(workspaceId: string): Promise<WorkspaceDetail> {
+  return request(`/workspaces/${encodeURIComponent(workspaceId)}`);
+}
+
+export function createWorkspace(
+  input: CreateWorkspaceInput,
+): Promise<WorkspaceDetail> {
+  return request("/workspaces", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWorkspace(
+  workspaceId: string,
+  input: UpdateWorkspaceInput,
+): Promise<WorkspaceDetail> {
+  return request(`/workspaces/${encodeURIComponent(workspaceId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function addWorkspaceMember(
+  workspaceId: string,
+  input: AddWorkspaceMemberInput,
+): Promise<WorkspaceDetail> {
+  return request(`/workspaces/${encodeURIComponent(workspaceId)}/members`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWorkspaceMemberStatus(
+  workspaceId: string,
+  memberId: string,
+  input: UpdateWorkspaceMemberStatusInput,
+): Promise<WorkspaceDetail> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/members/${memberId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function createWorkspaceGrant(
+  workspaceId: string,
+  input: CreateWorkspaceGrantInput,
+): Promise<RoleGrant> {
+  return request(`/workspaces/${encodeURIComponent(workspaceId)}/grants`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateWorkspaceGrantExpiry(
+  workspaceId: string,
+  grantId: string,
+  input: UpdateGrantExpiryInput,
+): Promise<RoleGrant> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/grants/${grantId}/expiry`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function revokeWorkspaceGrant(
+  workspaceId: string,
+  grantId: string,
+  expectedVersion: number,
+  reason = "administrator_revoke",
+): Promise<RoleGrant> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/grants/${grantId}/revoke`,
+    {
+      method: "POST",
+      body: JSON.stringify({ expectedVersion, reason }),
+    },
+  );
+}
+
+export function listIdentityAudit(
+  query: IdentityAuditQuery,
+): Promise<IdentityAuditPage> {
+  const params = new URLSearchParams();
+  if (query.accountId !== undefined) params.set("accountId", query.accountId);
+  if (query.subjectPrincipalId !== undefined) {
+    params.set("subjectPrincipalId", query.subjectPrincipalId);
+  }
+  if (query.actorPrincipalId !== undefined) {
+    params.set("actorPrincipalId", query.actorPrincipalId);
+  }
+  if (query.action !== undefined) params.set("action", query.action);
+  if (query.decision !== undefined) params.set("decision", query.decision);
+  if (query.cursor !== undefined) params.set("cursor", query.cursor);
+  params.set("limit", String(query.limit));
+  return request(`/admin/identity-audit?${params.toString()}`);
 }
 
 export async function listProjects(): Promise<Project[]> {
@@ -2011,13 +2267,10 @@ export function updateMeetingPrivateBriefing(
   briefingId: string,
   input: { expectedRevision: number; content: string },
 ): Promise<MeetingPrivateBriefing> {
-  return request(
-    `/meetings/${meetingId}/private-briefings/${briefingId}`,
-    {
-      method: "PATCH",
-      body: JSON.stringify(input),
-    },
-  );
+  return request(`/meetings/${meetingId}/private-briefings/${briefingId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
 }
 
 export function archiveMeetingPrivateBriefing(
@@ -2160,9 +2413,7 @@ export async function listMeetingTasks(
   meetingId: string,
 ): Promise<MeetingTask[]> {
   return (
-    await request<{ items: MeetingTask[] }>(
-      `/meetings/${meetingId}/tasks`,
-    )
+    await request<{ items: MeetingTask[] }>(`/meetings/${meetingId}/tasks`)
   ).items;
 }
 

@@ -168,3 +168,10 @@ export {
   verifyIdentityPassword,
   type IdentityRepositoryOptions,
 } from "./identity-repository.js";
+export {
+  IdentityAdministrationRepository,
+  IdentityAdministrationRepositoryError,
+  hashCredentialActivationToken,
+  type IdentityAdministrationErrorCode,
+  type IdentityAdministrationRepositoryOptions,
+} from "./identity-administration-repository.js";
