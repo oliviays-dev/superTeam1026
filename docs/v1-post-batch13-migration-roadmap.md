@@ -620,6 +620,7 @@ base:     Batch 18 local commit
 - [v1-batch13.1b-runtime-economics.md](./v1-batch13.1b-runtime-economics.md)
 - [v1-batch17b-ai-teammate.md](./v1-batch17b-ai-teammate.md)
 - [v1-batch18-meeting-collaboration.md](./v1-batch18-meeting-collaboration.md)
+- [v1-dsh-pluginmax-parity-gap-assessment.md](./v1-dsh-pluginmax-parity-gap-assessment.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)
