@@ -1,6 +1,6 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 14A-15B 已完成；下一正式批次为 Batch 16
+> 状态：Batch 14A-16 已完成；下一正式批次为 Batch 17A
 >
 > Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
 >
@@ -36,6 +36,9 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
   Envelope 与 Worker 快照复核；Migration 25 已落地。
 - Batch 15B 已完成版本化 Action Ticket、blocking/non-blocking Execution Gate、
   approve/reject/timeout/cancel、Worker 复核与幂等 usage；Migration 26 已落地。
+- Batch 16 已完成 Task、Workflow Node、Meeting、Direct Chat 的统一 Scene
+  Session Binding、Contribution、Chat Channel、增量 Cursor、确定性 Receipt
+  和重放；Migration 27 已落地。
 
 ### 2.2 主要缺口
 
@@ -46,7 +49,7 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
 | RBAC 消费 | 已完成 14C/14D 的主门禁和读授权；进入 15A 前审计 Application 残留 owner-only 二次门禁 | 防止 Route Grant 与 Application 门禁语义不一致 |
 | TaskExecutionPolicy | 已完成 15A：持久化 revision、统一 Preflight 和不可变 Run Envelope | 任务级 Runtime、工具、来源和预算已进入执行快照 |
 | Action Ticket / Gate | 已完成 15B：持久化 Ticket、Gate、不可变决策与 Worker 门禁 | 高风险动作具备可校验、可过期和可审计的执行边界 |
-| Scene Context | ContextPack/Receipt 已存在，但 Scene Session 与增量 Contribution 尚未统一 | 不同任务、会议、私聊的上下文隔离和重放不完整 |
+| Scene Context | 已完成 16：四类 Scene Session、Contribution、Channel、Cursor 和 Receipt 已统一 | 场景隔离、确定性重放和来源追溯已建立 |
 | Task / Teammate 深度 | 基础任务、AI 伙伴和 Worker 已有，工作队列、输入等待和自动执行深度不足 | 无法承接旧 Teammate 的完整工作流 |
 | Meeting Collaboration | AI 参与、Minutes、Action Item 已有，Delegate、私密嘱咐、文件和归档不足 | 会议协作仍是基础版 |
 | Shared Space | 尚无工作区共享路径、写审批、Locks 和文件审计 | 不能安全开放 Agent 文件写 |
@@ -344,7 +347,7 @@ Gate 最低能力：
 - Ticket 过期、上下文不匹配、Principal 停用和 Gate 拒绝均阻断执行。
 - 重试不产生重复外部副作用、Task 消息、Meeting 发言或 Direct Chat 回复。
 
-### Batch 16：Context 与 Scene Session
+### Batch 16：Context 与 Scene Session（已完成）
 
 目标：
 
@@ -537,7 +540,7 @@ HTTP Request
 - [x] Batch 14D RBAC 读授权闭环与 Project Capability
 - [x] Batch 15A TaskExecutionPolicy 与 Envelope
 - [x] Batch 15B Action Ticket 与 Execution Gate
-- [ ] Batch 16 Context 与 Scene Session
+- [x] Batch 16 Context 与 Scene Session
 - [ ] Batch 17A Task Execution Depth
 - [ ] Batch 17B AI Teammate
 - [ ] Batch 18 Meeting Collaboration
@@ -559,15 +562,16 @@ HTTP Request
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 16：Context 与 Scene Session**。
-Batch 16 尚未实现；15B 的 Ticket/Gate 语义不能由 Scene Context 绕过。
+下一执行批次为 **Batch 17A：Task Execution Depth**。
+Batch 16 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context 绕过。
+Shared Space、sandbox 扩展和 Batch 17 均未实现。
 
 建议在独立 worktree 执行：
 
 ```text
-worktree: /Users/oliviayang/Codex/一切皆插件/.tmp/pluginmax-platform-batch16-scene-context
-branch:   feat/v1-batch16-scene-context
-base:     <Batch 15B local commit>
+worktree: 独立 `.tmp/pluginmax-platform-batch17a-*`
+branch:   `feat/v1-batch17a-*`
+base:     Batch 16 local commit
 ```
 
 ## 13. 参考文档
@@ -579,6 +583,7 @@ base:     <Batch 15B local commit>
 - [v1-batch13-release-gate.md](./v1-batch13-release-gate.md)
 - [v1-batch15a-task-execution-policy.md](./v1-batch15a-task-execution-policy.md)
 - [v1-batch15b-action-ticket-gate.md](./v1-batch15b-action-ticket-gate.md)
+- [v1-batch16-scene-context.md](./v1-batch16-scene-context.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)

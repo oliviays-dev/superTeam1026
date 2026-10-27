@@ -165,9 +165,9 @@ Direct Chat self boundary。
 - Action Ticket
 - Execution Gate 的真实暂停、审批、恢复和超时
 
-Batch 15B 后仍未实现：
+Batch 15B 后的当时边界与后续状态：
 
-- Scene Context / Scene Session
+- Scene Context / Scene Session 已由后续 Batch 16 / Migration 27 完成
 - Shared Space
 - sandbox 扩展
 - `maxTurns` / `maxToolCalls` / `maxCost` 的 Runtime 级细粒度强制执行

@@ -4,6 +4,13 @@ import {
   type ExternalRunExecutionSnapshot,
 } from "./agent-runtime-binding.js";
 import { runExecutionEnvelopeSchema } from "./runtime-execution.js";
+import {
+  sceneContextContributionSchema,
+  sceneContextDeliveredContributionSchema,
+  sceneContextExcludedSourceSchema,
+  sceneSourceRefSchema,
+  sceneTypeSchema,
+} from "./scene-context.js";
 import { spanIdSchema, traceIdSchema } from "./trace.js";
 
 export const projectStatusSchema = z.enum(["active", "archived"]);
@@ -142,6 +149,7 @@ export const taskMessageSchema = z.object({
   authorName: z.string(),
   content: z.string().min(1).max(20_000),
   replyToId: z.string().uuid().nullable(),
+  isKeyConsensus: z.boolean().default(false),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type TaskMessage = z.infer<typeof taskMessageSchema>;
@@ -149,6 +157,7 @@ export type TaskMessage = z.infer<typeof taskMessageSchema>;
 export const createTaskMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
   replyToId: z.string().uuid().optional(),
+  isKeyConsensus: z.boolean().optional(),
 });
 export type CreateTaskMessageInput = z.infer<
   typeof createTaskMessageInputSchema
@@ -456,9 +465,23 @@ export const contextSourceSchema = z.object({
     "attachment",
     "memory",
     "conversation",
+    "workflow",
+    "workflow-node",
+    "meeting",
+    "meeting-message",
+    "minutes",
+    "comment",
+    "dependency",
+    "document",
+    "channel",
+    "run",
   ]),
   id: z.string(),
   label: z.string(),
+  version: z.string().optional(),
+  projectId: z.string().uuid().optional(),
+  sceneType: sceneTypeSchema.optional(),
+  sceneId: z.string().optional(),
 });
 export type ContextSource = z.infer<typeof contextSourceSchema>;
 
@@ -478,6 +501,15 @@ export const contextPackSchema = z.object({
   renderedPrompt: z.string(),
   contentHash: z.string().length(64),
   createdAt: z.string().datetime({ offset: true }),
+  sceneType: sceneTypeSchema.optional(),
+  sceneId: z.string().optional(),
+  sceneSessionId: z.string().uuid().optional(),
+  sessionHandle: z.string().optional(),
+  agentPrincipalId: z.string().nullable().optional(),
+  contributions: z.array(sceneContextContributionSchema).default([]),
+  logicalDigest: z.string().length(64).optional(),
+  rendererVersion: z.string().optional(),
+  asOf: z.string().datetime({ offset: true }).optional(),
 });
 export type ContextPack = z.infer<typeof contextPackSchema>;
 
@@ -488,6 +520,24 @@ export const contextReceiptSchema = z.object({
   excludedSources: z.array(contextSourceSchema),
   reason: z.string(),
   createdAt: z.string().datetime({ offset: true }),
+  id: z.string().uuid().optional(),
+  sceneType: sceneTypeSchema.optional(),
+  sceneId: z.string().optional(),
+  sceneSessionId: z.string().uuid().optional(),
+  agentPrincipalId: z.string().nullable().optional(),
+  logicalDigest: z.string().length(64).optional(),
+  rendererVersion: z.string().optional(),
+  runtimeStateful: z.boolean().optional(),
+  cursorBefore: z.number().int().nonnegative().optional(),
+  cursorAfter: z.number().int().nonnegative().optional(),
+  deliveredContributions: z
+    .array(sceneContextDeliveredContributionSchema)
+    .default([]),
+  reusedContributions: z
+    .array(sceneContextDeliveredContributionSchema)
+    .default([]),
+  sceneExcludedSources: z.array(sceneContextExcludedSourceSchema).default([]),
+  sourceRefs: z.array(sceneSourceRefSchema).default([]),
 });
 export type ContextReceipt = z.infer<typeof contextReceiptSchema>;
 

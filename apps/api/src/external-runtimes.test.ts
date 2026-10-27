@@ -49,7 +49,7 @@ integration("external runtime management API", () => {
       ),
       logger: false,
       localActorId: administrator,
-      expectedMigrationVersion: 26,
+      expectedMigrationVersion: 27,
     }).app;
     await app.ready();
   });

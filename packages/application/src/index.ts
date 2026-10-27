@@ -67,6 +67,7 @@ import type {
   PublishMeetingMinutesInput,
   ReviewMemoryClaimsInput,
   CreateProjectTemplateInput,
+  CreateSceneContextContributionInput,
   CreateTemplateRoleInput,
   CreateWorkflowTemplateInput,
   CopyProjectTemplateInput,
@@ -84,6 +85,8 @@ import type {
   UpdateWorkflowTemplateInput,
   WorkflowTemplate,
   RunDetail,
+  SceneContextReplayResult,
+  SceneContextSnapshot,
   RunInputSnapshot,
   SendDirectChatMessageInput,
   SetAgentRuntimeBindingInput,
@@ -174,6 +177,7 @@ import {
   MeetingAiPreconditionError,
   MemoryReviewConflictError,
   ProjectTemplateRepositoryError,
+  SceneContextRepositoryError,
   type PlatformRepositories,
   type ScopedAuthorizationPermission,
   type TaskAttachment,
@@ -191,15 +195,18 @@ import {
   type TaskExecutionPreparation,
 } from "./task-execution-preflight.js";
 import { ExecutionGateService } from "./execution-gate.js";
+import { SceneContextService } from "./scene-context.js";
 
 export {
   TaskExecutionPreflightError,
   executionEnvelopeDigest,
 } from "./task-execution-preflight.js";
+export { ExecutionGateError, ExecutionGateService } from "./execution-gate.js";
 export {
-  ExecutionGateError,
-  ExecutionGateService,
-} from "./execution-gate.js";
+  SceneContextService,
+  type PreparedSceneContext,
+  type PrepareSceneContextInput,
+} from "./scene-context.js";
 
 export {
   AuthorizationService,
@@ -272,6 +279,7 @@ export class PlatformApplication {
   private readonly agentRuntimePreflight: AgentRuntimePreflightService;
   private readonly taskExecutionPreflight: TaskExecutionPreflightService;
   private readonly executionGates: ExecutionGateService;
+  private readonly sceneContext: SceneContextService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
@@ -282,6 +290,7 @@ export class PlatformApplication {
       repositories,
     );
     this.executionGates = new ExecutionGateService(repositories);
+    this.sceneContext = new SceneContextService(repositories);
   }
 
   listProjects(projectIds?: readonly string[]): Promise<Project[]> {
@@ -1697,6 +1706,8 @@ export class PlatformApplication {
   async postTaskMessage(
     id: string,
     input: CreateTaskMessageInput,
+    actorId = "local-admin",
+    actorName = "Local Admin",
   ): Promise<TaskMessage> {
     await this.getTask(id);
     if (input.replyToId !== undefined) {
@@ -1713,17 +1724,18 @@ export class PlatformApplication {
       id,
       input,
       "human",
-      "local-admin",
-      "Local Admin",
+      actorId,
+      actorName,
     );
     await this.repositories.taskCollaboration.appendEvent({
       taskId: id,
       kind: "message",
-      actorId: "local-admin",
-      actorName: "Local Admin",
+      actorId,
+      actorName,
       summary: input.replyToId === undefined ? "添加任务评论" : "回复任务评论",
       data: {
         messageId: message.id,
+        isKeyConsensus: message.isKeyConsensus,
         ...(input.replyToId === undefined
           ? {}
           : { replyToId: input.replyToId }),
@@ -1742,11 +1754,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ) {
     const task = await this.getTask(taskId);
-    await this.requireActiveProjectPermission(
-      task.projectId,
-      "write",
-      actorId,
-    );
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
     if (this.files === undefined) {
       throw new ApplicationError(
         "file_store_unavailable",
@@ -2028,6 +2036,93 @@ export class PlatformApplication {
     return context;
   }
 
+  async getRunSceneContext(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<{
+    readonly scene: SceneContextSnapshot;
+    readonly pack: NonNullable<
+      Awaited<ReturnType<PlatformRepositories["contexts"]["getByRun"]>>
+    >["pack"];
+  }> {
+    await this.getRunDetail(runId, actorId);
+    const [scene, context] = await Promise.all([
+      this.sceneContext.getRunSnapshot(runId, actorId),
+      this.repositories.contexts.getByRun(runId),
+    ]);
+    if (scene === undefined || context === undefined) {
+      throw new ApplicationError(
+        "scene_context_not_ready",
+        "Scene Context is not available for this run",
+        404,
+      );
+    }
+    return { scene, pack: context.pack };
+  }
+
+  async replayRunSceneContext(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<SceneContextReplayResult> {
+    const current = await this.getRunSceneContext(runId, actorId);
+    const receipt = current.scene.receipt;
+    if (receipt === null) {
+      throw new ApplicationError(
+        "scene_context_not_ready",
+        "Scene Context receipt is unavailable",
+        404,
+      );
+    }
+    const deterministic =
+      current.pack.logicalDigest === receipt.logicalDigest &&
+      current.pack.contentHash === receipt.contentHash &&
+      current.pack.id === receipt.contextPackId;
+    return {
+      replayed: true,
+      deterministic,
+      logicalDigest: receipt.logicalDigest,
+      contextPackId: current.pack.id,
+      receiptId: receipt.id,
+      snapshot: current.scene,
+    };
+  }
+
+  async appendRunSceneContribution(
+    runId: string,
+    input: CreateSceneContextContributionInput,
+    actorId = "local-admin",
+  ) {
+    const detail = await this.getRunDetail(runId, actorId);
+    if (detail.run.projectId !== null) {
+      await this.requireActiveProjectPermission(
+        detail.run.projectId,
+        "write",
+        actorId,
+      );
+    } else if (
+      !(await this.repositories.directChats.canAccessRun(runId, actorId))
+    ) {
+      throw new ApplicationError(
+        "direct_chat_forbidden",
+        "The AI direct chat belongs to another account",
+        403,
+      );
+    }
+    try {
+      return await this.sceneContext.addContribution(runId, input, actorId);
+    } catch (error) {
+      if (error instanceof SceneContextRepositoryError) {
+        throw new ApplicationError(
+          error.code,
+          error.message,
+          409,
+          error.details,
+        );
+      }
+      throw error;
+    }
+  }
+
   async getRunExecutionEnvelope(
     runId: string,
     actorId = "local-admin",
@@ -2181,7 +2276,9 @@ export class PlatformApplication {
       );
       return;
     }
-    if (!(await this.repositories.directChats.canAccessRun(gate.runId, actorId))) {
+    if (
+      !(await this.repositories.directChats.canAccessRun(gate.runId, actorId))
+    ) {
       throw new ApplicationError(
         "direct_chat_forbidden",
         "The AI direct chat belongs to another account",
@@ -5521,7 +5618,11 @@ export class PlatformApplication {
     input: CreateMeetingInput,
     actorId = "local-admin",
   ): Promise<Meeting> {
-    await this.requireActiveProjectPermission(input.projectId, "write", actorId);
+    await this.requireActiveProjectPermission(
+      input.projectId,
+      "write",
+      actorId,
+    );
     const members = await this.repositories.projectMemberships.listMembers(
       input.projectId,
     );

@@ -5601,6 +5601,156 @@ code {
   white-space: nowrap;
 }
 
+.scene-context-section {
+  display: grid;
+  gap: 10px;
+}
+
+.scene-context-section .section-title {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.scene-replay-button {
+  min-height: 26px;
+  padding: 3px 7px;
+  font-size: 9.5px;
+}
+
+.scene-context-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.scene-context-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 5px;
+  background: var(--pm-bg-base);
+}
+
+.scene-context-grid span {
+  color: var(--pm-label-tertiary);
+  font-size: 9px;
+}
+
+.scene-context-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-context-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  color: var(--pm-label-tertiary);
+  font-size: 9.5px;
+}
+
+.scene-context-meta code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.scene-replay-verified {
+  color: var(--pm-success);
+}
+
+.scene-replay-error {
+  color: var(--pm-danger);
+}
+
+.scene-contribution-list {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.scene-contribution {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 6px;
+  background: var(--pm-bg-base);
+}
+
+.scene-contribution > div:first-child {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.scene-contribution > div:first-child code {
+  margin-left: auto;
+  color: var(--pm-label-tertiary);
+  font-size: 9px;
+}
+
+.scene-contribution p {
+  margin: 0;
+  color: var(--pm-label-secondary);
+  font-size: 10.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.scene-source-refs {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.scene-source-refs code {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--pm-label-tertiary);
+  background: var(--pm-bg-layer-2);
+  font-size: 8.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .scene-context-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .scene-contribution-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  .scene-context-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scene-context-section .section-title {
+    flex-wrap: wrap;
+  }
+
+  .scene-context-section .gate-ticket-meta {
+    margin-left: 0;
+  }
+}
+
 .runtime-capability-note,
 .muted-row {
   margin: 0 0 9px;

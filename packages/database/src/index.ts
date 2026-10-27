@@ -24,6 +24,10 @@ export {
 } from "./authorization-repository.js";
 export { ContextRepository } from "./context-repository.js";
 export {
+  SceneContextRepository,
+  SceneContextRepositoryError,
+} from "./scene-context-repository.js";
+export {
   TaskExecutionPolicyRepository,
   type ReplaceTaskExecutionPolicyResult,
 } from "./task-execution-policy-repository.js";

@@ -366,7 +366,7 @@ integration("RBAC read authorization API", () => {
       fileStoreRoot: join(directory, "files"),
       logger: false,
       authMode: "bearer",
-      expectedMigrationVersion: 26,
+      expectedMigrationVersion: 27,
     });
     app = built.app;
     await app.ready();

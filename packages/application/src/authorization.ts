@@ -199,6 +199,16 @@ function resourceRequirement(
       permission: "write",
     };
   }
+  if (
+    route === "/api/v1/runs/:runId/scene-context/contributions" &&
+    method === "POST"
+  ) {
+    return {
+      resourceType: "run",
+      resourceId: parameter(params, "runId"),
+      permission: "write",
+    };
+  }
   if (route === "/api/v1/execution-gates/:gateId/decisions") {
     return {
       resourceType: "execution-gate",

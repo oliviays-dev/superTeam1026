@@ -3016,3 +3016,295 @@ BEFORE UPDATE OR DELETE ON action_ticket_usages
 FOR EACH ROW
 EXECUTE FUNCTION pluginmax_guard_action_ticket_usage_mutation();
 `;
+
+export const SCENE_CONTEXT_SCHEMA_SQL = `
+ALTER TABLE task_messages
+  ADD COLUMN IF NOT EXISTS is_key_consensus BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS task_messages_key_consensus_idx
+  ON task_messages(task_id, created_at, id)
+  WHERE is_key_consensus = TRUE;
+
+CREATE TABLE IF NOT EXISTS scene_chat_channels (
+  id UUID PRIMARY KEY,
+  channel_key TEXT NOT NULL UNIQUE
+    CHECK (length(btrim(channel_key)) BETWEEN 1 AND 800),
+  scene_type TEXT NOT NULL
+    CHECK (scene_type = 'direct-chat'),
+  scene_id TEXT NOT NULL
+    CHECK (length(btrim(scene_id)) BETWEEN 1 AND 240),
+  project_id UUID REFERENCES projects(id) ON DELETE RESTRICT,
+  owner_principal_id TEXT NOT NULL
+    CHECK (length(btrim(owner_principal_id)) BETWEEN 1 AND 180),
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT
+    CHECK (
+      agent_principal_id IS NULL
+      OR length(btrim(agent_principal_id)) BETWEEN 1 AND 180
+    ),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (scene_type, scene_id, owner_principal_id, agent_id)
+);
+
+CREATE TABLE IF NOT EXISTS scene_sessions (
+  id UUID PRIMARY KEY,
+  scene_type TEXT NOT NULL
+    CHECK (scene_type IN ('task', 'workflow-node', 'meeting', 'direct-chat')),
+  scene_id TEXT NOT NULL
+    CHECK (length(btrim(scene_id)) BETWEEN 1 AND 240),
+  project_id UUID REFERENCES projects(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT
+    CHECK (
+      agent_principal_id IS NULL
+      OR length(btrim(agent_principal_id)) BETWEEN 1 AND 180
+    ),
+  owner_principal_id TEXT
+    CHECK (
+      owner_principal_id IS NULL
+      OR length(btrim(owner_principal_id)) BETWEEN 1 AND 180
+    ),
+  principal_scope TEXT NOT NULL DEFAULT ''
+    CHECK (length(principal_scope) <= 180),
+  channel_id UUID REFERENCES scene_chat_channels(id) ON DELETE RESTRICT,
+  session_handle TEXT NOT NULL UNIQUE
+    CHECK (length(btrim(session_handle)) BETWEEN 1 AND 240),
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived', 'reset')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (scene_type, scene_id, agent_id, principal_scope, generation),
+  UNIQUE (id, scene_type, scene_id)
+);
+
+CREATE INDEX IF NOT EXISTS scene_sessions_project_idx
+  ON scene_sessions(project_id, scene_type, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS scene_sessions_scene_idx
+  ON scene_sessions(scene_type, scene_id, agent_id, generation DESC);
+
+CREATE TABLE IF NOT EXISTS scene_context_contributions (
+  id UUID PRIMARY KEY,
+  scene_session_id UUID NOT NULL,
+  scene_type TEXT NOT NULL
+    CHECK (scene_type IN ('task', 'workflow-node', 'meeting', 'direct-chat')),
+  scene_id TEXT NOT NULL
+    CHECK (length(btrim(scene_id)) BETWEEN 1 AND 240),
+  project_id UUID REFERENCES projects(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT
+    CHECK (
+      agent_principal_id IS NULL
+      OR length(btrim(agent_principal_id)) BETWEEN 1 AND 180
+    ),
+  owner_principal_id TEXT
+    CHECK (
+      owner_principal_id IS NULL
+      OR length(btrim(owner_principal_id)) BETWEEN 1 AND 180
+    ),
+  source_key TEXT NOT NULL
+    CHECK (length(btrim(source_key)) BETWEEN 1 AND 240),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'task-comment-consensus',
+    'task-dependency',
+    'task-attachment',
+    'workflow-node',
+    'meeting-minutes',
+    'meeting-private-note',
+    'direct-chat-message',
+    'agent-memory',
+    'project-memory',
+    'manual'
+  )),
+  version TEXT NOT NULL DEFAULT '1'
+    CHECK (length(btrim(version)) BETWEEN 1 AND 120),
+  authority TEXT NOT NULL
+    CHECK (authority IN ('mandatory', 'instruction', 'evidence')),
+  visibility TEXT NOT NULL
+    CHECK (visibility IN ('scene', 'project', 'private')),
+  text TEXT NOT NULL
+    CHECK (length(btrim(text)) BETWEEN 1 AND 20000),
+  source_refs JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(source_refs) = 'array'),
+  delivery_sequence BIGSERIAL UNIQUE,
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  FOREIGN KEY (scene_session_id, scene_type, scene_id)
+    REFERENCES scene_sessions(id, scene_type, scene_id)
+    ON DELETE RESTRICT,
+  UNIQUE (scene_session_id, source_key, version)
+);
+
+CREATE INDEX IF NOT EXISTS scene_context_contributions_session_idx
+  ON scene_context_contributions(
+    scene_session_id,
+    delivery_sequence,
+    id
+  );
+
+CREATE INDEX IF NOT EXISTS scene_context_contributions_project_idx
+  ON scene_context_contributions(project_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_scene_context_contribution_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'scene context contributions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS scene_context_contributions_immutable
+  ON scene_context_contributions;
+CREATE TRIGGER scene_context_contributions_immutable
+BEFORE UPDATE OR DELETE ON scene_context_contributions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_scene_context_contribution_mutation();
+
+ALTER TABLE context_packs
+  ADD COLUMN IF NOT EXISTS scene_session_id UUID,
+  ADD COLUMN IF NOT EXISTS scene_type TEXT,
+  ADD COLUMN IF NOT EXISTS scene_id TEXT,
+  ADD COLUMN IF NOT EXISTS agent_principal_id TEXT,
+  ADD COLUMN IF NOT EXISTS logical_digest TEXT,
+  ADD COLUMN IF NOT EXISTS renderer_version TEXT,
+  ADD COLUMN IF NOT EXISTS as_of TIMESTAMPTZ;
+
+ALTER TABLE context_packs
+  DROP CONSTRAINT IF EXISTS context_packs_scene_type_check,
+  DROP CONSTRAINT IF EXISTS context_packs_scene_session_fkey;
+
+ALTER TABLE context_packs
+  ADD CONSTRAINT context_packs_scene_type_check
+    CHECK (
+      scene_type IS NULL
+      OR scene_type IN ('task', 'workflow-node', 'meeting', 'direct-chat')
+    ),
+  ADD CONSTRAINT context_packs_scene_session_fkey
+    FOREIGN KEY (scene_session_id, scene_type, scene_id)
+    REFERENCES scene_sessions(id, scene_type, scene_id)
+    ON DELETE RESTRICT;
+
+CREATE INDEX IF NOT EXISTS context_packs_scene_session_idx
+  ON context_packs(scene_session_id, created_at DESC)
+  WHERE scene_session_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS scene_context_receipts (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE RESTRICT,
+  context_pack_id UUID NOT NULL UNIQUE
+    REFERENCES context_packs(id) ON DELETE RESTRICT,
+  scene_session_id UUID NOT NULL,
+  scene_type TEXT NOT NULL
+    CHECK (scene_type IN ('task', 'workflow-node', 'meeting', 'direct-chat')),
+  scene_id TEXT NOT NULL
+    CHECK (length(btrim(scene_id)) BETWEEN 1 AND 240),
+  project_id UUID REFERENCES projects(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  principal_id TEXT NOT NULL
+    CHECK (length(btrim(principal_id)) BETWEEN 1 AND 180),
+  agent_principal_id TEXT
+    CHECK (
+      agent_principal_id IS NULL
+      OR length(btrim(agent_principal_id)) BETWEEN 1 AND 180
+    ),
+  logical_digest TEXT NOT NULL CHECK (logical_digest ~ '^[a-f0-9]{64}$'),
+  content_hash TEXT NOT NULL CHECK (content_hash ~ '^[a-f0-9]{64}$'),
+  renderer_version TEXT NOT NULL,
+  runtime_stateful BOOLEAN NOT NULL,
+  cursor_before BIGINT NOT NULL CHECK (cursor_before >= 0),
+  cursor_after BIGINT NOT NULL CHECK (cursor_after >= cursor_before),
+  delivered JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(delivered) = 'array'),
+  reused JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(reused) = 'array'),
+  source_refs JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(source_refs) = 'array'),
+  excluded JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(excluded) = 'array'),
+  created_at TIMESTAMPTZ NOT NULL,
+  FOREIGN KEY (scene_session_id, scene_type, scene_id)
+    REFERENCES scene_sessions(id, scene_type, scene_id)
+    ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS scene_context_receipts_session_idx
+  ON scene_context_receipts(scene_session_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_scene_context_receipt_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'scene context receipts are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS scene_context_receipts_immutable
+  ON scene_context_receipts;
+CREATE TRIGGER scene_context_receipts_immutable
+BEFORE UPDATE OR DELETE ON scene_context_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_scene_context_receipt_mutation();
+
+CREATE TABLE IF NOT EXISTS scene_context_delivery_cursors (
+  scene_session_id UUID PRIMARY KEY
+    REFERENCES scene_sessions(id) ON DELETE RESTRICT,
+  cursor_sequence BIGINT NOT NULL DEFAULT 0 CHECK (cursor_sequence >= 0),
+  delivered_contribution_ids UUID[] NOT NULL DEFAULT '{}'::uuid[],
+  last_run_id UUID REFERENCES runs(id) ON DELETE RESTRICT,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_scene_session_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.id IS DISTINCT FROM NEW.id
+    OR OLD.scene_type IS DISTINCT FROM NEW.scene_type
+    OR OLD.scene_id IS DISTINCT FROM NEW.scene_id
+    OR OLD.agent_id IS DISTINCT FROM NEW.agent_id
+    OR OLD.agent_principal_id IS DISTINCT FROM NEW.agent_principal_id
+    OR OLD.owner_principal_id IS DISTINCT FROM NEW.owner_principal_id
+    OR OLD.channel_id IS DISTINCT FROM NEW.channel_id
+    OR OLD.session_handle IS DISTINCT FROM NEW.session_handle
+    OR OLD.generation IS DISTINCT FROM NEW.generation
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'scene session identity is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS scene_sessions_identity_immutable ON scene_sessions;
+CREATE TRIGGER scene_sessions_identity_immutable
+BEFORE UPDATE ON scene_sessions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_scene_session_identity();
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_scene_context_pack_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.scene_session_id IS NOT NULL THEN
+    RAISE EXCEPTION 'scene context packs are immutable';
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS context_packs_scene_immutable ON context_packs;
+CREATE TRIGGER context_packs_scene_immutable
+BEFORE UPDATE OR DELETE ON context_packs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_scene_context_pack_mutation();
+`;

@@ -62,6 +62,8 @@
     "test:e2e:task-policy": "./scripts/task-execution-policy-e2e.sh",
     "test:integration:action-ticket": "./scripts/action-ticket-vitest.sh",
     "test:e2e:action-ticket": "./scripts/action-ticket-e2e.sh",
+    "test:integration:scene-context": "./scripts/scene-context-vitest.sh",
+    "test:e2e:scene-context": "./scripts/scene-context-e2e.sh",
     "test:integration:project-templates": "./scripts/project-templates-vitest.sh",
     "test:integration:external-runtime": "./scripts/external-runtime-vitest.sh",
     "test:smoke:external-runtime-postgres": "./scripts/external-runtime-postgres-smoke.sh",

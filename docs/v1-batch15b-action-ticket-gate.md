@@ -1,7 +1,7 @@
 # V1 Batch 15B：Action Ticket 与 Execution Gate
 
-> 状态：Batch 15B 已完成。Batch 16 Scene Context、Shared Space 与 sandbox
-> 仍未实现，也不在本批冒充完成。
+> 状态：Batch 15B 已完成。Batch 16 已在后续独立批次完成；Shared Space 与
+> sandbox 仍未实现，也不在本批冒充完成。
 
 ## 1. 基线
 
@@ -149,9 +149,10 @@ enforcement、过期时间与不可变决策，并支持批准、拒绝和取消
 
 ## 9. 本批边界
 
-未实现：
+后续状态：
 
-- Batch 16 Scene Context / Scene Session
+- Batch 16 Scene Context / Scene Session 已由 Migration 27 和
+  [v1-batch16-scene-context.md](./v1-batch16-scene-context.md) 完成。
 - Shared Space、路径级 Grant、Locks、Global Write
 - sandbox 扩展
 - Provider Session resume

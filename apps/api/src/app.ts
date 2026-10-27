@@ -20,6 +20,7 @@ import {
   createProjectMemberInputSchema,
   createProjectInputSchema,
   createProjectRoleInputSchema,
+  createSceneContextContributionInputSchema,
   createProjectTemplateInputSchema,
   createTemplateRoleInputSchema,
   createWorkflowTemplateInputSchema,
@@ -345,7 +346,7 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 25;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 27;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -702,8 +703,7 @@ export function buildApi(options: BuildApiOptions): {
   registerExecutionPolicyRoutes({
     path: "/api/v1/projects/:projectId/execution-policy",
     contextType: "project",
-    contextId: (params) =>
-      projectParamsSchema.parse(params).projectId,
+    contextId: (params) => projectParamsSchema.parse(params).projectId,
   });
   registerExecutionPolicyRoutes({
     path: "/api/v1/tasks/:id/execution-policy",
@@ -713,14 +713,12 @@ export function buildApi(options: BuildApiOptions): {
   registerExecutionPolicyRoutes({
     path: "/api/v1/meetings/:meetingId/execution-policy",
     contextType: "meeting",
-    contextId: (params) =>
-      meetingParamsSchema.parse(params).meetingId,
+    contextId: (params) => meetingParamsSchema.parse(params).meetingId,
   });
   registerExecutionPolicyRoutes({
     path: "/api/v1/direct-chats/:threadId/execution-policy",
     contextType: "direct-chat",
-    contextId: (params) =>
-      directChatParamsSchema.parse(params).threadId,
+    contextId: (params) => directChatParamsSchema.parse(params).threadId,
   });
 
   app.get("/api/v1/health", async (_request, reply) => {
@@ -1734,7 +1732,17 @@ export function buildApi(options: BuildApiOptions): {
   app.post("/api/v1/tasks/:id/messages", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const input = createTaskMessageInputSchema.parse(request.body);
-    return reply.status(201).send(await application.postTaskMessage(id, input));
+    const actorId = requestActorId(request.headers);
+    return reply
+      .status(201)
+      .send(
+        await application.postTaskMessage(
+          id,
+          input,
+          actorId,
+          requestActorName(request.headers, actorId),
+        ),
+      );
   });
 
   app.post("/api/v1/tasks/:id/attachments", async (request, reply) => {
@@ -1793,7 +1801,11 @@ export function buildApi(options: BuildApiOptions): {
       const { archived } = archiveTaskAttachmentInputSchema.parse(request.body);
       const actorId = requestActorId(request.headers);
       return reply.send(
-        await application.archiveTaskAttachment(attachmentId, archived, actorId),
+        await application.archiveTaskAttachment(
+          attachmentId,
+          archived,
+          actorId,
+        ),
       );
     },
   );
@@ -1853,6 +1865,39 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.getRunContext(runId, actorId));
   });
 
+  app.get("/api/v1/runs/:runId/scene-context", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getRunSceneContext(runId, actorId));
+  });
+
+  app.get(
+    "/api/v1/runs/:runId/scene-context/replay",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.replayRunSceneContext(runId, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/runs/:runId/scene-context/contributions",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const input = createSceneContextContributionInputSchema.parse(
+        request.body,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply
+        .status(201)
+        .send(
+          await application.appendRunSceneContribution(runId, input, actorId),
+        );
+    },
+  );
+
   app.get("/api/v1/runs/:runId/execution-envelope", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
     const actorId = requestActorId(request.headers);
@@ -1887,17 +1932,14 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
-  app.post(
-    "/api/v1/execution-gates/:gateId/cancel",
-    async (request, reply) => {
-      const { gateId } = executionGateParamsSchema.parse(request.params);
-      const input = cancelExecutionGateInputSchema.parse(request.body);
-      const actorId = requestActorId(request.headers);
-      return reply.send(
-        await application.cancelExecutionGate(gateId, input, actorId),
-      );
-    },
-  );
+  app.post("/api/v1/execution-gates/:gateId/cancel", async (request, reply) => {
+    const { gateId } = executionGateParamsSchema.parse(request.params);
+    const input = cancelExecutionGateInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.cancelExecutionGate(gateId, input, actorId),
+    );
+  });
 
   app.get("/api/v1/runs/:runId/artifacts", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);

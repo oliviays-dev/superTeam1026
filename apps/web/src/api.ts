@@ -75,6 +75,8 @@ import type {
   ProjectRole,
   ProjectTemplate,
   ProjectTemplateRevisionSummary,
+  SceneContextReplayResult,
+  SceneContextSnapshot,
   ProjectReportDetail,
   ProjectReportGenerationResult,
   ProjectReportSummary,
@@ -737,6 +739,19 @@ export function getRunContext(
   runId: string,
 ): Promise<{ pack: ContextPack; receipt: ContextReceipt }> {
   return request(`/runs/${runId}/context`);
+}
+
+export function getRunSceneContext(runId: string): Promise<{
+  scene: SceneContextSnapshot;
+  pack: ContextPack;
+}> {
+  return request(`/runs/${runId}/scene-context`);
+}
+
+export function replayRunSceneContext(
+  runId: string,
+): Promise<SceneContextReplayResult> {
+  return request(`/runs/${runId}/scene-context/replay`);
 }
 
 export function getRunEvents(

@@ -82,6 +82,7 @@ import { AgentRuntimeBindingRepository } from "./agent-runtime-binding-repositor
 import { AuthorizationRepository } from "./authorization-repository.js";
 import { TaskExecutionPolicyRepository } from "./task-execution-policy-repository.js";
 import { ActionTicketRepository } from "./action-ticket-repository.js";
+import { SceneContextRepository } from "./scene-context-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -549,8 +550,8 @@ export class TaskRepository {
     const result = await this.database.query<TaskMessageRow>(
       `INSERT INTO task_messages (
          id, task_id, author_type, author_id, author_name,
-         content, reply_to_id, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+         content, reply_to_id, is_key_consensus, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
        RETURNING *`,
       [
         randomUUID(),
@@ -560,6 +561,7 @@ export class TaskRepository {
         authorName,
         input.content,
         input.replyToId ?? null,
+        input.isKeyConsensus ?? false,
       ],
     );
     return taskMessageFromRow(result.rows[0]!);
@@ -1828,6 +1830,7 @@ export class PlatformRepositories {
   readonly runs: RunRepository;
   readonly jobs: JobRepository;
   readonly contexts: ContextRepository;
+  readonly sceneContext: SceneContextRepository;
   readonly projectMemberships: ProjectMembershipRepository;
   readonly projectTemplates: ProjectTemplatesRepository;
   readonly artifacts: ArtifactRepository;
@@ -1860,6 +1863,7 @@ export class PlatformRepositories {
     this.runs = new RunRepository(database, this.actionTickets);
     this.jobs = new JobRepository(database);
     this.contexts = new ContextRepository(database);
+    this.sceneContext = new SceneContextRepository(database);
     this.projectMemberships = new ProjectMembershipRepository(
       database,
       this.authorization,

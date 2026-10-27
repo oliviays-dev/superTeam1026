@@ -9,11 +9,6 @@ import {
   type AgentRuntimeEvent,
   type DshSdkAdapterOptions,
 } from "@pluginmax/agent-runtime";
-import {
-  buildDirectChatContext,
-  buildMeetingContext,
-  buildTaskContext,
-} from "@pluginmax/context";
 import type {
   ActionTicketAction,
   Agent,
@@ -32,11 +27,9 @@ import {
 import { isTerminalRunStatus } from "@pluginmax/domain";
 import { LocalFileStore } from "@pluginmax/files";
 import { AgentRuntimePreflightService } from "./agent-runtime-preflight.js";
-import {
-  ExecutionGateError,
-  ExecutionGateService,
-} from "./execution-gate.js";
+import { ExecutionGateError, ExecutionGateService } from "./execution-gate.js";
 import { executionEnvelopeDigest } from "./task-execution-preflight.js";
+import { SceneContextService } from "./scene-context.js";
 
 export class RunCancelledError extends Error {
   constructor() {
@@ -130,6 +123,7 @@ export class RunExecutor {
   private readonly fileStore: LocalFileStore;
   private readonly preflight: AgentRuntimePreflightService;
   private readonly executionGates: ExecutionGateService;
+  private readonly sceneContext: SceneContextService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
@@ -138,6 +132,7 @@ export class RunExecutor {
     this.fileStore = new LocalFileStore(options.fileStoreRoot);
     this.preflight = new AgentRuntimePreflightService(repositories);
     this.executionGates = new ExecutionGateService(repositories);
+    this.sceneContext = new SceneContextService(repositories);
   }
 
   async execute(
@@ -372,33 +367,23 @@ export class RunExecutor {
         (await this.repositories.directChats.getRunContext(runId)) ??
         directChatContext;
     }
-    const context =
-      directChatContext !== null
-        ? buildDirectChatContext({
-            runId,
-            thread: directChatContext.thread,
-            turn: directChatContext.turn,
-            messages: directChatContext.messages,
-            agent,
-          })
-        : meetingContext === null
-          ? buildTaskContext({
-              runId,
-              project: project!,
-              task: task!,
-              agent,
-              episodes,
-            })
-          : buildMeetingContext({
-              runId,
-              project: project!,
-              meeting: meetingContext.meeting,
-              turn: meetingContext.turn,
-              messages: meetingContext.messages,
-              agent,
-              episodes,
-            });
-    await this.repositories.contexts.save(context.pack, context.receipt);
+    let context = await this.repositories.contexts.getByRun(runId);
+    if (context === undefined) {
+      const prepared = await this.sceneContext.prepare({
+        run,
+        project,
+        task,
+        agent,
+        meetingContext,
+        directChatContext,
+        episodes,
+      });
+      await this.sceneContext.commit(prepared);
+      context = {
+        pack: prepared.pack,
+        receipt: prepared.legacyReceipt,
+      };
+    }
     const workspacePath = resolve(
       this.options.workspaceRoot,
       run.projectId ?? `direct-chat/${directChatContext!.thread.id}`,
@@ -671,8 +656,9 @@ export class RunExecutor {
     agent: Agent,
     execution: ExternalRunExecutionSnapshot,
   ): Promise<void> {
-    const binding =
-      await this.repositories.agentRuntimeBindings.getCurrent(agent.id);
+    const binding = await this.repositories.agentRuntimeBindings.getCurrent(
+      agent.id,
+    );
     if (
       binding === undefined ||
       binding.status !== "active" ||
@@ -690,9 +676,7 @@ export class RunExecutor {
         workspaceId: execution.envelope.workspaceId,
         taskId: execution.envelope.taskId,
         requiredCapabilities: [],
-        ...(execution.model === undefined
-          ? {}
-          : { model: execution.model }),
+        ...(execution.model === undefined ? {} : { model: execution.model }),
         ...(execution.reasoningEffort === undefined
           ? {}
           : { reasoningEffort: execution.reasoningEffort }),
@@ -769,8 +753,7 @@ export class RunExecutor {
       execution.binding.revision !== snapshot.binding.revision ||
       execution.runtime.id !== snapshot.runtime.id ||
       execution.runtime.revision !== snapshot.runtime.revision ||
-      execution.capabilitySnapshotId !==
-        snapshot.runtime.capabilitySnapshotId
+      execution.capabilitySnapshotId !== snapshot.runtime.capabilitySnapshotId
     ) {
       throw new RunNonRetryableError("external Runtime snapshot is stale");
     }

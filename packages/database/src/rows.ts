@@ -72,6 +72,7 @@ export interface TaskMessageRow {
   author_name: string;
   content: string;
   reply_to_id: string | null;
+  is_key_consensus: boolean;
   created_at: Date;
 }
 
@@ -207,6 +208,7 @@ export function taskMessageFromRow(row: TaskMessageRow): TaskMessage {
     authorName: row.author_name,
     content: row.content,
     replyToId: row.reply_to_id,
+    isKeyConsensus: row.is_key_consensus,
     createdAt: row.created_at.toISOString(),
   };
 }

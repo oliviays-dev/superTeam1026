@@ -7,6 +7,7 @@ import {
   Download,
   FileText,
   LoaderCircle,
+  MessagesSquare,
   RefreshCw,
   ShieldCheck,
   ShieldX,
@@ -22,7 +23,9 @@ import {
   getRunContext,
   getRunDetail,
   getRunEvents,
+  getRunSceneContext,
   listArtifacts,
+  replayRunSceneContext,
   streamRun,
 } from "./api.js";
 import {
@@ -60,6 +63,9 @@ export function RunView({ runId }: { runId: string }) {
   const [streamState, setStreamState] = useState<
     "connecting" | "live" | "closed"
   >("connecting");
+  const [sceneReplayState, setSceneReplayState] = useState<
+    "idle" | "checking" | "verified" | "error"
+  >("idle");
   const runQuery = useQuery({
     queryKey: ["run", runId],
     queryFn: () => getRunDetail(runId),
@@ -72,6 +78,11 @@ export function RunView({ runId }: { runId: string }) {
   const actionTicketQuery = useQuery({
     queryKey: ["run-action-ticket", runId],
     queryFn: () => getRunActionTicket(runId),
+    retry: false,
+  });
+  const sceneContextQuery = useQuery({
+    queryKey: ["run-scene-context", runId],
+    queryFn: () => getRunSceneContext(runId),
     retry: false,
   });
   const artifactsQuery = useQuery({
@@ -144,6 +155,14 @@ export function RunView({ runId }: { runId: string }) {
                       queryKey: ["run", runId],
                     });
                   }
+                  if (event.type === "context.ready") {
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run-scene-context", runId],
+                    });
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run-context", runId],
+                    });
+                  }
                 },
                 onDelta: (delta) => {
                   lastDelta = Math.max(lastDelta, delta.seq);
@@ -183,10 +202,7 @@ export function RunView({ runId }: { runId: string }) {
   );
   const artifacts: Artifact[] = artifactsQuery.data ?? [];
   const gates = actionTicketQuery.data?.gates ?? [];
-  const decideGate = async (
-    gateId: string,
-    decision: "approve" | "reject",
-  ) => {
+  const decideGate = async (gateId: string, decision: "approve" | "reject") => {
     setGateError("");
     setDecidingGateId(gateId);
     try {
@@ -238,6 +254,15 @@ export function RunView({ runId }: { runId: string }) {
       window.setTimeout(() => URL.revokeObjectURL(url), 4_000);
     } catch (error) {
       console.error(error);
+    }
+  };
+  const replaySceneContext = async () => {
+    setSceneReplayState("checking");
+    try {
+      const replay = await replayRunSceneContext(runId);
+      setSceneReplayState(replay.deterministic ? "verified" : "error");
+    } catch {
+      setSceneReplayState("error");
     }
   };
 
@@ -318,8 +343,7 @@ export function RunView({ runId }: { runId: string }) {
                 {gate.decision !== null && (
                   <p className="gate-decision">
                     {gate.decision.decision} ·{" "}
-                    {gate.decision.decidedByPrincipalId} ·{" "}
-                    {gate.decision.basis}
+                    {gate.decision.decidedByPrincipalId} · {gate.decision.basis}
                   </p>
                 )}
                 {gate.status === "pending" && (
@@ -413,6 +437,106 @@ export function RunView({ runId }: { runId: string }) {
           </div>
         )}
       </section>
+
+      {sceneContextQuery.data !== undefined && (
+        <section className="run-section scene-context-section">
+          <div className="section-title">
+            <MessagesSquare size={15} />
+            <h3>Scene Context</h3>
+            <span className="gate-ticket-meta">
+              {sceneContextQuery.data.scene.binding.sceneType}
+            </span>
+            <button
+              className="pm-btn secondary scene-replay-button"
+              disabled={sceneReplayState === "checking"}
+              onClick={() => void replaySceneContext()}
+              type="button"
+            >
+              <RefreshCw
+                className={sceneReplayState === "checking" ? "spin" : ""}
+                size={13}
+              />
+              Replay
+            </button>
+          </div>
+          <div className="scene-context-grid">
+            <div>
+              <span>Scene</span>
+              <strong>
+                {sceneContextQuery.data.scene.binding.sceneType} ·{" "}
+                {shortId(sceneContextQuery.data.scene.binding.sceneId)}
+              </strong>
+            </div>
+            <div>
+              <span>Session</span>
+              <strong
+                title={sceneContextQuery.data.scene.binding.sessionHandle}
+              >
+                {sceneContextQuery.data.scene.binding.sessionHandle}
+              </strong>
+            </div>
+            <div>
+              <span>Cursor</span>
+              <strong>
+                {sceneContextQuery.data.scene.receipt?.cursorBefore ?? 0}
+                {" → "}
+                {sceneContextQuery.data.scene.receipt?.cursorAfter ?? 0}
+              </strong>
+            </div>
+            <div>
+              <span>Contributions</span>
+              <strong>
+                {sceneContextQuery.data.scene.contributions.length}
+              </strong>
+            </div>
+          </div>
+          <div className="scene-context-meta">
+            <code>
+              pack {shortId(sceneContextQuery.data.pack.id)} · receipt{" "}
+              {shortId(sceneContextQuery.data.scene.receipt?.id ?? "")}
+            </code>
+            {sceneReplayState !== "idle" && (
+              <span
+                className={`pm-pill scene-replay-${sceneReplayState}`}
+                role="status"
+              >
+                {sceneReplayState === "checking"
+                  ? "checking"
+                  : sceneReplayState === "verified"
+                    ? "deterministic"
+                    : "failed"}
+              </span>
+            )}
+          </div>
+          {sceneContextQuery.data.scene.contributions.length > 0 && (
+            <div className="scene-contribution-list">
+              {sceneContextQuery.data.scene.contributions.map(
+                (contribution) => (
+                  <article className="scene-contribution" key={contribution.id}>
+                    <div>
+                      <span className="pm-pill">{contribution.kind}</span>
+                      <span className="pm-pill">{contribution.visibility}</span>
+                      <code>v{contribution.version}</code>
+                    </div>
+                    <p>{contribution.text}</p>
+                    {contribution.sourceRefs.length > 0 && (
+                      <div className="scene-source-refs">
+                        {contribution.sourceRefs.map((ref) => (
+                          <code
+                            key={`${ref.type}:${ref.id}:${ref.version ?? ""}`}
+                          >
+                            {ref.type}:{shortId(ref.id)}
+                          </code>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+                ),
+              )}
+            </div>
+          )}
+        </section>
+      )}
 
       <RunExternalRuntimePanel run={run} events={events} />
 

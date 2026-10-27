@@ -78,7 +78,7 @@ integration("workbench and project reports", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 26,
+      expectedMigrationVersion: 27,
     });
     app = built.app;
     await app.ready();

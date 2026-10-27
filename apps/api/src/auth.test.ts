@@ -74,7 +74,7 @@ integration("bearer authentication API", () => {
       logger: false,
       localActorId: "local-admin",
       authMode: "bearer",
-      expectedMigrationVersion: 26,
+      expectedMigrationVersion: 27,
     });
     app = built.app;
     await app.ready();
