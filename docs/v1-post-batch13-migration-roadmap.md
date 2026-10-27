@@ -1,23 +1,27 @@
-# Pluginmax Platform V1：Batch 13 后续迁移路线图
+# Pluginmax Platform V1：后续迭代路线图
 
-> 状态：Batch 13.1A、13.1B、14A-18 已完成；下一正式批次为 Batch 19
+> 状态：Batch 13.1A、13.1B、14A-18 已完成并合入 `main`；
+> 下一正式批次为 Batch 20A Identity Administration
 >
-> Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
->
-> 分支：`feat/v1-batch15b-action-ticket-gate`
+> 当前 main：`e1dca0dc1da3ebd3a41373172eda0082842e1d80`
 >
 > 初始路线图基线：`bc7f55b651737c34ea288b8ad2adf3c51bf3a6ea`
 >
 > 最后更新：2026-10-27
 
+> 产品决策：现有 dsh-pluginmax 数据主要是测试和可丢弃数据。V1 采用全新开始，
+> 不迁移旧业务数据，不双写，不保留旧业务 ID 在新平台继续可用的承诺。旧系统
+> 只做冻结写入、只读归档和最终下线。
+
 ## 1. 文档目的
 
-本文统一后续迁移范围、依赖顺序、技术边界、迁移策略和发布门禁，作为 Batch 14
-以后的工作清单。原则是迁移能力与契约，不按旧插件目录做 1:1 平移，尤其不迁移
+本文统一 V1 后续迭代范围、依赖顺序、技术边界、产品决策和发布门禁。原则是吸收
+dsh-pluginmax 的产品能力与安全契约，不按旧插件目录做 1:1 平移，尤其不迁移
 DSH Shell、Slot、JSON Storage 和旧 Employee 页面。
 
-Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据见
-[v1-batch13-release-gate.md](./v1-batch13-release-gate.md)。
+Batch 14-18 已完成并合入 `main`，因此“最新实现尚未进入 main”和“旧数据尚未
+迁移”不再作为发布阻断项。V1 从新数据库、新 Principal 和新业务数据开始；旧
+dsh 数据不进入正式迁移范围。
 
 ## 2. 当前 V1 事实与缺口
 
@@ -41,36 +45,51 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
   和重放；Migration 27 已落地。
 - Batch 13.1A 已冻结 Runtime 兼容契约：WorkBuddy 只使用通用 `plain-text`，
   Prompt 走 stdin，不实现专用 stream-json、Provider Session 或工具流解析。
+- Batch 13.1B 已完成 Workspace Runtime 可见范围、Token/成本 unknown 口径和
+  execution history；Migration 29 已落地。
+- Batch 17A 已完成 Task 队列、Claim、needsInput、Review、Session Reset 和
+  文档边界；Migration 28 已落地。
+- Batch 17B 已完成 AI Teammate 模板、实例、工作队列、自动执行、统计、周报和
+  安全转派；Migration 30 已落地。
 - Batch 18 已完成 Meeting Facilitator、Delegate、私密嘱咐、投递、文件、
   Minutes 确认、Meeting Task、归档与恢复；Migration 31 已落地。
+- Batch 14-18 已合入 `main`，最新平台能力不再依赖独立批次 worktree 才能部署。
 
 ### 2.2 主要缺口
 
 | 缺口 | 当前状态 | 影响 |
 | --- | --- | --- |
 | 身份认证 | 已完成 14B：Bearer Session；Bearer 模式不接受客户端 actor Header 回退 | 生产认证边界已建立 |
-| Principal 统一 | 已完成 14A/14C/14D：Human/AI Principal、alias、Grant、读授权和 Capability 已统一消费 | 后续迁移主要是历史字段 backfill 和执行授权 |
+| Principal 统一 | 已完成 14A/14C/14D：Human/AI Principal、Grant、读授权和 Capability 已统一消费 | 新业务只写规范 Principal，不接受第二套身份事实 |
 | RBAC 消费 | 已完成 14C/14D 的主门禁和读授权；进入 15A 前审计 Application 残留 owner-only 二次门禁 | 防止 Route Grant 与 Application 门禁语义不一致 |
 | TaskExecutionPolicy | 已完成 15A：持久化 revision、统一 Preflight 和不可变 Run Envelope | 任务级 Runtime、工具、来源和预算已进入执行快照 |
 | Action Ticket / Gate | 已完成 15B：持久化 Ticket、Gate、不可变决策与 Worker 门禁 | 高风险动作具备可校验、可过期和可审计的执行边界 |
 | Scene Context | 已完成 16：四类 Scene Session、Contribution、Channel、Cursor 和 Receipt 已统一 | 场景隔离、确定性重放和来源追溯已建立 |
-| Task / Teammate 深度 | 基础任务、AI 伙伴和 Worker 已有，工作队列、输入等待和自动执行深度不足 | 无法承接旧 Teammate 的完整工作流 |
+| Task / Teammate 深度 | 17A/17B 已完成队列、Claim、needsInput、Session Reset、工作计划、自动执行和统计 | V1 已有完整任务与 AI Teammate 工作面 |
 | Meeting Collaboration | Batch 18 已完成 Facilitator、Delegate、私密嘱咐、投递、文件、Minutes 确认、Meeting Task、归档与恢复 | 会议协作闭环已建立 |
 | Shared Space | 尚无工作区共享路径、写审批、Locks 和文件审计 | 不能安全开放 Agent 文件写 |
-| Legacy Closeout | 尚无统一迁移台账、dry-run 和 alias 清理计划 | 后续容易出现双主体和旧存储依赖 |
+| Identity Administration | 只有 bootstrap、登录、改密和账号启停；缺少账号邀请/创建、平台 Grant、Workspace 成员与 Grant 管理面 | 团队生产上线仍缺 P0 身份运营闭环 |
+| Legacy Retirement | 旧数据已决定不迁移；仍需冻结写入、只读归档、保留期限和最终下线 | 旧系统不能成为新平台运行时依赖 |
 
-## 3. 迁移原则
+## 3. 迭代原则
 
-1. **先身份与授权，再执行安全，再上下文与协作体验，最后治理和兼容收口。**
-2. V1 PostgreSQL 是业务事实来源；旧 JSON Storage 只作迁移来源，不作为运行时依赖。
-3. Principal 是授权和追责主体；Employee、Teammate、Auth User 只作产品入口或兼容别名。
-4. 默认拒绝，deny-wins；Task Policy、Runtime Capability、Principal Grant 和项目权限取交集。
-5. 已启动 Run 使用不可变策略、身份和上下文快照，后续修改不能扩大既有运行权限。
-6. 已启动外部进程后不自动 replay；Provider Session resume 单独设计。
-7. 不开放任意 shell、`danger-full-access`、远程 Daemon 或凭据持久化。
-8. 每批独立 worktree、分支、PostgreSQL、`.tmp` 和 DSH_HOME。
-9. 文档只记录实际完成状态，规划内容不得冒充完成。
-10. 旧 API、旧表名、裸 ID 和 Employee alias 在迁移期可读，但新写入必须使用规范模型。
+1. **白纸启动。** V1 使用全新 PostgreSQL 和全新业务数据，不导入旧 dsh 测试
+   数据或业务数据。
+2. **能力迁移，不迁移实现。** 吸收产品契约和安全边界，不迁移 DSH Shell、Slot、
+   JSON Storage、旧路由或插件内 Runtime。
+3. **单一事实来源。** Principal、Account、Credential、AuthSession、
+   WorkspaceMember 和 RoleGrant 不得出现第二套并行身份或权限模型。
+4. **先 P0 身份运营。** 多用户生产上线前完成 Identity Administration，再做
+   其他增强。
+5. **安全默认拒绝。** Task Policy、Runtime Capability、Principal Grant 和项目
+   权限取交集；Ticket/Gate、Scene 和 Worker 复核不得绕过。
+6. **已启动 Run 使用不可变快照。** 策略、身份、Context 和 Runtime revision
+   变化只影响后续 Run。
+7. **不双写、不兼容旧业务 ID。** 新平台不承诺旧 ID、旧 Session、旧 Workspace
+   或旧 JSON Storage 继续可用。
+8. **每批独立。** 使用独立 worktree、分支、PostgreSQL、`.tmp` 和 DSH_HOME。
+9. **文档只记录实际完成状态。** 规划内容不得冒充完成。
+10. **风险分层。** P0/P1/P2、Non-target 和待决策能力不得混写。
 
 ## 4. 目标依赖顺序
 
@@ -111,18 +130,23 @@ Batch 13.1A：Runtime 兼容承诺收口
   |
   +----> Batch 18：Meeting Collaboration
   |
+  +----> Batch 20A：Identity Administration（P0）
+  |          |
+  |          v
   +----> Batch 19：Shared Space（需独立安全评审）
   |
   v
-Batch 20：Project Governance + Workbench
+Batch 20：Project Governance + Workbench（P1/P2）
+  |
+  +----> Human Avatar / Delegation（独立待规划）
   |
   v
-Batch 21：Legacy Compatibility Closeout
+Batch 21：Legacy Retirement（可选 P2）
 ```
 
-Batch 17、18、19 在 Batch 16 完成后可分别规划和排期，但不要同时修改 Task/Run/Worker
-核心语义。Batch 19 的设计可以提前开始，写能力实现必须等 Ticket、Gate 和 Scene
-Binding 完成。
+Batch 20A 必须先于 Batch 19。Batch 19 的共享写能力必须完成独立安全评审和
+Ticket/Gate/Scene 复核，未开放前不得宣称完成。Batch 21 是可选退役工作，不是
+数据迁移项目，也不阻断 V1 白纸启动。
 
 ## 5. 批次总表
 
@@ -130,7 +154,7 @@ Binding 完成。
 | --- | --- | --- | --- | --- |
 | 13.1A Runtime 兼容收口 | P1 | Batch 13 | WorkBuddy 通用 plain-text 决策；文档承诺纠偏 | 已完成：契约、回归和文档一致 |
 | 13.1B Runtime 经济与可见性 | P2 | 14C、15A、17A | Workspace Runtime 可见范围、Token/耗时统计 | 已完成：权限可见性、Token 对账和 Run 遥测测试通过 |
-| 14A Principal 清点与模型 | P0 | Batch 13 | Human/AI Principal、Account、Alias、Grant 映射 | 旧数据来源和映射报告完整，模型/Migration 评审通过 |
+| 14A Principal 清点与模型 | P0 | Batch 13 | Human/AI Principal、Account、Grant 基础模型 | 已完成：模型、认证/RBAC 基础与审计边界通过；不承担旧数据导入 |
 | 14B 认证与登录 Session | P0 | 14A | Bearer Session、登录、改密、启停、Credential | 无认证拒绝，账号状态与 Principal 状态同步 |
 | 14C RBAC 消费与审计 | P0 | 14B | Platform/Workspace/Project Grant、项目角色授权 | 越权写入拒绝，Grant 撤销立即生效，审计可追溯 |
 | 14D RBAC 读授权闭环 | P0 | 14C | Project Capability；项目、Task、Run、Workflow、Meeting、Memory、Report、Handoff、Attachment、Trace、SSE 和批量的读隔离 | 非成员/跨项目读取拒绝，列表、搜索、Trace、事件流和文件下载无泄露 |
@@ -140,9 +164,10 @@ Binding 完成。
 | 17A Task Execution Depth | P1 | 13.1A、15B、16 | 队列、暂停、Claim、needsInput、文档、自动验收 | 队列、依赖、恢复、Review 和文档权限通过 |
 | 17B AI Teammate | P1 | 14C、16、17A、13.1B | 模板、生命周期、工作计划、周报、统计 | 已完成：模板/实例可追溯、受限任务、转派和统计对账通过 |
 | 18 Meeting Collaboration | P1 | 14C、16 | Facilitator、Delegate、私密嘱咐、文件、归档 | 已完成：委托、投递、纪要、归档和敏感信息边界通过 |
+| 20A Identity Administration | P0 | 14A-14D | 账号邀请/创建、Credential、Platform Grant、Workspace 成员与 Grant、目录、审计、Web 管理面 | 多用户可邀请、授权、撤销并审计；无第二套身份/权限事实 |
 | 19 Shared Space | P1 | 14C、15B、16 | 路径权限、Global Write、Locks、文件审计 | 路径穿越、越权写、锁竞争和写审批通过 |
-| 20 Governance + Workbench | P2 | 14C、17B | 项目健康度、角色确认、审计、SSE、可配置布局 | 并发保护、只追加审计、三视口无溢出 |
-| 21 Legacy Closeout | P2 | 14-20 | import dry-run、alias 清理、Session/Workspace 映射 | 旧数据报告完整，废弃能力有明确处置 |
+| 20 Governance + Workbench | P1/P2 | 14C、17B | 项目负责人/健康度/进度/日期、产出物、审计、角色确认、SSE、布局、驾驶舱 | 并发保护、只追加审计、三视口无溢出 |
+| 21 Legacy Retirement | P2（可选） | 20A、20 | 旧系统冻结、只读归档、兼容导出、Session 失效、下线 | 旧系统无写入、无迁移、无运行时依赖；保留期限明确 |
 
 ## 6. 分批技术方案
 
@@ -181,23 +206,27 @@ Binding 完成。
   经济统计和 Cursor-bound execution history API。
 - 历史 Run 不伪造 usage；Batch 17B 可直接复用执行历史和统计查询边界。
 
-### Batch 14A：身份、Principal 与迁移清点
+### Batch 14A：身份、Principal 与历史清点（已完成）
+
+历史说明：该批完成时曾规划旧数据 dry-run 和迁移来源。当前产品决策已关闭这条
+路线；本节保留历史模型和审计记录，不再承诺旧 dsh 数据导入。
 
 目标模型：
 
 - `Principal`：稳定主体，类型为 Human 或 AI。
 - `Account`：Human Principal 的可选认证能力，不保存 HR 身份。
-- `ExternalIdentityLink`：账号、Employee、Teammate 等历史来源到 Principal 的映射。
+- `ExternalIdentityLink`：外部身份来源到 Principal 的通用映射模型；V1 新业务
+  不依赖旧 dsh 数据。
 - `WorkspaceMember`：Principal 在工作区中的成员关系。
 - `RoleGrant`：`platform`、`workspace`、`project` 范围内的显式授权。
-- `Alias`：`employee:`、`teammate:`、`auth-user:` 和裸 ID 的解析入口。
+- `Alias`：兼容引用解析边界；白纸启动后不作为旧业务 ID 长期可用的承诺。
 
 清点范围：
 
 - V1 Agent、Project Member、Owner、Task Assignee、Run Actor、Approver、Meeting
   Participant、Audit Actor。
 - 旧 Employee、Teammate、账号、Runtime Profile、Action Ticket 和 Delegation 的文档契约。
-- 每个字段的“当前来源、目标字段、兼容策略、迁移优先级”。
+- 每个字段的“当前来源、目标字段、兼容边界、处置优先级”。
 
 约束：
 
@@ -209,10 +238,11 @@ Binding 完成。
 
 交付：
 
-- Principal 映射报告。
-- 数据模型和 Migration 设计。
-- 旧数据 dry-run 方案与回滚策略。
+- Principal 模型、审计边界和 Migration 24 设计。
+- 当前已完成并合入 main 的认证/RBAC 事实。
 - 过期技术设计状态修正。
+
+不包含：旧 dsh 数据转换、import dry-run、backfill、alias 清理或双写。
 
 ### Batch 14B：认证与登录 Session
 
@@ -449,7 +479,47 @@ Gate 最低能力：
 - 私密嘱咐不进入其他 Principal 的 Context 或投递。
 - Meeting AI 与外部 Runtime 回归通过。
 
+### Batch 20A：Identity Administration
+
+优先级：P0。必须先于 Batch 19。
+
+目标：
+
+- 补齐多用户生产上线所需的账号邀请、创建、资料更新、启停、Credential 初始化和
+  受控重置。
+- 提供平台角色、Platform Grant、Workspace 成员和 Workspace Grant 的管理闭环。
+- 提供账号目录搜索、分页、状态、身份审计和 Web 管理面。
+- 明确复用现有 Principal、Account、Credential、AuthSession、WorkspaceMember
+  和 RoleGrant，不建立第二套身份或权限事实。
+
+范围：
+
+- 账号邀请/创建、显示名与资料更新。
+- Credential 初始化、一次性激活或受控重置；secret 不写日志、不返回不可恢复
+  明文、不进入审计。
+- Platform Role / Platform Grant 查询、授予、撤销、到期与审计。
+- Workspace 成员、成员状态和 Workspace Grant 管理。
+- 账号目录、搜索、分页、状态和历史审计。
+- 管理员 Web 管理面与 Capability/权限禁用状态。
+
+安全与兼容：
+
+- 所有写操作要求 active Platform ADMIN 或对应管理 Grant。
+- Platform ADMIN 不因此绕过 Project Grant。
+- 重复邀请、并发更新、已归档 Principal、disabled Account、revoked/expired Grant
+  必须返回稳定冲突或幂等结果。
+- 不新增 Employee 产品域，不恢复旧账号双写，不读取旧 dsh 数据。
+
+退出条件：
+
+- 管理员可邀请、创建、维护、停用和审计账号。
+- 可分配/撤销 Platform Grant 和 Workspace Grant，撤销后立即生效。
+- AI Principal 不能登录；archived Principal 不能获得新授权。
+- Repository、Application、API、Web 和多 Principal Playwright 回归通过。
+
 ### Batch 19：Shared Space
+
+优先级：P1。必须独立安全评审，不得与 Batch 20A 混批。
 
 范围：
 
@@ -473,14 +543,26 @@ Gate 最低能力：
 - 不开放危险 sandbox。
 - Global Write 必须绑定 Ticket、Gate、Workspace 和 Actor。
 
+退出条件：
+
+- 路径权限、Global Write、Locks、Session Digest 和文件审计全部有负向回归。
+- 未授权写入、跨 Workspace、路径逃逸、锁竞争和 Gate 绕过全部 fail closed。
+- 在完整安全门禁通过前，不得宣称 Shared Space 或共享写能力已完成。
+
 ### Batch 20：Project Governance 与 Workbench
+
+优先级：P1/P2。
 
 只补残余能力：
 
-- 项目负责人、健康度、进度、起止日期。
+- 项目负责人、健康度、进度、起止日期和基础信息。
+- 项目阶段性产出物、来源追溯和筛选。
+- 项目历史审计，只追加并与成员/角色/Grant 事件关联。
 - 角色草稿确认、导入、来源锁定和并发保护。
-- 项目产出汇总和项目历史审计。
-- Workbench Brief SSE、指标偏好和可配置布局。
+- 角色删除的成员影响确认、工作流模版阻塞和进行中任务改派。
+- Workbench 可配置布局、六档宽度、高度、默认布局和恢复。
+- Workbench Brief SSE、模块刷新、指标偏好和 stale/partial error。
+- 管理驾驶舱容器和管理数据权限。
 - 复用现有 Batch 10B/11A/11B，不重做项目、日报、模板和角色基础模型。
 
 退出条件：
@@ -489,21 +571,42 @@ Gate 最低能力：
 - 项目审计只追加。
 - 工作台桌面、900px、390px 无溢出和遮挡。
 
-### Batch 21：Legacy Compatibility Closeout
+### Human Avatar / 通用 Delegation（独立待规划）
 
-从 Batch 14A 开始维护迁移台账，最终执行：
+优先级：P1，不并入 Batch 20A、19 或 20。
 
-- Employee/Principal 兼容导出。
-- 旧数据 import dry-run。
-- DSH Session/Workspace 能力映射确认。
-- 旧 alias 使用率统计和清理计划。
-- 废弃 Provider、Runtime 和 UI 能力处置。
+- 覆盖 Task、Workflow、Meeting 等跨场景的受限 Human Avatar 委托。
+- 明确 owner、目标、立场、关注点、允许/禁止动作、有效期、频控、暂停、延期、
+  撤销、过期和报告。
+- Batch 18 Meeting Delegate 只是会议级代表，不能替代通用 Delegation。
+- 不复用 Meeting Delegate 表承载跨场景委托，不新增独立 Principal。
+
+### Batch 21：Legacy Retirement（可选）
+
+优先级：P2。可选退役项目，不是数据迁移项目，也不是 V1 发布阻断项。
+
+只保留：
+
+- 旧 dsh 系统冻结写入。
+- 旧测试/业务数据只读归档。
+- 运维级兼容导出和归档校验。
+- 数据保留期限、访问控制和删除计划。
+- 旧 Session 全部失效，旧环境不可继续登录。
+- 旧 Provider、Runtime、插件和 UI 最终下线。
+
+明确不做：
+
+- 不迁移旧业务数据。
+- 不做正式 dry-run、backfill 或历史数据兼容导入。
+- 不建立双写。
+- 不要求旧业务 ID、旧 Workspace 或旧 Session 在新平台继续可用。
+- 不把 Legacy Retirement 写成发布阻断项。
 
 退出条件：
 
-- 旧数据保留和映射报告完整。
-- 已废弃能力有明确删除、只读或兼容期限。
-- 新运行不再依赖旧 JSON Storage。
+- 旧系统无写入入口，仅按保留期限只读。
+- 归档完整性、访问控制和删除计划有记录。
+- 新平台不依赖旧 JSON Storage、旧 Session 或旧插件运行时。
 
 ### 后续技术债与构建质量计划
 
@@ -548,16 +651,23 @@ HTTP Request
 - Adapter 不访问数据库或修改业务状态。
 - 业务回写保留单次消费和幂等语义。
 
-## 8. Migration 与兼容策略
+## 8. Schema Migration 与白纸启动
 
-1. 不在本路线图中预分配 Migration 编号，每批根据实际前置版本分配。
-2. 先新增 nullable 字段/新表，再做 backfill，最后在兼容窗口后收紧约束。
-3. 旧字段删除必须有独立 Migration、备份、回滚和旧数据 fixture。
-4. Principal、Grant、Ticket、Gate、Scene 和 Receipt 的历史记录只追加或版本化。
-5. JSONB 用于不可变策略/执行/Context 快照；权限、Ticket Scope 和审计索引使用关系列。
-6. 每批同时验证 `N→N+x` 和 `0→N+x`，并逐表断言旧数据内容。
-7. 旧 alias 解析必须有唯一优先级和冲突检测。
-8. 数据导入先 dry-run，输出新增、复用、冲突、缺失和跳过报告。
+1. “Migration”在本路线图中只指 V1 PostgreSQL schema migration，不指 dsh
+   业务数据迁移。
+2. 不在本路线图中预分配 Migration 编号，每批根据实际前置版本分配。
+3. 新表或新字段优先 additive；如涉及历史 V1 数据，必须说明 backfill、兼容读取
+   和回滚。
+4. Principal、Grant、Ticket、Gate、Scene、Receipt 和审计历史只追加或版本化。
+5. JSONB 用于不可变策略/执行/Context 快照；权限、Ticket Scope 和审计索引使用
+   关系列。
+6. 每批验证 fresh `0→N` 和 V1 upgrade `N→N+x`；不验证 dsh JSON Storage
+   import。
+7. V1 正式环境从新数据库开始，不执行旧账号、Task、Workflow、Meeting、Memory、
+   Context、Workbench 或 Session 的导入。
+8. 旧业务 ID、alias、Workspace 和 Session 不承诺在新平台继续有效；不为兼容
+   旧数据保留双写。
+9. 旧系统只按 Batch 21 的可选退役方案冻结写入、只读归档和最终下线。
 
 ## 9. 每批统一发布门禁
 
@@ -570,7 +680,8 @@ HTTP Request
 - 完整 Playwright，至少 1440px、900px、390px。
 - `pnpm check`、`git diff --check`、脚本语法检查。
 - API/Web/Worker 进程、临时数据库和容器检查。
-- 旧数据、权限撤销、Ticket 过期和重试幂等回归。
+- V1 fresh schema、权限撤销、Ticket 过期和重试幂等回归。
+- 不得引入 dsh 数据 import、双写或旧 Session 迁移。
 - 发布文档记录实际完成、失败、跳过、已知限制和远端状态。
 
 ## 10. 进度跟踪
@@ -588,36 +699,64 @@ HTTP Request
 - [x] Batch 17A Task Execution Depth
 - [x] Batch 17B AI Teammate
 - [x] Batch 18 Meeting Collaboration
+- [ ] Batch 20A Identity Administration
 - [ ] Batch 19 Shared Space
 - [ ] Batch 20 Project Governance 与 Workbench
-- [ ] Batch 21 Legacy Compatibility Closeout
+- [ ] Batch 21 Legacy Retirement（可选）
 
-## 11. 待决策事项
+## 11. 优先级与待决策事项
 
-在进入对应批次前必须明确：
+### 11.1 当前优先级
 
-1. 首个 V1 登录协议是否采用账号密码 + Bearer Session，SSO 是否后置。
-2. V1 的首个工作区模型是否支持多 Workspace，还是先单 Workspace + 多 Project。
-3. 旧账号、Employee、Teammate 的迁移来源和 alias 优先级。
-4. ~~WorkBuddy 是否仍有必须实现的专用兼容承诺。~~ 已解决：V1 只使用通用
-   `plain-text`，专用 stream-json、Session resume 和工具流解析为非目标。
-5. Shared Space 写能力的首发范围和审批责任人。
-6. Legacy import 的数据导出方式、保留窗口和敏感字段处理。
-7. AI Teammate 模板的产品归属和平台/个人可编辑边界。
+| 优先级 | 项目 |
+| --- | --- |
+| P0 | Batch 20A Identity Administration：账号邀请/创建、Credential、Platform Grant、Workspace 成员与 Grant、审计和 Web 管理面 |
+| P1 | Batch 19 Shared Space；Batch 20 Project Governance + Workbench 的核心治理项 |
+| P1（独立待规划） | Human Avatar / 通用 Delegation |
+| P2 | Workbench 体验增强、Teammate 产品面残余、Persona/Seat Claim、Task 通用外部关联、Provider Session Resume、Runtime 预算硬限制、MFA/SSO/Rate Limit |
+| P2（可选） | Batch 21 Legacy Retirement：只读归档和旧系统下线 |
+| Non-target | 旧 dsh 业务数据迁移、backfill、双写、旧 Session 延续、旧业务 ID 长期兼容 |
+
+### 11.2 待决策事项
+
+1. V1 首发是单 Workspace 还是多 Workspace；无论选择哪种，都复用现有
+   WorkspaceMember/RoleGrant，不新增第二套工作区权限。
+2. Batch 20A 的账号邀请方式、Credential 初始化/重置交付方式、邮件/SSO 是否后置。
+3. Shared Space 的首发路径范围、Global Write 业务场景和审批责任人。
+4. Human Avatar / 通用 Delegation 的目标场景、动作边界和报告口径。
+5. Legacy Retirement 的只读保留期限、归档位置、访问人和最终销毁流程。
+6. Persona/Seat Claim 是否仍需要独立产品，或由 Teammate Template + Project Role
+   完整替代。
+7. Provider Session Resume、Runtime 预算硬限制、MFA/SSO/Rate Limit 的后续排期。
+
+### 11.3 风险说明
+
+- Identity Administration 涉及 Credential、Grant 和审计，必须先完成 P0 再做
+  团队生产上线。
+- Shared Space 是高风险文件写能力；独立安全评审前保持 read-only。
+- Batch 20 范围较大，项目治理和 Workbench 可分阶段交付，但不得降低并发、
+  审计和权限门禁。
+- Legacy Retirement 只处理旧系统归档和下线；只读归档仍含敏感数据，必须明确
+  访问控制、保留期限和删除责任人。
+- Human Avatar 若直接复用 Meeting Delegate，可能把会议级权限扩散到 Task 和
+  Workflow；必须独立建模。
+- 白纸启动意味着旧业务 ID、Session、Workspace 和历史数据不延续，这是接受
+  的产品结果，不应在发布后作为迁移缺陷重新打开。
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 19：Shared Space**，需独立安全评审与 worktree。
-Batch 18 已完成；15B 的 Ticket/Gate 语义仍不能由 Meeting Collaboration、
-Scene Context、Task Execution Depth 或 Runtime 统计查询绕过。
+下一执行批次为 **Batch 20A：Identity Administration**，优先级 P0。
+Batch 14-18 已合入 main；V1 从白纸启动，不迁移旧 dsh 数据。
+15B 的 Ticket/Gate 语义仍不能由 Meeting Collaboration、Scene Context、
+Task Execution Depth、Identity Administration 或 Runtime 统计查询绕过。
 Shared Space 和 sandbox 扩展仍未实现。
 
 建议在独立 worktree 执行：
 
 ```text
-worktree: 独立 `.tmp/pluginmax-platform-batch19-*`
-branch:   `feat/v1-batch19-*`
-base:     Batch 18 local commit
+worktree: 独立 `.tmp/pluginmax-platform-batch20a-*`
+branch:   `feat/v1-batch20a-*`
+base:     main（包含 Batch 14-18）
 ```
 
 ## 13. 参考文档
