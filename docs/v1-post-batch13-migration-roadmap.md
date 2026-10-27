@@ -505,6 +505,21 @@ Gate 最低能力：
 - 已废弃能力有明确删除、只读或兼容期限。
 - 新运行不再依赖旧 JSON Storage。
 
+### 后续技术债与构建质量计划
+
+以下事项纳入后续维护排期，不阻塞 Batch 17B：
+
+- **P2 Web 路由级代码分割**：对 Web 页面和重面板使用路由/页面级懒加载，
+  保持导航、权限、刷新和交互语义。验收 production bundle 的首屏入口、懒加载
+  chunk、gzip 大小，以及 HTML 与指纹静态资源的缓存和版本切换行为；覆盖
+  1440px、900px、390px Playwright 回归。
+- **P2 `tsdown` 配置维护**：将 packages/apps 中 `external` 配置迁移到
+  `deps.neverBundle`。必须在现有 `tsdown` 版本内保持 external 集合和构建产物
+  语义等价，不夹带版本升级。
+- **P3 d.ts sourcemap 跟踪**：`rolldown-plugin-dts:fake-js` 的 sourcemap 告警
+  保持 P3，不单独做破坏性 workaround。随未来 `tsdown` 升级验证 `.d.ts.map`
+  可追踪性、declaration 内容、构建告警和消费方 typecheck。
+
 ## 7. 目标执行架构
 
 ```text
