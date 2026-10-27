@@ -199,6 +199,20 @@ function resourceRequirement(
       permission: "write",
     };
   }
+  if (route === "/api/v1/execution-gates/:gateId/decisions") {
+    return {
+      resourceType: "execution-gate",
+      resourceId: parameter(params, "gateId"),
+      permission: "approve",
+    };
+  }
+  if (route === "/api/v1/execution-gates/:gateId/cancel") {
+    return {
+      resourceType: "execution-gate",
+      resourceId: parameter(params, "gateId"),
+      permission: "write",
+    };
+  }
   if (route === "/api/v1/workflows/import") {
     const projectId = bodyProjectId(body);
     return projectId === undefined
@@ -296,6 +310,13 @@ function readProjectRequirement(
     return {
       resourceType: "run",
       resourceId: parameter(params, "runId"),
+      permission: "read",
+    };
+  }
+  if (route.startsWith("/api/v1/execution-gates/:gateId")) {
+    return {
+      resourceType: "execution-gate",
+      resourceId: parameter(params, "gateId"),
       permission: "read",
     };
   }

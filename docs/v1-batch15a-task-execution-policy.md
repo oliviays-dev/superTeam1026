@@ -1,8 +1,9 @@
 # V1 Batch 14C 写授权审计与 Batch 15A: TaskExecutionPolicy
 
 > 状态：Batch 14C 写授权残余审计完成；Batch 15A 持久化策略、统一 Preflight
-> 与 Run Execution Envelope 已完成。Batch 15B Action Ticket / Execution Gate
-> 未实现，也未在 15A 中冒充完成。
+> 与 Run Execution Envelope 已完成。Batch 15B 已在其独立批次完成 Action
+> Ticket / Execution Gate，详见
+> [v1-batch15b-action-ticket-gate.md](./v1-batch15b-action-ticket-gate.md)。
 
 ## 1. 基线
 
@@ -159,10 +160,13 @@ Direct Chat self boundary。
 
 ## 8. 本批边界
 
-未实现：
+15A 当时未实现、后续由 Batch 15B 完成的边界：
 
 - Action Ticket
 - Execution Gate 的真实暂停、审批、恢复和超时
+
+Batch 15B 后仍未实现：
+
 - Scene Context / Scene Session
 - Shared Space
 - sandbox 扩展

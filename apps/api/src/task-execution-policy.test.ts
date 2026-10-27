@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   legacyTaskExecutionPolicy,
   taskExecutionPolicySchema,
+  type ActionTicketBundle,
   type Agent,
   type DirectChatThread,
   type Meeting,
@@ -38,7 +39,7 @@ integration("task execution policy and run execution envelope", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 25,
+      expectedMigrationVersion: 26,
     });
     app = built.app;
     await app.ready();
@@ -192,6 +193,23 @@ integration("task execution policy and run execution envelope", () => {
     return result.rows[0]!;
   }
 
+  async function ticketFor(runId: string): Promise<ActionTicketBundle> {
+    const result = await request<ActionTicketBundle>(
+      "GET",
+      `/api/v1/runs/${runId}/action-ticket`,
+    );
+    expect(result.statusCode, JSON.stringify(result.body)).toBe(200);
+    expect(result.body.ticket).toMatchObject({
+      runId,
+      policyRevision: expect.any(Number),
+      envelopeDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(result.body.ticket.executionEnvelope.envelope.ticketId).toBe(
+      result.body.ticket.ticketId,
+    );
+    return result.body;
+  }
+
   it("keeps policy revisions immutable and rejects stale optimistic writes", async () => {
     const project = await createProject("Policy revision");
     const first = await setPolicy(
@@ -285,6 +303,12 @@ integration("task execution policy and run execution envelope", () => {
     expect(envelopeResponse.body).toMatchObject({
       digest: taskEnvelope.execution_envelope_snapshot.digest,
       policy: { revision: taskPolicy.revision },
+    });
+    const taskTicket = await ticketFor(dispatched.body.runId);
+    expect(taskTicket.ticket).toMatchObject({
+      contextType: "task",
+      policyRevision: taskPolicy.revision,
+      allowedActions: ["agent.execute", "task.writeback"],
     });
 
     await setPolicy(
@@ -403,6 +427,10 @@ integration("task execution policy and run execution envelope", () => {
         runtime: { id: "builtin:fake" },
       },
     });
+    expect((await ticketFor(workflowRunId!)).ticket).toMatchObject({
+      contextType: "workflow-task",
+      allowedActions: ["agent.execute", "workflow.writeback"],
+    });
 
     const meeting = await request<Meeting>("POST", "/api/v1/meetings", {
       projectId: project.id,
@@ -448,6 +476,10 @@ integration("task execution policy and run execution envelope", () => {
         authorization: { scope: "project" },
       },
     });
+    expect((await ticketFor(meetingRunId!)).ticket).toMatchObject({
+      contextType: "meeting",
+      allowedActions: ["agent.execute", "meeting.writeback"],
+    });
 
     const thread = await request<DirectChatThread>(
       "POST",
@@ -475,6 +507,10 @@ integration("task execution policy and run execution envelope", () => {
         policy: { source: "context" },
         authorization: { scope: "self" },
       },
+    });
+    expect((await ticketFor(direct.body.run.id)).ticket).toMatchObject({
+      contextType: "direct-chat",
+      allowedActions: ["agent.execute", "direct-chat.writeback"],
     });
   });
 });

@@ -2766,3 +2766,253 @@ BEFORE UPDATE ON runs
 FOR EACH ROW
 EXECUTE FUNCTION pluginmax_reject_run_execution_envelope_mutation();
 `;
+
+export const ACTION_TICKET_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS action_tickets (
+  id UUID PRIMARY KEY,
+  schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+  ticket_version INTEGER NOT NULL CHECK (ticket_version = 1),
+  principal_id TEXT NOT NULL REFERENCES principals(id),
+  workspace_id TEXT NOT NULL
+    CHECK (length(btrim(workspace_id)) BETWEEN 1 AND 180),
+  context_type TEXT NOT NULL
+    CHECK (context_type IN ('task', 'workflow-task', 'meeting', 'direct-chat')),
+  context_id TEXT NOT NULL
+    CHECK (length(btrim(context_id)) BETWEEN 1 AND 180),
+  task_id TEXT NOT NULL
+    CHECK (length(btrim(task_id)) BETWEEN 1 AND 180),
+  run_id UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+  allowed_actions TEXT[] NOT NULL
+    CHECK (
+      cardinality(allowed_actions) > 0
+      AND allowed_actions <@ ARRAY[
+        'agent.execute',
+        'task.writeback',
+        'workflow.writeback',
+        'meeting.writeback',
+        'direct-chat.writeback'
+      ]::text[]
+    ),
+  denied_actions TEXT[] NOT NULL DEFAULT '{}'
+    CHECK (
+      denied_actions <@ ARRAY[
+        'agent.execute',
+        'task.writeback',
+        'workflow.writeback',
+        'meeting.writeback',
+        'direct-chat.writeback'
+      ]::text[]
+    ),
+  resource_scopes TEXT[] NOT NULL
+    CHECK (cardinality(resource_scopes) > 0),
+  policy_id UUID REFERENCES task_execution_policies(id),
+  policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+  envelope_id TEXT NOT NULL
+    CHECK (length(btrim(envelope_id)) BETWEEN 1 AND 180),
+  envelope_digest TEXT NOT NULL
+    CHECK (envelope_digest ~ '^[a-f0-9]{64}$'),
+  authorization_snapshot JSONB NOT NULL
+    CHECK (jsonb_typeof(authorization_snapshot) = 'object'),
+  execution_envelope JSONB NOT NULL
+    CHECK (jsonb_typeof(execution_envelope) = 'object'),
+  issued_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  issued_by TEXT NOT NULL
+    CHECK (length(btrim(issued_by)) BETWEEN 1 AND 180),
+  CHECK (expires_at > issued_at),
+  CHECK (
+    (policy_revision = 0 AND policy_id IS NULL)
+    OR (policy_revision > 0 AND policy_id IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS action_tickets_principal_idx
+  ON action_tickets(principal_id, issued_at DESC);
+
+CREATE INDEX IF NOT EXISTS action_tickets_context_idx
+  ON action_tickets(context_type, context_id, issued_at DESC);
+
+CREATE INDEX IF NOT EXISTS action_tickets_expiry_idx
+  ON action_tickets(expires_at);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_action_ticket_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'action tickets are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS action_tickets_immutable ON action_tickets;
+CREATE TRIGGER action_tickets_immutable
+BEFORE UPDATE OR DELETE ON action_tickets
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_action_ticket_mutation();
+
+CREATE TABLE IF NOT EXISTS execution_gate_requests (
+  gate_id UUID PRIMARY KEY,
+  ticket_id UUID NOT NULL REFERENCES action_tickets(id) ON DELETE CASCADE,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL
+    CHECK (length(btrim(task_id)) BETWEEN 1 AND 180),
+  project_id UUID REFERENCES projects(id),
+  gate_key TEXT NOT NULL
+    CHECK (length(btrim(gate_key)) BETWEEN 1 AND 180),
+  kind TEXT NOT NULL
+    CHECK (
+      kind IN (
+        'preflight',
+        'tool-approval',
+        'data-source',
+        'external-send',
+        'budget',
+        'runtime-switch'
+      )
+    ),
+  enforcement TEXT NOT NULL
+    CHECK (enforcement IN ('blocking', 'non-blocking')),
+  reason TEXT NOT NULL
+    CHECK (length(btrim(reason)) BETWEEN 1 AND 2000),
+  requested_tool_category TEXT,
+  requested_source_class TEXT,
+  resource_scopes TEXT[] NOT NULL
+    CHECK (cardinality(resource_scopes) > 0),
+  policy_id UUID REFERENCES task_execution_policies(id),
+  policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+  envelope_id TEXT NOT NULL
+    CHECK (length(btrim(envelope_id)) BETWEEN 1 AND 180),
+  envelope_digest TEXT NOT NULL
+    CHECK (envelope_digest ~ '^[a-f0-9]{64}$'),
+  requested_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(requested_by_principal_id)) BETWEEN 1 AND 180),
+  requested_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (ticket_id, gate_key),
+  CHECK (expires_at > requested_at),
+  CHECK (project_id IS NOT NULL OR ticket_id IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS execution_gate_requests_run_idx
+  ON execution_gate_requests(run_id, requested_at);
+
+CREATE INDEX IF NOT EXISTS execution_gate_requests_ticket_idx
+  ON execution_gate_requests(ticket_id, requested_at);
+
+CREATE INDEX IF NOT EXISTS execution_gate_requests_expiry_idx
+  ON execution_gate_requests(expires_at);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_execution_gate_request_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'execution gate requests are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS execution_gate_requests_immutable
+  ON execution_gate_requests;
+CREATE TRIGGER execution_gate_requests_immutable
+BEFORE UPDATE OR DELETE ON execution_gate_requests
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_execution_gate_request_mutation();
+
+CREATE TABLE IF NOT EXISTS execution_gate_decisions (
+  decision_id UUID PRIMARY KEY,
+  gate_id UUID NOT NULL UNIQUE
+    REFERENCES execution_gate_requests(gate_id) ON DELETE CASCADE,
+  decision TEXT NOT NULL
+    CHECK (decision IN ('approve', 'reject', 'timeout', 'cancel')),
+  decided_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(decided_by_principal_id)) BETWEEN 1 AND 180),
+  basis TEXT NOT NULL
+    CHECK (length(btrim(basis)) BETWEEN 1 AND 4000),
+  decided_at TIMESTAMPTZ NOT NULL,
+  policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+  envelope_id TEXT NOT NULL
+    CHECK (length(btrim(envelope_id)) BETWEEN 1 AND 180),
+  envelope_digest TEXT NOT NULL
+    CHECK (envelope_digest ~ '^[a-f0-9]{64}$')
+);
+
+CREATE INDEX IF NOT EXISTS execution_gate_decisions_decided_idx
+  ON execution_gate_decisions(decided_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_execution_gate_decision_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'execution gate decisions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS execution_gate_decisions_immutable
+  ON execution_gate_decisions;
+CREATE TRIGGER execution_gate_decisions_immutable
+BEFORE UPDATE OR DELETE ON execution_gate_decisions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_execution_gate_decision_mutation();
+
+CREATE TABLE IF NOT EXISTS action_ticket_usages (
+  ticket_id UUID NOT NULL REFERENCES action_tickets(id) ON DELETE CASCADE,
+  action TEXT NOT NULL
+    CHECK (
+      action IN (
+        'agent.execute',
+        'task.writeback',
+        'workflow.writeback',
+        'meeting.writeback',
+        'direct-chat.writeback'
+      )
+    ),
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 240),
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'started'
+    CHECK (status IN ('started', 'completed', 'failed')),
+  result JSONB
+    CHECK (result IS NULL OR jsonb_typeof(result) = 'object'),
+  started_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  PRIMARY KEY (ticket_id, action, idempotency_key),
+  CHECK (
+    (status = 'started' AND completed_at IS NULL)
+    OR (status IN ('completed', 'failed') AND completed_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS action_ticket_usages_run_idx
+  ON action_ticket_usages(run_id, action, started_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_action_ticket_usage_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'action ticket usages cannot be deleted';
+  END IF;
+  IF OLD.ticket_id IS DISTINCT FROM NEW.ticket_id
+    OR OLD.action IS DISTINCT FROM NEW.action
+    OR OLD.idempotency_key IS DISTINCT FROM NEW.idempotency_key
+    OR OLD.run_id IS DISTINCT FROM NEW.run_id
+    OR OLD.started_at IS DISTINCT FROM NEW.started_at
+  THEN
+    RAISE EXCEPTION 'action ticket usage identity is immutable';
+  END IF;
+  IF OLD.status <> 'started' AND OLD.status IS DISTINCT FROM NEW.status THEN
+    RAISE EXCEPTION 'terminal action ticket usage is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS action_ticket_usages_identity_immutable
+  ON action_ticket_usages;
+CREATE TRIGGER action_ticket_usages_identity_immutable
+BEFORE UPDATE OR DELETE ON action_ticket_usages
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_action_ticket_usage_mutation();
+`;

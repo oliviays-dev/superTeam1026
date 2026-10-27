@@ -43,7 +43,7 @@ integration("meeting AI participation", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 25,
+      expectedMigrationVersion: 26,
     });
     app = built.app;
     await app.ready();
@@ -724,27 +724,35 @@ integration("meeting AI participation", () => {
       60,
       retryRunId!,
     );
-    await processJob(recoveredJob!, "meeting-ai-worker-recovered");
+    await expect(
+      processJob(recoveredJob!, "meeting-ai-worker-recovered"),
+    ).rejects.toThrow(/Action Ticket action is already in progress/);
+    await repositories.jobs.fail(
+      recoveredJob!.id,
+      "meeting-ai-worker-recovered",
+      recoveredJob!.leaseToken,
+      "Action Ticket execution boundary is already in progress",
+      { retryable: false },
+    );
     messages = await database.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count
        FROM meeting_messages
        WHERE turn_id = $1 AND status = 'sent'`,
       [retryTurnId],
     );
-    expect(messages.rows[0]?.count).toBe("1");
+    expect(messages.rows[0]?.count).toBe("0");
 
-    await database.query(
-      `UPDATE jobs
-       SET status = 'queued', available_at = NOW(), lease_owner = NULL,
-           lease_token = NULL, lease_expires_at = NULL,
-           max_attempts = GREATEST(max_attempts, attempts + 2), updated_at = NOW()
-       WHERE run_id = $1`,
-      [retryRunId],
-    );
+    const leaseTrigger = await trigger(fixture.meeting.id, {
+      kind: "round",
+      roundNumber: 3,
+      agentIds: [],
+    });
+    const leaseRunId = leaseTrigger.body.turns[0]?.runId;
+    const leaseTurnId = leaseTrigger.body.turns[0]?.id;
     const leaseJob = await repositories.jobs.claimNext(
       "meeting-ai-worker-lease",
       60,
-      retryRunId!,
+      leaseRunId!,
     );
     await database.query(
       "UPDATE jobs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
@@ -754,18 +762,18 @@ integration("meeting AI participation", () => {
       baseBackoffMs: 0,
       maxBackoffMs: 0,
     });
-    expect(recovered.some((job) => job.runId === retryRunId)).toBe(true);
+    expect(recovered.some((job) => job.runId === leaseRunId)).toBe(true);
     const finalReplay = await repositories.jobs.claimNext(
       "meeting-ai-worker-final",
       60,
-      retryRunId!,
+      leaseRunId!,
     );
     await processJob(finalReplay!, "meeting-ai-worker-final");
     messages = await database.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count
        FROM meeting_messages
        WHERE turn_id = $1`,
-      [retryTurnId],
+      [leaseTurnId],
     );
     expect(messages.rows[0]?.count).toBe("1");
 
@@ -786,23 +794,36 @@ integration("meeting AI participation", () => {
        WHERE id = $1`,
       [failureRunId],
     );
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const job = await repositories.jobs.claimNext(
-        `meeting-ai-failure-${attempt}`,
-        60,
-        failureRunId!,
-      );
-      await expect(
-        processJob(job!, `meeting-ai-failure-${attempt}`),
-      ).rejects.toThrow(/Fake Runtime injected failure/);
-      await repositories.jobs.fail(
-        job!.id,
-        `meeting-ai-failure-${attempt}`,
-        job!.leaseToken,
-        "Fake Runtime injected failure",
-        { baseBackoffMs: 0, maxBackoffMs: 0 },
-      );
-    }
+    const failureJob = await repositories.jobs.claimNext(
+      "meeting-ai-failure-1",
+      60,
+      failureRunId!,
+    );
+    await expect(
+      processJob(failureJob!, "meeting-ai-failure-1"),
+    ).rejects.toThrow(/Fake Runtime injected failure/);
+    await repositories.jobs.fail(
+      failureJob!.id,
+      "meeting-ai-failure-1",
+      failureJob!.leaseToken,
+      "Fake Runtime injected failure",
+      { baseBackoffMs: 0, maxBackoffMs: 0 },
+    );
+    const failureReplay = await repositories.jobs.claimNext(
+      "meeting-ai-failure-2",
+      60,
+      failureRunId!,
+    );
+    await expect(
+      processJob(failureReplay!, "meeting-ai-failure-2"),
+    ).rejects.toThrow(/Action Ticket action is already in progress/);
+    await repositories.jobs.fail(
+      failureReplay!.id,
+      "meeting-ai-failure-2",
+      failureReplay!.leaseToken,
+      "Action Ticket execution boundary is already in progress",
+      { retryable: false },
+    );
     const failedMessages = await database.query<{
       status: string;
       error_code: string;
@@ -820,6 +841,6 @@ integration("meeting AI participation", () => {
     ]);
     const finalPolicy = await getPolicy(fixture.meeting.id);
     expect(finalPolicy.stats.messagesSent).toBe(2);
-    expect(finalPolicy.stats.messagesFailed).toBe(1);
+    expect(finalPolicy.stats.messagesFailed).toBe(2);
   });
 });

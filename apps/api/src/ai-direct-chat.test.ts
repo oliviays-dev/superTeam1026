@@ -47,7 +47,7 @@ integration("AI direct chat", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 25,
+      expectedMigrationVersion: 26,
     });
     app = built.app;
     await app.ready();
@@ -602,23 +602,21 @@ integration("AI direct chat", () => {
       "Fake Runtime injected failure",
       { baseBackoffMs: 0, maxBackoffMs: 0 },
     );
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const retryJob = await repositories.jobs.claimNext(
-        `direct-chat-failure-${attempt}`,
-        60,
-        sent.body.run.id,
-      );
-      await expect(
-        processJob(retryJob!, `direct-chat-failure-${attempt}`),
-      ).rejects.toThrow(/Fake Runtime injected failure/);
-      await repositories.jobs.fail(
-        retryJob!.id,
-        `direct-chat-failure-${attempt}`,
-        retryJob!.leaseToken,
-        "Fake Runtime injected failure",
-        { baseBackoffMs: 0, maxBackoffMs: 0 },
-      );
-    }
+    const failedReplayJob = await repositories.jobs.claimNext(
+      "direct-chat-failure-replay",
+      60,
+      sent.body.run.id,
+    );
+    await expect(
+      processJob(failedReplayJob!, "direct-chat-failure-replay"),
+    ).rejects.toThrow(/Action Ticket action is already in progress/);
+    await repositories.jobs.fail(
+      failedReplayJob!.id,
+      "direct-chat-failure-replay",
+      failedReplayJob!.leaseToken,
+      "Action Ticket execution boundary is already in progress",
+      { retryable: false },
+    );
     const failedDetail = await detail(thread.id);
     const failedMessage = failedDetail.messages.find(
       (message) => message.status === "failed",

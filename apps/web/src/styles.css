@@ -5274,6 +5274,108 @@ code {
   background: var(--pm-bg-layer-1);
 }
 
+.gate-section {
+  display: grid;
+  gap: 10px;
+}
+
+.gate-ticket-meta {
+  margin-left: auto;
+  color: var(--pm-label-tertiary);
+  font-size: 9.5px;
+}
+
+.gate-list {
+  display: grid;
+  gap: 7px;
+}
+
+.gate-card {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 7px;
+  background: var(--pm-bg-base);
+}
+
+.gate-card-heading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.gate-card-heading strong {
+  min-width: 0;
+  color: var(--pm-label-primary);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.gate-meta {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--pm-label-tertiary);
+  font-size: 9.5px;
+  flex-wrap: wrap;
+}
+
+.gate-decision {
+  margin: 0;
+  color: var(--pm-label-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.gate-actions {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) repeat(3, auto);
+  gap: 6px;
+}
+
+.gate-actions input {
+  min-width: 0;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--pm-border-l2);
+  border-radius: 6px;
+  color: var(--pm-label-primary);
+  background: var(--pm-bg-layer-1);
+  font: inherit;
+}
+
+.gate-actions input:focus {
+  outline: 2px solid color-mix(in srgb, var(--pm-accent) 35%, transparent);
+  outline-offset: 1px;
+}
+
+.form-error {
+  margin: 0;
+  color: var(--pm-danger);
+  font-size: 10px;
+}
+
+.gate-status-pending {
+  color: var(--pm-warning);
+}
+
+.gate-status-approved {
+  color: var(--pm-success);
+}
+
+.gate-status-denied,
+.gate-status-expired,
+.gate-status-cancelled {
+  color: var(--pm-danger);
+}
+
 .external-run-panel {
   display: grid;
   gap: 10px;
@@ -8156,5 +8258,18 @@ code {
   .meeting-trace-chain > header small {
     width: 100%;
     margin-left: 0;
+  }
+
+  .gate-actions {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .gate-actions input {
+    grid-column: 1 / -1;
+  }
+
+  .gate-actions .pm-btn {
+    width: 100%;
+    justify-content: center;
   }
 }

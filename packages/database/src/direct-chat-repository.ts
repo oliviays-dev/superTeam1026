@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   createRootTraceContext,
+  type ActionTicket,
   type Agent,
   type DirectChatDetail,
   type DirectChatMessage,
@@ -10,6 +11,7 @@ import {
   type DirectChatThreadListItem,
   type DirectChatTurn,
   type ExternalRunExecutionSnapshot,
+  type ExecutionGateRequest,
   type RunExecutionEnvelope,
   type RunInputSnapshot,
   type SendDirectChatMessageInput,
@@ -23,10 +25,13 @@ import {
   type AgentRow,
   type RunRow,
 } from "./rows.js";
+import { ActionTicketRepository } from "./action-ticket-repository.js";
 
 export interface PreparedDirectChatExecution {
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
   readonly executionEnvelope: RunExecutionEnvelope;
+  readonly actionTicket: ActionTicket;
+  readonly executionGates: readonly ExecutionGateRequest[];
   readonly timeoutAt?: string;
 }
 
@@ -218,7 +223,10 @@ function assertDispatchable(agent: Agent): void {
 }
 
 export class DirectChatRepository {
-  constructor(private readonly database: Database) {}
+  constructor(
+    private readonly database: Database,
+    private readonly actionTickets = new ActionTicketRepository(database),
+  ) {}
 
   async listForOwner(ownerId: string): Promise<DirectChatThreadListItem[]> {
     const threads = await this.database.query<DirectChatThreadRow>(
@@ -338,6 +346,8 @@ export class DirectChatRepository {
     trace: TraceContext = createRootTraceContext(),
     resolveExternalExecution?: (
       agent: Agent,
+      runId: string,
+      turnId: string,
     ) => Promise<PreparedDirectChatExecution | undefined>,
   ): Promise<DirectChatSendResult> {
     return this.database.transaction(async (client) => {
@@ -362,7 +372,9 @@ export class DirectChatRepository {
         );
       }
       assertDispatchable(agent);
-      const prepared = await resolveExternalExecution?.(agent);
+      const runId = randomUUID();
+      const turnId = randomUUID();
+      const prepared = await resolveExternalExecution?.(agent, runId, turnId);
       const executionSnapshot = prepared?.executionSnapshot;
       if (
         (agent.runtimeKind === "codex-jsonl" ||
@@ -383,7 +395,6 @@ export class DirectChatRepository {
         clientMessageId: input.clientMessageId,
         traceId: trace.traceId,
       });
-      const turnId = randomUUID();
       await client.query(
         `INSERT INTO direct_chat_turns (
            id, thread_id, source_message_id, agent_id, attempt, status,
@@ -391,7 +402,8 @@ export class DirectChatRepository {
          ) VALUES ($1, $2, $3, $4, 1, 'queued', NOW(), NOW())`,
         [turnId, threadId, message.id, agent.id],
       );
-      const runId = await this.enqueueRunWithClient(client, {
+      await this.enqueueRunWithClient(client, {
+        runId,
         thread,
         agent,
         turnId,
@@ -402,6 +414,13 @@ export class DirectChatRepository {
           ? {}
           : {
               executionEnvelope: prepared.executionEnvelope,
+              actionTicket: prepared.actionTicket,
+              executionGates: prepared.executionGates,
+              executionStatus: prepared.executionGates.some(
+                (gate) => gate.enforcement === "blocking",
+              )
+                ? "waiting_approval"
+                : "queued",
               ...(prepared.timeoutAt === undefined
                 ? {}
                 : { timeoutAt: prepared.timeoutAt }),
@@ -429,6 +448,8 @@ export class DirectChatRepository {
     trace: TraceContext = createRootTraceContext(),
     resolveExternalExecution?: (
       agent: Agent,
+      runId: string,
+      turnId: string,
     ) => Promise<PreparedDirectChatExecution | undefined>,
   ): Promise<DirectChatSendResult> {
     return this.database.transaction(async (client) => {
@@ -460,7 +481,13 @@ export class DirectChatRepository {
         );
       }
       assertDispatchable(agent);
-      const prepared = await resolveExternalExecution?.(agent);
+      const runId = randomUUID();
+      const retryTurnId = randomUUID();
+      const prepared = await resolveExternalExecution?.(
+        agent,
+        runId,
+        retryTurnId,
+      );
       const executionSnapshot = prepared?.executionSnapshot;
       if (
         (agent.runtimeKind === "codex-jsonl" ||
@@ -482,7 +509,6 @@ export class DirectChatRepository {
          WHERE thread_id = $1 AND source_message_id = $2`,
         [threadId, current.source_message_id],
       );
-      const retryTurnId = randomUUID();
       await client.query(
         `INSERT INTO direct_chat_turns (
            id, thread_id, source_message_id, agent_id, attempt, status,
@@ -497,6 +523,7 @@ export class DirectChatRepository {
         ],
       );
       await this.enqueueRunWithClient(client, {
+        runId,
         thread,
         agent,
         turnId: retryTurnId,
@@ -507,6 +534,13 @@ export class DirectChatRepository {
           ? {}
           : {
               executionEnvelope: prepared.executionEnvelope,
+              actionTicket: prepared.actionTicket,
+              executionGates: prepared.executionGates,
+              executionStatus: prepared.executionGates.some(
+                (gate) => gate.enforcement === "blocking",
+              )
+                ? "waiting_approval"
+                : "queued",
               ...(prepared.timeoutAt === undefined
                 ? {}
                 : { timeoutAt: prepared.timeoutAt }),
@@ -812,6 +846,7 @@ export class DirectChatRepository {
   private async enqueueRunWithClient(
     client: PoolClient,
     input: {
+      readonly runId: string;
       readonly thread: DirectChatThreadRow;
       readonly agent: Agent;
       readonly turnId: string;
@@ -819,10 +854,13 @@ export class DirectChatRepository {
       readonly trace: TraceContext;
       readonly executionSnapshot?: ExternalRunExecutionSnapshot;
       readonly executionEnvelope?: RunExecutionEnvelope;
+      readonly actionTicket?: ActionTicket;
+      readonly executionGates?: readonly ExecutionGateRequest[];
+      readonly executionStatus?: "queued" | "waiting_approval";
       readonly timeoutAt?: string;
     },
   ): Promise<string> {
-    const runId = randomUUID();
+    const runId = input.runId;
     const inputSnapshot: RunInputSnapshot = {
       taskTitle: `AI 对话 · ${input.agent.name}`,
       taskDescription: input.source.content,
@@ -851,7 +889,7 @@ export class DirectChatRepository {
          timeout_at, idempotency_key, trace_id, trace_root_span_id,
          created_at, updated_at
        ) VALUES (
-         $1, NULL, NULL, NULL, $2, $3, 'queued', $4::jsonb, $5::jsonb,
+         $1, NULL, NULL, NULL, $2, $3, $22, $4::jsonb, $5::jsonb,
          $6, $7, $8, $9, $10, $11, $12::jsonb,
          $13, $14, $15, $16, $17::jsonb, 1, $18, $19, $20, $21,
          NOW(), NOW()
@@ -901,6 +939,7 @@ export class DirectChatRepository {
         `direct-chat:${input.turnId}`,
         input.trace.traceId,
         input.trace.spanId,
+        input.executionStatus ?? "queued",
       ],
     );
     if (run.rowCount !== 1) {
@@ -942,6 +981,15 @@ export class DirectChatRepository {
         input.trace.spanId,
       ],
     );
+    if (input.actionTicket !== undefined) {
+      await this.actionTickets.issueWithClient(client, input.actionTicket);
+      await this.actionTickets.issueGatesWithClient(
+        client,
+        input.executionGates ?? [],
+      );
+    } else if ((input.executionGates ?? []).length > 0) {
+      throw new Error("direct chat execution gates require a ticket");
+    }
     await client.query(
       `INSERT INTO domain_outbox (
          id, topic, payload, status, created_at

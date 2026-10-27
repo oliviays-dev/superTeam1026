@@ -4,6 +4,7 @@ import {
   agentRuntimePreflightInputSchema,
   agentStatusInputSchema,
   accountStatusInputSchema,
+  cancelExecutionGateInputSchema,
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
   confirmHandoffCardInputSchema,
@@ -34,6 +35,7 @@ import {
   convertMeetingActionItemInputSchema,
   cosignWorkflowApprovalInputSchema,
   decideWorkflowApprovalInputSchema,
+  decideExecutionGateInputSchema,
   generateProjectReportInputSchema,
   importWorkflowMarkdownInputSchema,
   idempotencyCleanupInputSchema,
@@ -122,6 +124,7 @@ export interface BuildApiOptions {
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
 const runParamsSchema = z.object({ runId: z.string().uuid() });
+const executionGateParamsSchema = z.object({ gateId: z.string().uuid() });
 const traceParamsSchema = z.object({ traceId: traceIdSchema });
 const artifactParamsSchema = z.object({ artifactId: z.string().uuid() });
 const taskAttachmentParamsSchema = z.object({
@@ -1857,6 +1860,44 @@ export function buildApi(options: BuildApiOptions): {
       await application.getRunExecutionEnvelope(runId, actorId),
     );
   });
+
+  app.get("/api/v1/runs/:runId/action-ticket", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.getRunActionTicket(runId, actorId));
+  });
+
+  app.get("/api/v1/runs/:runId/execution-gates", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listRunExecutionGates(runId, actorId),
+    });
+  });
+
+  app.post(
+    "/api/v1/execution-gates/:gateId/decisions",
+    async (request, reply) => {
+      const { gateId } = executionGateParamsSchema.parse(request.params);
+      const input = decideExecutionGateInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.decideExecutionGate(gateId, input, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/execution-gates/:gateId/cancel",
+    async (request, reply) => {
+      const { gateId } = executionGateParamsSchema.parse(request.params);
+      const input = cancelExecutionGateInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.cancelExecutionGate(gateId, input, actorId),
+      );
+    },
+  );
 
   app.get("/api/v1/runs/:runId/artifacts", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);

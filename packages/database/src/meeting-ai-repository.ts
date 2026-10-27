@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   createRootTraceContext,
   newSpanId,
+  type ActionTicket,
+  type ExecutionGateRequest,
   type MeetingAiPolicy,
   type MeetingAiPolicyStatus,
   type MeetingAiTriggerKind,
@@ -15,10 +17,13 @@ import {
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import { Database } from "./database.js";
+import { ActionTicketRepository } from "./action-ticket-repository.js";
 
 export interface PreparedMeetingAiExecution {
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
   readonly executionEnvelope: RunExecutionEnvelope;
+  readonly actionTicket: ActionTicket;
+  readonly executionGates: readonly ExecutionGateRequest[];
   readonly timeoutAt?: string;
 }
 
@@ -281,7 +286,10 @@ function triggerRoundDedupeKey(input: {
 }
 
 export class MeetingAiRepository {
-  constructor(private readonly database: Database) {}
+  constructor(
+    private readonly database: Database,
+    private readonly actionTickets = new ActionTicketRepository(database),
+  ) {}
 
   async getPolicy(meetingId: string): Promise<MeetingAiPolicy | undefined> {
     const result = await this.database.query<MeetingAiPolicyRow>(
@@ -428,6 +436,7 @@ export class MeetingAiRepository {
       readonly agentId: string;
       readonly turnId: string;
       readonly projectId: string;
+      readonly runId: string;
     }) => Promise<PreparedMeetingAiExecution | undefined>;
   }): Promise<TriggerMeetingAiResult> {
     return this.database.transaction(async (client) => {
@@ -758,6 +767,7 @@ export class MeetingAiRepository {
             agentId: participant.agent_id,
             turnId,
             projectId: input.projectId,
+            runId,
           });
         const executionSnapshot = prepared?.executionSnapshot;
         if (
@@ -782,7 +792,7 @@ export class MeetingAiRepository {
              idempotency_key, trace_id, trace_root_span_id,
              created_at, updated_at
            ) VALUES (
-             $1, $2, NULL, $3, $4, 'queued', $5::jsonb, $6::jsonb,
+             $1, $2, NULL, $3, $4, $23, $5::jsonb, $6::jsonb,
              $7, $8, $9, $10, $11, $12, $13::jsonb,
              $14, $15, $16, $17, $18::jsonb, 1, $19, $20, $21, $22,
              NOW(), NOW()
@@ -832,6 +842,11 @@ export class MeetingAiRepository {
             `meeting-ai:${turnId}`,
             trace.traceId,
             trace.spanId,
+            prepared?.executionGates.some(
+              (gate) => gate.enforcement === "blocking",
+            )
+              ? "waiting_approval"
+              : "queued",
           ],
         );
         if (run.rowCount !== 1)
@@ -872,6 +887,18 @@ export class MeetingAiRepository {
             trace.spanId,
           ],
         );
+        if (prepared?.actionTicket !== undefined) {
+          await this.actionTickets.issueWithClient(
+            client,
+            prepared.actionTicket,
+          );
+          await this.actionTickets.issueGatesWithClient(
+            client,
+            prepared.executionGates,
+          );
+        } else if ((prepared?.executionGates ?? []).length > 0) {
+          throw new Error("meeting AI execution gates require a ticket");
+        }
         await client.query(
           `INSERT INTO domain_outbox (
              id, topic, payload, status, created_at

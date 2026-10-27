@@ -150,7 +150,8 @@ export type AuthorizationResourceType =
   | "report"
   | "handoff"
   | "agent-episode"
-  | "meeting-action-item";
+  | "meeting-action-item"
+  | "execution-gate";
 
 export class AuthorizationRepositoryError extends Error {
   constructor(
@@ -696,6 +697,9 @@ export class AuthorizationRepository {
         },
         "meeting-action-item": {
           sql: "SELECT project_id FROM meeting_action_items WHERE id = $1",
+        },
+        "execution-gate": {
+          sql: "SELECT project_id FROM execution_gate_requests WHERE gate_id = $1",
         },
       };
     const query = queries[resourceType];

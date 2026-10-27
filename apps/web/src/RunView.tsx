@@ -8,11 +8,17 @@ import {
   FileText,
   LoaderCircle,
   RefreshCw,
+  ShieldCheck,
+  ShieldX,
+  Ticket,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   cancelRun,
+  cancelExecutionGate,
+  decideExecutionGate,
   downloadArtifact,
+  getRunActionTicket,
   getRunContext,
   getRunDetail,
   getRunEvents,
@@ -48,6 +54,9 @@ export function RunView({ runId }: { runId: string }) {
   const queryClient = useQueryClient();
   const [events, setEvents] = useState<PlatformRunEvent[]>([]);
   const [liveOutput, setLiveOutput] = useState("");
+  const [gateBasis, setGateBasis] = useState("");
+  const [gateError, setGateError] = useState("");
+  const [decidingGateId, setDecidingGateId] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<
     "connecting" | "live" | "closed"
   >("connecting");
@@ -58,6 +67,11 @@ export function RunView({ runId }: { runId: string }) {
   const contextQuery = useQuery({
     queryKey: ["run-context", runId],
     queryFn: () => getRunContext(runId),
+    retry: false,
+  });
+  const actionTicketQuery = useQuery({
+    queryKey: ["run-action-ticket", runId],
+    queryFn: () => getRunActionTicket(runId),
     retry: false,
   });
   const artifactsQuery = useQuery({
@@ -118,6 +132,18 @@ export function RunView({ runId }: { runId: string }) {
                       queryKey: ["task-runs"],
                     });
                   }
+                  if (
+                    event.type === "gate.requested" ||
+                    event.type === "gate.decided" ||
+                    event.type === "gate.expired"
+                  ) {
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run-action-ticket", runId],
+                    });
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run", runId],
+                    });
+                  }
                 },
                 onDelta: (delta) => {
                   lastDelta = Math.max(lastDelta, delta.seq);
@@ -156,6 +182,49 @@ export function RunView({ runId }: { runId: string }) {
     [events],
   );
   const artifacts: Artifact[] = artifactsQuery.data ?? [];
+  const gates = actionTicketQuery.data?.gates ?? [];
+  const decideGate = async (
+    gateId: string,
+    decision: "approve" | "reject",
+  ) => {
+    setGateError("");
+    setDecidingGateId(gateId);
+    try {
+      await decideExecutionGate(
+        gateId,
+        decision,
+        gateBasis.trim() || (decision === "approve" ? "批准执行" : "拒绝执行"),
+      );
+      setGateBasis("");
+      await queryClient.invalidateQueries({
+        queryKey: ["run-action-ticket", runId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["run", runId] });
+    } catch (error) {
+      setGateError(error instanceof Error ? error.message : "Gate 决策失败");
+    } finally {
+      setDecidingGateId(null);
+    }
+  };
+  const cancelGate = async (gateId: string) => {
+    setGateError("");
+    setDecidingGateId(gateId);
+    try {
+      await cancelExecutionGate(
+        gateId,
+        gateBasis.trim() || "取消待决 Execution Gate",
+      );
+      setGateBasis("");
+      await queryClient.invalidateQueries({
+        queryKey: ["run-action-ticket", runId],
+      });
+      await queryClient.invalidateQueries({ queryKey: ["run", runId] });
+    } catch (error) {
+      setGateError(error instanceof Error ? error.message : "Gate 取消失败");
+    } finally {
+      setDecidingGateId(null);
+    }
+  };
   const beginArtifactDownload = async (artifact: Artifact) => {
     try {
       const blob = await downloadArtifact(artifact.id);
@@ -218,6 +287,85 @@ export function RunView({ runId }: { runId: string }) {
           </button>
         )}
       </header>
+
+      {gates.length > 0 && (
+        <section className="run-section gate-section">
+          <div className="section-title">
+            <Ticket size={15} />
+            <h3>Action Ticket</h3>
+            {actionTicketQuery.data !== undefined && (
+              <span className="gate-ticket-meta">
+                r{actionTicketQuery.data.ticket.policyRevision} ·{" "}
+                {shortId(actionTicketQuery.data.ticket.envelopeId)}
+              </span>
+            )}
+          </div>
+          <div className="gate-list">
+            {gates.map((gate) => (
+              <article className="gate-card" key={gate.gateId}>
+                <div className="gate-card-heading">
+                  <strong>{gate.reason}</strong>
+                  <span className={`pm-pill gate-status-${gate.status}`}>
+                    {gate.status}
+                  </span>
+                </div>
+                <div className="gate-meta">
+                  <span>{gate.kind}</span>
+                  <span>{gate.enforcement}</span>
+                  <span>p{gate.policyRevision}</span>
+                  <time>{formatDateTime(gate.expiresAt)}</time>
+                </div>
+                {gate.decision !== null && (
+                  <p className="gate-decision">
+                    {gate.decision.decision} ·{" "}
+                    {gate.decision.decidedByPrincipalId} ·{" "}
+                    {gate.decision.basis}
+                  </p>
+                )}
+                {gate.status === "pending" && (
+                  <div className="gate-actions">
+                    <input
+                      aria-label="Gate decision basis"
+                      className="pm-input"
+                      onChange={(event) => setGateBasis(event.target.value)}
+                      placeholder="决策依据"
+                      value={gateBasis}
+                    />
+                    <button
+                      className="pm-btn"
+                      disabled={decidingGateId !== null}
+                      onClick={() => void decideGate(gate.gateId, "approve")}
+                      type="button"
+                    >
+                      <ShieldCheck size={14} />
+                      批准
+                    </button>
+                    <button
+                      className="pm-btn secondary"
+                      disabled={decidingGateId !== null}
+                      onClick={() => void decideGate(gate.gateId, "reject")}
+                      type="button"
+                    >
+                      <ShieldX size={14} />
+                      拒绝
+                    </button>
+                    <button
+                      className="pm-btn danger"
+                      disabled={decidingGateId !== null}
+                      onClick={() => void cancelGate(gate.gateId)}
+                      type="button"
+                    >
+                      <CircleStop size={14} />
+                      取消 Gate
+                    </button>
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+          {gateError !== "" && <p className="form-error">{gateError}</p>}
+        </section>
+      )}
 
       <section className="run-section">
         <div className="section-title">

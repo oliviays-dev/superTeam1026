@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
+  ActionTicketBundle,
   Agent,
   AgentDetail,
   AgentEpisode,
@@ -28,6 +29,8 @@ import type {
   CreateSupplierRiskInput,
   CompleteWorkflowNodeInput,
   DecideWorkflowApprovalInput,
+  DecideExecutionGateInput,
+  CancelExecutionGateInput,
   ImportWorkflowMarkdownInput,
   IdempotencyCleanupInput,
   Job,
@@ -137,6 +140,7 @@ import type {
   ExternalRuntimeEvent,
   ExternalRuntimeProbeRequestResult,
   ExternalRuntimeStatus,
+  ExecutionGateRecord,
   UpdateExternalRuntimeInput,
   RemoveAgentRuntimeBindingInput,
   TaskExecutionPolicyRecord,
@@ -186,11 +190,16 @@ import {
   type ExecutionContextType,
   type TaskExecutionPreparation,
 } from "./task-execution-preflight.js";
+import { ExecutionGateService } from "./execution-gate.js";
 
 export {
   TaskExecutionPreflightError,
   executionEnvelopeDigest,
 } from "./task-execution-preflight.js";
+export {
+  ExecutionGateError,
+  ExecutionGateService,
+} from "./execution-gate.js";
 
 export {
   AuthorizationService,
@@ -262,6 +271,7 @@ function scopedPermissions(
 export class PlatformApplication {
   private readonly agentRuntimePreflight: AgentRuntimePreflightService;
   private readonly taskExecutionPreflight: TaskExecutionPreflightService;
+  private readonly executionGates: ExecutionGateService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
@@ -271,6 +281,7 @@ export class PlatformApplication {
     this.taskExecutionPreflight = new TaskExecutionPreflightService(
       repositories,
     );
+    this.executionGates = new ExecutionGateService(repositories);
   }
 
   listProjects(projectIds?: readonly string[]): Promise<Project[]> {
@@ -1320,6 +1331,7 @@ export class PlatformApplication {
     readonly contextType: ExecutionContextType;
     readonly contextId: string;
     readonly taskId: string;
+    readonly runId: string;
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
     readonly deadlineAt?: string;
@@ -1396,7 +1408,7 @@ export class PlatformApplication {
         actorId,
         input,
         trace,
-        (agent) =>
+        (agent, runId, turnId) =>
           this.prepareExecution({
             agent,
             actorId,
@@ -1404,7 +1416,8 @@ export class PlatformApplication {
             projectId: null,
             contextType: "direct-chat",
             contextId: threadId,
-            taskId: threadId,
+            taskId: turnId,
+            runId,
           }),
       );
     } catch (error) {
@@ -1424,7 +1437,7 @@ export class PlatformApplication {
         turnId,
         actorId,
         trace,
-        (agent) =>
+        (agent, runId, turnId) =>
           this.prepareExecution({
             agent,
             actorId,
@@ -1432,7 +1445,8 @@ export class PlatformApplication {
             projectId: null,
             contextType: "direct-chat",
             contextId: threadId,
-            taskId: threadId,
+            taskId: turnId,
+            runId,
           }),
       );
     } catch (error) {
@@ -1873,6 +1887,7 @@ export class PlatformApplication {
       );
     }
     requireExecutableRuntime(agent);
+    const runId = randomUUID();
     const prepared = await this.prepareExecution({
       agent,
       actorId,
@@ -1881,6 +1896,7 @@ export class PlatformApplication {
       contextType: "task",
       contextId: task.id,
       taskId: task.id,
+      runId,
     });
     const executionSnapshot = prepared.executionSnapshot;
     const projectTasks = await this.repositories.tasks.list(task.projectId);
@@ -1901,13 +1917,19 @@ export class PlatformApplication {
       agentName: agent.name,
       runtimeKind: agent.runtimeKind,
     };
-    const runId = randomUUID();
     await this.repositories.runs.enqueue({
       runId,
       task,
       inputSnapshot,
       ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
       executionEnvelope: prepared.executionEnvelope,
+      actionTicket: prepared.actionTicket,
+      executionGates: prepared.executionGates,
+      executionStatus: prepared.executionGates.some(
+        (gate) => gate.enforcement === "blocking",
+      )
+        ? "waiting_approval"
+        : "queued",
       observability: prepared.observability,
       ...(prepared.timeoutAt === undefined
         ? {}
@@ -2021,6 +2043,161 @@ export class PlatformApplication {
     return detail.run.executionEnvelope;
   }
 
+  async getRunActionTicket(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<ActionTicketBundle> {
+    await this.getRunDetail(runId, actorId);
+    const bundle = await this.executionGates.getBundle(runId);
+    if (bundle === undefined) {
+      throw new ApplicationError(
+        "action_ticket_not_found",
+        "Run has no Action Ticket",
+        404,
+      );
+    }
+    return bundle;
+  }
+
+  async listRunExecutionGates(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<ExecutionGateRecord[]> {
+    return (await this.getRunActionTicket(runId, actorId)).gates;
+  }
+
+  async decideExecutionGate(
+    gateId: string,
+    input: DecideExecutionGateInput,
+    actorId = "local-admin",
+  ): Promise<ExecutionGateRecord> {
+    const gate = await this.executionGates.getGate(gateId);
+    if (gate === undefined) {
+      throw new ApplicationError(
+        "execution_gate_not_found",
+        "Execution Gate not found",
+        404,
+      );
+    }
+    if (gate.status !== "pending") {
+      throw new ApplicationError(
+        "execution_gate_not_pending",
+        `Execution Gate is already ${gate.status}`,
+        409,
+      );
+    }
+    await this.requireExecutionGateAccess(gate, actorId, "approve");
+    const result = await this.repositories.actionTickets.decide({
+      gateId,
+      decision: input.decision,
+      decidedByPrincipalId: actorId,
+      basis: input.basis,
+    });
+    if (result.kind === "recorded") return result.gate;
+    if (result.kind === "already_decided") {
+      throw new ApplicationError(
+        "execution_gate_already_decided",
+        "Execution Gate already has an immutable decision",
+        409,
+      );
+    }
+    if (result.kind === "expired") {
+      throw new ApplicationError(
+        "execution_gate_expired",
+        "Execution Gate expired before the decision",
+        409,
+      );
+    }
+    throw new ApplicationError(
+      "execution_gate_not_found",
+      "Execution Gate not found",
+      404,
+    );
+  }
+
+  async cancelExecutionGate(
+    gateId: string,
+    input: CancelExecutionGateInput,
+    actorId = "local-admin",
+  ): Promise<ExecutionGateRecord> {
+    const gate = await this.executionGates.getGate(gateId);
+    if (gate === undefined) {
+      throw new ApplicationError(
+        "execution_gate_not_found",
+        "Execution Gate not found",
+        404,
+      );
+    }
+    if (gate.status !== "pending") {
+      throw new ApplicationError(
+        "execution_gate_not_pending",
+        `Execution Gate is already ${gate.status}`,
+        409,
+      );
+    }
+    await this.requireExecutionGateAccess(gate, actorId, "write");
+    const result = await this.repositories.actionTickets.decide({
+      gateId,
+      decision: "cancel",
+      decidedByPrincipalId: actorId,
+      basis: input.reason,
+    });
+    if (result.kind === "recorded") return result.gate;
+    if (result.kind === "already_decided") {
+      throw new ApplicationError(
+        "execution_gate_already_decided",
+        "Execution Gate already has an immutable decision",
+        409,
+      );
+    }
+    if (result.kind === "expired") {
+      throw new ApplicationError(
+        "execution_gate_expired",
+        "Execution Gate expired before cancellation",
+        409,
+      );
+    }
+    throw new ApplicationError(
+      "execution_gate_not_found",
+      "Execution Gate not found",
+      404,
+    );
+  }
+
+  async expireExecutionGates(limit = 50) {
+    return this.executionGates.expireDue(limit);
+  }
+
+  private async requireExecutionGateAccess(
+    gate: ExecutionGateRecord,
+    actorId: string,
+    permission: "write" | "approve",
+  ): Promise<void> {
+    if (gate.projectId !== null) {
+      await this.requireActiveProjectPermission(
+        gate.projectId,
+        permission,
+        actorId,
+      );
+      return;
+    }
+    if (!(await this.repositories.directChats.canAccessRun(gate.runId, actorId))) {
+      throw new ApplicationError(
+        "direct_chat_forbidden",
+        "The AI direct chat belongs to another account",
+        403,
+      );
+    }
+    const ticket = await this.repositories.actionTickets.getByRun(gate.runId);
+    if (ticket?.principalId !== actorId) {
+      throw new ApplicationError(
+        "execution_gate_forbidden",
+        "Only the Ticket Principal can decide a Direct Chat Gate",
+        403,
+      );
+    }
+  }
+
   async cancelRun(runId: string, actorId = "local-admin"): Promise<void> {
     const run = await this.repositories.runs.get(runId);
     if (run === undefined) {
@@ -2040,7 +2217,11 @@ export class PlatformApplication {
         409,
       );
     }
-    const cancelled = await this.repositories.runs.cancel(runId);
+    const cancelled = await this.repositories.runs.cancel(
+      runId,
+      actorId,
+      "用户取消了本次 Run",
+    );
     if (!cancelled) {
       throw new ApplicationError(
         "run_cancel_failed",
@@ -4998,6 +5179,7 @@ export class PlatformApplication {
       contextType: "workflow-task",
       contextId: task.id,
       taskId: task.id,
+      runId,
       deadlineAt: deadline,
     });
     const executionSnapshot = prepared.executionSnapshot;
@@ -5007,6 +5189,13 @@ export class PlatformApplication {
       inputSnapshot,
       ...(executionSnapshot === undefined ? {} : { executionSnapshot }),
       executionEnvelope: prepared.executionEnvelope,
+      actionTicket: prepared.actionTicket,
+      executionGates: prepared.executionGates,
+      executionStatus: prepared.executionGates.some(
+        (gate) => gate.enforcement === "blocking",
+      )
+        ? "waiting_approval"
+        : "queued",
       observability: prepared.observability,
       attempt: node.attempt,
       timeoutAt: prepared.timeoutAt ?? deadline,
@@ -5553,7 +5742,12 @@ export class PlatformApplication {
         trigger,
         fallbackSummaryKey:
           trigger.sourceMessageId ?? detail.messages.at(-1)?.id ?? meetingId,
-        resolveExternalExecution: async ({ agentId, turnId, projectId }) => {
+        resolveExternalExecution: async ({
+          agentId,
+          turnId,
+          projectId,
+          runId,
+        }) => {
           const agent = await this.repositories.agents.get(agentId);
           if (agent === undefined) {
             throw new ApplicationError(
@@ -5570,6 +5764,7 @@ export class PlatformApplication {
             contextType: "meeting",
             contextId: meetingId,
             taskId: turnId,
+            runId,
           });
         },
       });

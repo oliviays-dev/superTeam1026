@@ -1,4 +1,5 @@
 import type {
+  ActionTicketBundle,
   Agent,
   AgentDetail,
   AgentEpisode,
@@ -25,6 +26,7 @@ import type {
   CreateTaskMessageInput,
   CompleteWorkflowNodeInput,
   DecideWorkflowApprovalInput,
+  ExecutionGateRecord,
   ArchiveTaskAttachmentInput,
   CreateProjectInput,
   CreateProjectTemplateInput,
@@ -704,6 +706,31 @@ export async function listTaskRuns(taskId: string): Promise<Run[]> {
 
 export function getRunDetail(runId: string): Promise<RunDetail> {
   return request(`/runs/${runId}`);
+}
+
+export function getRunActionTicket(runId: string): Promise<ActionTicketBundle> {
+  return request(`/runs/${runId}/action-ticket`);
+}
+
+export function decideExecutionGate(
+  gateId: string,
+  decision: "approve" | "reject",
+  basis: string,
+): Promise<ExecutionGateRecord> {
+  return request(`/execution-gates/${gateId}/decisions`, {
+    method: "POST",
+    body: JSON.stringify({ decision, basis }),
+  });
+}
+
+export function cancelExecutionGate(
+  gateId: string,
+  reason: string,
+): Promise<ExecutionGateRecord> {
+  return request(`/execution-gates/${gateId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
 }
 
 export function getRunContext(

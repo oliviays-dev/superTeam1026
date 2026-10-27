@@ -1,9 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  type ActionTicket,
+  type ActionTicketAction,
   type Agent,
   type AgentRuntimePreflightInput,
   type CapabilityGap,
   type ExecutionEnvelope,
+  type ExecutionGateRequest,
   type ExternalRunExecutionSnapshot,
   type RuntimeCapabilityProfile,
   type RuntimeRequirement,
@@ -24,6 +27,8 @@ export type ExecutionContextType =
 
 export interface TaskExecutionPreparation {
   readonly executionEnvelope: RunExecutionEnvelope;
+  readonly actionTicket: ActionTicket;
+  readonly executionGates: readonly ExecutionGateRequest[];
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
   readonly observability: RunObservability;
   readonly timeoutAt?: string;
@@ -228,16 +233,15 @@ function assertPolicyRequirements(
       );
     }
   }
-  if (policy.toolPolicy.requireApproval.length > 0) {
-    throw new TaskExecutionPreflightError(
-      "execution_gate_not_available",
-      "Tool approval policy requires Batch 15B Execution Gate",
+  const requiresBlockingGate =
+    policy.toolPolicy.requireApproval.length > 0 ||
+    policy.humanGates.some(
+      (gate) => (gate.enforcement ?? "blocking") === "blocking",
     );
-  }
-  if (policy.humanGates.length > 0) {
+  if (requiresBlockingGate && profile.gateEnforcement !== "blocking") {
     throw new TaskExecutionPreflightError(
-      "execution_gate_not_available",
-      "Human gate policy requires Batch 15B Execution Gate",
+      "runtime_capability_missing",
+      "The Runtime cannot enforce blocking Execution Gates",
     );
   }
 }
@@ -370,8 +374,13 @@ function runEnvelope(input: {
   readonly binding: RunExecutionEnvelope["binding"];
   readonly runtime: RunExecutionEnvelope["runtime"];
   readonly envelope: ExecutionEnvelope;
+  readonly ticketId: string;
 }): RunExecutionEnvelope {
   const createdAt = new Date().toISOString();
+  const sealedEnvelope = {
+    ...input.envelope,
+    ticketId: input.ticketId,
+  };
   const withoutDigest = {
     schemaVersion: 1 as const,
     id: `run-envelope-${createHash("sha256")
@@ -380,7 +389,7 @@ function runEnvelope(input: {
           contextType: input.runContextType,
           contextId: input.contextId,
           policy: input.policy,
-          envelope: input.envelope,
+          envelope: sealedEnvelope,
         }),
       )
       .digest("hex")
@@ -401,7 +410,7 @@ function runEnvelope(input: {
     policy: input.policy,
     binding: input.binding,
     runtime: input.runtime,
-    envelope: input.envelope,
+    envelope: sealedEnvelope,
     createdAt,
   };
   return {
@@ -427,6 +436,190 @@ function observability(profile: RuntimeCapabilityProfile): RunObservability {
   };
 }
 
+function writebackAction(
+  contextType: ExecutionContextType,
+): ActionTicketAction {
+  switch (contextType) {
+    case "task":
+      return "task.writeback";
+    case "workflow-task":
+      return "workflow.writeback";
+    case "meeting":
+      return "meeting.writeback";
+    case "direct-chat":
+      return "direct-chat.writeback";
+  }
+}
+
+function actionTicketExpiry(input: {
+  readonly issuedAt: Date;
+  readonly deadlineAt?: string;
+}): Date {
+  const defaultExpiry = input.issuedAt.getTime() + 2 * 60 * 60 * 1_000;
+  const deadlineExpiry =
+    input.deadlineAt === undefined
+      ? defaultExpiry
+      : new Date(input.deadlineAt).getTime() + 5 * 60 * 1_000;
+  return new Date(
+    Math.min(
+      input.issuedAt.getTime() + 24 * 60 * 60 * 1_000,
+      Math.max(
+        input.issuedAt.getTime() + 5 * 60 * 1_000,
+        deadlineExpiry,
+      ),
+    ),
+  );
+}
+
+function actionResourceScopes(input: {
+  readonly workspaceId: string;
+  readonly contextType: ExecutionContextType;
+  readonly contextId: string;
+  readonly projectId: string | null;
+  readonly taskId: string;
+  readonly runId: string;
+  readonly envelope: ExecutionEnvelope;
+}): string[] {
+  return [
+    `workspace:${input.workspaceId}`,
+    `context:${input.contextType}:${input.contextId}`,
+    `task:${input.taskId}`,
+    `run:${input.runId}`,
+    ...(input.projectId === null ? [] : [`project:${input.projectId}`]),
+    ...input.envelope.resolved.allowedToolCategories.map(
+      (tool) => `tool:${tool}`,
+    ),
+    ...(input.envelope.sourcePolicy?.allow ?? []).map(
+      (source) => `source:${source}`,
+    ),
+  ];
+}
+
+function actionTicket(input: {
+  readonly ticketId: string;
+  readonly runId: string;
+  readonly contextType: ExecutionContextType;
+  readonly contextId: string;
+  readonly taskId: string;
+  readonly projectId: string | null;
+  readonly principalId: string;
+  readonly issuedAt: Date;
+  readonly expiresAt: Date;
+  readonly executionEnvelope: RunExecutionEnvelope;
+  readonly authorization: {
+    readonly scope: "project" | "self";
+    readonly grantIds: readonly string[];
+    readonly effectivePermissions: readonly ScopedAuthorizationPermission[];
+    readonly membershipId: string | null;
+  };
+}): ActionTicket {
+  const writeback = writebackAction(input.contextType);
+  const workspaceId = input.executionEnvelope.envelope.workspaceId;
+  return {
+    schemaVersion: 1,
+    ticketId: input.ticketId,
+    ticketVersion: 1,
+    principalId: input.principalId,
+    workspaceId,
+    contextType: input.contextType,
+    contextId: input.contextId,
+    taskId: input.taskId,
+    runId: input.runId,
+    allowedActions: ["agent.execute", writeback],
+    deniedActions: [],
+    resourceScopes: actionResourceScopes({
+      workspaceId,
+      contextType: input.contextType,
+      contextId: input.contextId,
+      projectId: input.projectId,
+      taskId: input.taskId,
+      runId: input.runId,
+      envelope: input.executionEnvelope.envelope,
+    }),
+    policyId: input.executionEnvelope.policy.id,
+    policyRevision: input.executionEnvelope.policy.revision,
+    envelopeId: input.executionEnvelope.id,
+    envelopeDigest: input.executionEnvelope.digest,
+    authorizationSnapshot: {
+      scope: input.authorization.scope,
+      principalId: input.principalId,
+      grantIds: [...input.authorization.grantIds],
+      effectivePermissions: [...input.authorization.effectivePermissions],
+      membershipId: input.authorization.membershipId,
+    },
+    executionEnvelope: input.executionEnvelope,
+    issuedAt: input.issuedAt.toISOString(),
+    expiresAt: input.expiresAt.toISOString(),
+    issuedBy: input.principalId,
+  };
+}
+
+function executionGateRules(
+  policy: TaskExecutionPolicy,
+): readonly {
+  readonly key: string;
+  readonly kind: ExecutionGateRequest["kind"];
+  readonly enforcement: ExecutionGateRequest["enforcement"];
+  readonly reason: string;
+  readonly toolCategory: string | null;
+  readonly sourceClass: string | null;
+}[] {
+  return [
+    ...policy.toolPolicy.requireApproval.map((tool) => ({
+      key: `tool-approval:${tool}`,
+      kind: "tool-approval" as const,
+      enforcement: "blocking" as const,
+      reason: `Tool category ${tool} requires approval before execution`,
+      toolCategory: tool,
+      sourceClass: null,
+    })),
+    ...policy.humanGates.map((gate) => ({
+      key: `human-gate:${gate.id}`,
+      kind: gate.kind,
+      enforcement: gate.enforcement ?? "blocking",
+      reason: gate.reason,
+      toolCategory: gate.toolCategory ?? null,
+      sourceClass: gate.sourceClass ?? null,
+    })),
+  ];
+}
+
+function executionGates(input: {
+  readonly ticket: ActionTicket;
+  readonly policy: TaskExecutionPolicy;
+  readonly projectId: string | null;
+  readonly requestedByPrincipalId: string;
+  readonly requestedAt: Date;
+}): ExecutionGateRequest[] {
+  const defaultGateExpiry = Math.min(
+    new Date(input.ticket.expiresAt).getTime(),
+    input.requestedAt.getTime() + 15 * 60 * 1_000,
+  );
+  return executionGateRules(input.policy).map((rule) => ({
+    gateId: randomUUID(),
+    ticketId: input.ticket.ticketId,
+    runId: input.ticket.runId,
+    taskId: input.ticket.taskId,
+    projectId: input.projectId,
+    gateKey: rule.key.slice(0, 180),
+    kind: rule.kind,
+    enforcement: rule.enforcement,
+    reason: rule.reason,
+    requestedToolCategory: rule.toolCategory,
+    requestedSourceClass: rule.sourceClass,
+    resourceScopes: [...input.ticket.resourceScopes],
+    policyId: input.ticket.policyId,
+    policyRevision: input.ticket.policyRevision,
+    envelopeId: input.ticket.envelopeId,
+    envelopeDigest: input.ticket.envelopeDigest,
+    requestedByPrincipalId: input.requestedByPrincipalId,
+    requestedAt: input.requestedAt.toISOString(),
+    expiresAt: new Date(
+      Math.max(input.requestedAt.getTime() + 1_000, defaultGateExpiry),
+    ).toISOString(),
+  }));
+}
+
 export class TaskExecutionPreflightService {
   private readonly runtimePreflight: AgentRuntimePreflightService;
 
@@ -442,6 +635,7 @@ export class TaskExecutionPreflightService {
     readonly contextType: ExecutionContextType;
     readonly contextId: string;
     readonly taskId: string;
+    readonly runId: string;
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
     readonly deadlineAt?: string;
@@ -449,8 +643,19 @@ export class TaskExecutionPreflightService {
     const principal = await this.repositories.authorization.getPrincipal(
       input.actorId,
     );
+    if (
+      principal === undefined ||
+      principal.status !== "active" ||
+      principal.accountStatus === "disabled"
+    ) {
+      throw new TaskExecutionPreflightError(
+        "principal_not_active",
+        "The initiating Principal is not active",
+        403,
+      );
+    }
     const authSource =
-      principal?.source === "local" ? "local-development" : "bearer";
+      principal.source === "local" ? "local-development" : "bearer";
     const authorization =
       input.projectId === null
         ? {
@@ -507,9 +712,22 @@ export class TaskExecutionPreflightService {
     const requiredCapabilities = requiredCapabilityInput(
       policy.policy.runtime.requiredCapabilities,
     );
+    const ticketId = randomUUID();
+    const issuedAt = new Date();
+    const expiresAt = actionTicketExpiry({
+      issuedAt,
+      ...(input.deadlineAt === undefined
+        ? {}
+        : { deadlineAt: input.deadlineAt }),
+    });
+    let prepared: Omit<
+      TaskExecutionPreparation,
+      "actionTicket" | "executionGates"
+    >;
     if (externalRuntime) {
-      return this.prepareExternal({
+      prepared = await this.prepareExternal({
         ...input,
+        ticketId,
         policy,
         authorization,
         authSource,
@@ -518,16 +736,42 @@ export class TaskExecutionPreflightService {
         ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
         requiredCapabilities,
       });
+    } else {
+      prepared = this.prepareBuiltin({
+        ...input,
+        ticketId,
+        policy,
+        authorization,
+        authSource,
+        agentPrincipalId,
+        ...(model === undefined ? {} : { model }),
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      });
     }
-    return this.prepareBuiltin({
-      ...input,
-      policy,
+    const ticket = actionTicket({
+      ticketId,
+      runId: input.runId,
+      contextType: input.contextType,
+      contextId: input.contextId,
+      taskId: input.taskId,
+      projectId: input.projectId,
+      principalId: input.actorId,
+      issuedAt,
+      expiresAt,
+      executionEnvelope: prepared.executionEnvelope,
       authorization,
-      authSource,
-      agentPrincipalId,
-      ...(model === undefined ? {} : { model }),
-      ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
     });
+    return {
+      ...prepared,
+      actionTicket: ticket,
+      executionGates: executionGates({
+        ticket,
+        policy: policy.policy,
+        projectId: input.projectId,
+        requestedByPrincipalId: input.actorId,
+        requestedAt: issuedAt,
+      }),
+    };
   }
 
   private async projectAuthorization(
@@ -578,6 +822,8 @@ export class TaskExecutionPreflightService {
     readonly contextType: ExecutionContextType;
     readonly contextId: string;
     readonly taskId: string;
+    readonly runId: string;
+    readonly ticketId: string;
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
     readonly deadlineAt?: string;
@@ -593,7 +839,7 @@ export class TaskExecutionPreflightService {
     readonly authSource: "bearer" | "local-development";
     readonly agentPrincipalId: string | null;
     readonly requiredCapabilities: AgentRuntimePreflightInput["requiredCapabilities"];
-  }): Promise<TaskExecutionPreparation> {
+  }): Promise<Omit<TaskExecutionPreparation, "actionTicket" | "executionGates">> {
     const binding = await this.repositories.agentRuntimeBindings.getCurrent(
       input.agent.id,
     );
@@ -651,6 +897,7 @@ export class TaskExecutionPreflightService {
       unresolved: [...envelope.unresolved, ...gaps],
     };
     const runEnvelopeValue = runEnvelope({
+      ticketId: input.ticketId,
       runContextType: input.contextType,
       contextId: input.contextId,
       projectId: input.projectId,
@@ -727,6 +974,8 @@ export class TaskExecutionPreflightService {
     readonly contextType: ExecutionContextType;
     readonly contextId: string;
     readonly taskId: string;
+    readonly runId: string;
+    readonly ticketId: string;
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
     readonly deadlineAt?: string;
@@ -741,7 +990,7 @@ export class TaskExecutionPreflightService {
     };
     readonly authSource: "bearer" | "local-development";
     readonly agentPrincipalId: string | null;
-  }): TaskExecutionPreparation {
+  }): Omit<TaskExecutionPreparation, "actionTicket" | "executionGates"> {
     const binding = builtinCapability(input.agent);
     assertPolicyRequirements(input.policy.policy, binding.profile);
     const raw = builtinEnvelope({
@@ -770,6 +1019,7 @@ export class TaskExecutionPreflightService {
     };
     return {
       executionEnvelope: runEnvelope({
+        ticketId: input.ticketId,
         runContextType: input.contextType,
         contextId: input.contextId,
         projectId: input.projectId,

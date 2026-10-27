@@ -61,6 +61,7 @@ export const executionGateRuleSchema = z.object({
   ]),
   toolCategory: toolCategorySchema.optional(),
   sourceClass: sourceClassSchema.optional(),
+  enforcement: z.enum(["blocking", "non-blocking"]).default("blocking"),
   reason: z.string().trim().min(1).max(1_000),
 });
 export type ExecutionGateRule = z.infer<typeof executionGateRuleSchema>;

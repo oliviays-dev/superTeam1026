@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type {
+  ActionTicket,
   Agent,
   AgentEvent,
   CreateAgentInput,
@@ -7,6 +8,7 @@ import type {
   CreateTaskInput,
   CreateTaskMessageInput,
   ExternalRunExecutionSnapshot,
+  ExecutionGateRequest,
   Job,
   PlatformRunEvent,
   PlatformRunEventType,
@@ -79,6 +81,7 @@ import { ExternalRuntimeRepository } from "./external-runtime-repository.js";
 import { AgentRuntimeBindingRepository } from "./agent-runtime-binding-repository.js";
 import { AuthorizationRepository } from "./authorization-repository.js";
 import { TaskExecutionPolicyRepository } from "./task-execution-policy-repository.js";
+import { ActionTicketRepository } from "./action-ticket-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -602,6 +605,9 @@ export interface EnqueueRunInput {
   readonly inputSnapshot: RunInputSnapshot;
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
   readonly executionEnvelope?: RunExecutionEnvelope;
+  readonly actionTicket?: ActionTicket;
+  readonly executionGates?: readonly ExecutionGateRequest[];
+  readonly executionStatus?: "queued" | "waiting_approval";
   readonly observability?: RunObservability;
   readonly attempt?: number;
   readonly timeoutAt?: string;
@@ -613,7 +619,10 @@ export interface EnqueueRunInput {
 }
 
 export class RunRepository {
-  constructor(private readonly database: Database) {}
+  constructor(
+    private readonly database: Database,
+    private readonly actionTickets = new ActionTicketRepository(database),
+  ) {}
 
   async enqueue(input: EnqueueRunInput): Promise<Run> {
     const trace = input.trace ?? createRootTraceContext();
@@ -630,7 +639,7 @@ export class RunRepository {
            workflow_instance_id, workflow_node_id, trace_id,
            trace_root_span_id, created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, 'queued', $5::jsonb,
+           $1, $2, $3, $4, $26, $5::jsonb,
            $6::jsonb, $7, $8, $9, $10, $11, $12, $13::jsonb,
            $14, $15, $16, $17, $18::jsonb,
            $19, $20, $21, $22, $23, $24, $25, NOW(), NOW()
@@ -673,6 +682,7 @@ export class RunRepository {
           input.workflowNodeId ?? null,
           trace.traceId,
           trace.spanId,
+          input.executionStatus ?? "queued",
         ],
       );
       await client.query(
@@ -702,6 +712,15 @@ export class RunRepository {
           trace.spanId,
         ],
       );
+      if (input.actionTicket !== undefined) {
+        await this.actionTickets.issueWithClient(client, input.actionTicket);
+        await this.actionTickets.issueGatesWithClient(
+          client,
+          input.executionGates ?? [],
+        );
+      } else if ((input.executionGates ?? []).length > 0) {
+        throw new Error("execution gates require an Action Ticket");
+      }
       await client.query(
         "UPDATE tasks SET status = 'in_progress', updated_at = NOW() WHERE id = $1",
         [input.task.id],
@@ -911,7 +930,11 @@ export class RunRepository {
     return result.rows.map(runDeltaFromRow);
   }
 
-  async cancel(id: string): Promise<boolean> {
+  async cancel(
+    id: string,
+    actorId = "system:run-cancel",
+    reason = "Run cancelled by the platform",
+  ): Promise<boolean> {
     return this.database.transaction(async (client) => {
       const result = await client.query<RunRow>(
         `UPDATE runs
@@ -948,6 +971,11 @@ export class RunRepository {
           "direct chat run cancelled",
         );
       }
+      await this.actionTickets.cancelPendingForRunWithClient(client, {
+        runId: id,
+        decidedByPrincipalId: actorId,
+        basis: reason,
+      });
       await this.appendEvent(
         id,
         "run.cancelled",
@@ -1070,6 +1098,18 @@ export class JobRepository {
          WHERE job.status = 'queued'
            AND job.available_at <= NOW()
            AND job.attempts < job.max_attempts
+           AND (
+             run.status IN ('queued', 'interrupted')
+             OR (
+               run.status = 'completed'
+               AND EXISTS (
+                 SELECT 1
+                 FROM runtime_effect_receipts AS effect
+                 WHERE effect.run_id = run.id
+                   AND effect.status = 'completed'
+               )
+             )
+           )
            AND ($1::uuid IS NULL OR job.run_id = $1)
          ORDER BY job.available_at, job.created_at
          FOR UPDATE OF job SKIP LOCKED
@@ -1778,6 +1818,7 @@ async function appendRunEventWithClient(
 }
 
 export class PlatformRepositories {
+  readonly actionTickets: ActionTicketRepository;
   readonly authorization: AuthorizationRepository;
   readonly taskExecutionPolicies: TaskExecutionPolicyRepository;
   readonly projects: ProjectRepository;
@@ -1809,13 +1850,14 @@ export class PlatformRepositories {
   readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
 
   constructor(database: Database) {
+    this.actionTickets = new ActionTicketRepository(database);
     this.authorization = new AuthorizationRepository(database);
     this.taskExecutionPolicies = new TaskExecutionPolicyRepository(database);
     this.projects = new ProjectRepository(database, this.authorization);
     this.agents = new AgentRepository(database);
     this.tasks = new TaskRepository(database);
     this.taskCollaboration = new TaskCollaborationRepository(database);
-    this.runs = new RunRepository(database);
+    this.runs = new RunRepository(database, this.actionTickets);
     this.jobs = new JobRepository(database);
     this.contexts = new ContextRepository(database);
     this.projectMemberships = new ProjectMembershipRepository(
@@ -1834,8 +1876,8 @@ export class PlatformRepositories {
     this.workflowRuntime = new WorkflowRuntimeRepository(database);
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
-    this.meetingAi = new MeetingAiRepository(database);
-    this.directChats = new DirectChatRepository(database);
+    this.meetingAi = new MeetingAiRepository(database, this.actionTickets);
+    this.directChats = new DirectChatRepository(database, this.actionTickets);
     this.meetingDecisions = new MeetingDecisionsRepository(database);
     this.workbench = new WorkbenchRepository(database);
     this.workbenchReports = new WorkbenchReportsRepository(

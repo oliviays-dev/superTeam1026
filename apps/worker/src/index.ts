@@ -39,6 +39,12 @@ const log = (event: string, data: Record<string, unknown> = {}) => {
 };
 
 const sweep = async () => {
+  const expiredGates = await application.expireExecutionGates(
+    config.workerRecoveryBatchSize,
+  );
+  if (expiredGates.length > 0) {
+    log("execution_gate.expired", { count: expiredGates.length });
+  }
   const result = await application.sweepWorkflowInstances(workerId, {
     batchSize: config.workflowSweepBatchSize,
     leaseSeconds: config.workflowSweepLeaseSeconds,

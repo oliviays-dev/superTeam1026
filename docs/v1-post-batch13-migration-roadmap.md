@@ -1,10 +1,10 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 14A-15A 已完成；下一正式批次为 Batch 15B
+> 状态：Batch 14A-15B 已完成；下一正式批次为 Batch 16
 >
-> 当前基线：`8b62d6a7a5c1e56f9496fd8890af602a0a4ee19e`
+> Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
 >
-> 分支：`feat/v1-batch15a-task-execution-policy`
+> 分支：`feat/v1-batch15b-action-ticket-gate`
 >
 > 初始路线图基线：`bc7f55b651737c34ea288b8ad2adf3c51bf3a6ea`
 >
@@ -34,6 +34,8 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
   和 Project Capability；Migration 24 已落地。
 - Batch 15A 已完成版本化 TaskExecutionPolicy、统一 Preflight、Run Execution
   Envelope 与 Worker 快照复核；Migration 25 已落地。
+- Batch 15B 已完成版本化 Action Ticket、blocking/non-blocking Execution Gate、
+  approve/reject/timeout/cancel、Worker 复核与幂等 usage；Migration 26 已落地。
 
 ### 2.2 主要缺口
 
@@ -42,8 +44,8 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
 | 身份认证 | 已完成 14B：Bearer Session；Bearer 模式不接受客户端 actor Header 回退 | 生产认证边界已建立 |
 | Principal 统一 | 已完成 14A/14C/14D：Human/AI Principal、alias、Grant、读授权和 Capability 已统一消费 | 后续迁移主要是历史字段 backfill 和执行授权 |
 | RBAC 消费 | 已完成 14C/14D 的主门禁和读授权；进入 15A 前审计 Application 残留 owner-only 二次门禁 | 防止 Route Grant 与 Application 门禁语义不一致 |
-| TaskExecutionPolicy | 仅有契约，未持久化、未进入 Preflight、未形成不可变快照 | 无法约束任务级 Runtime、工具、来源和预算 |
-| Action Ticket / Gate | 主要在历史设计和契约中，V1 尚无执行门禁 | 高风险动作缺少可校验、可过期的授权票据 |
+| TaskExecutionPolicy | 已完成 15A：持久化 revision、统一 Preflight 和不可变 Run Envelope | 任务级 Runtime、工具、来源和预算已进入执行快照 |
+| Action Ticket / Gate | 已完成 15B：持久化 Ticket、Gate、不可变决策与 Worker 门禁 | 高风险动作具备可校验、可过期和可审计的执行边界 |
 | Scene Context | ContextPack/Receipt 已存在，但 Scene Session 与增量 Contribution 尚未统一 | 不同任务、会议、私聊的上下文隔离和重放不完整 |
 | Task / Teammate 深度 | 基础任务、AI 伙伴和 Worker 已有，工作队列、输入等待和自动执行深度不足 | 无法承接旧 Teammate 的完整工作流 |
 | Meeting Collaboration | AI 参与、Minutes、Action Item 已有，Delegate、私密嘱咐、文件和归档不足 | 会议协作仍是基础版 |
@@ -534,7 +536,7 @@ HTTP Request
 - [x] Batch 14C RBAC 消费与审计
 - [x] Batch 14D RBAC 读授权闭环与 Project Capability
 - [x] Batch 15A TaskExecutionPolicy 与 Envelope
-- [ ] Batch 15B Action Ticket 与 Execution Gate
+- [x] Batch 15B Action Ticket 与 Execution Gate
 - [ ] Batch 16 Context 与 Scene Session
 - [ ] Batch 17A Task Execution Depth
 - [ ] Batch 17B AI Teammate
@@ -557,16 +559,15 @@ HTTP Request
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 15B：Action Ticket 与 Execution Gate**。
-15B 必须消费 15A 的 policy revision、Execution Envelope 和 Run 快照，不能通过
-Ticket 扩大 Principal Grant、Project permission 或 Runtime Capability。
+下一执行批次为 **Batch 16：Context 与 Scene Session**。
+Batch 16 尚未实现；15B 的 Ticket/Gate 语义不能由 Scene Context 绕过。
 
 建议在独立 worktree 执行：
 
 ```text
-worktree: /Users/oliviayang/Codex/一切皆插件/.tmp/pluginmax-platform-batch15b-action-ticket-gate
-branch:   feat/v1-batch15b-action-ticket-gate
-base:     <Batch 15A local commit>
+worktree: /Users/oliviayang/Codex/一切皆插件/.tmp/pluginmax-platform-batch16-scene-context
+branch:   feat/v1-batch16-scene-context
+base:     <Batch 15B local commit>
 ```
 
 ## 13. 参考文档
@@ -577,6 +578,7 @@ base:     <Batch 15A local commit>
 - [v1-batch14d-read-authorization.md](./v1-batch14d-read-authorization.md)
 - [v1-batch13-release-gate.md](./v1-batch13-release-gate.md)
 - [v1-batch15a-task-execution-policy.md](./v1-batch15a-task-execution-policy.md)
+- [v1-batch15b-action-ticket-gate.md](./v1-batch15b-action-ticket-gate.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)

@@ -37,7 +37,7 @@ integration("runtime operations API contract", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 25,
+      expectedMigrationVersion: 26,
       workerHeartbeatStaleAfterSeconds: 30,
     });
     app = built.app;
@@ -240,8 +240,8 @@ integration("runtime operations API contract", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       metrics: {
-        expectedMigrationVersion: 25,
-        migrationVersion: 25,
+        expectedMigrationVersion: 26,
+        migrationVersion: 26,
         activeWorkers: 1,
         deadLetterCount: expect.any(Number),
       },

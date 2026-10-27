@@ -15,6 +15,7 @@ import {
   buildTaskContext,
 } from "@pluginmax/context";
 import type {
+  ActionTicketAction,
   Agent,
   ExternalRunExecutionSnapshot,
   Project,
@@ -31,6 +32,10 @@ import {
 import { isTerminalRunStatus } from "@pluginmax/domain";
 import { LocalFileStore } from "@pluginmax/files";
 import { AgentRuntimePreflightService } from "./agent-runtime-preflight.js";
+import {
+  ExecutionGateError,
+  ExecutionGateService,
+} from "./execution-gate.js";
 import { executionEnvelopeDigest } from "./task-execution-preflight.js";
 
 export class RunCancelledError extends Error {
@@ -63,6 +68,17 @@ export class RunNonRetryableError extends Error {
 
 export function runtimeEffectKey(runId: string): string {
   return `run:${runId}:agent.execute:v1`;
+}
+
+export function runWritebackAction(run: Run): ActionTicketAction {
+  if (run.directChatTurnId !== null) return "direct-chat.writeback";
+  if (run.meetingTurnId !== null) return "meeting.writeback";
+  if (run.workflowInstanceId !== null) return "workflow.writeback";
+  return "task.writeback";
+}
+
+export function runWritebackIdempotencyKey(runId: string): string {
+  return `run:${runId}:writeback:v1`;
 }
 
 export interface RunExecutorOptions {
@@ -113,6 +129,7 @@ function runtimeFor(
 export class RunExecutor {
   private readonly fileStore: LocalFileStore;
   private readonly preflight: AgentRuntimePreflightService;
+  private readonly executionGates: ExecutionGateService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
@@ -120,6 +137,7 @@ export class RunExecutor {
   ) {
     this.fileStore = new LocalFileStore(options.fileStoreRoot);
     this.preflight = new AgentRuntimePreflightService(repositories);
+    this.executionGates = new ExecutionGateService(repositories);
   }
 
   async execute(
@@ -237,6 +255,17 @@ export class RunExecutor {
       leaseSeconds,
     });
     if (effect.kind === "replay") {
+      try {
+        await this.executionGates.assertRunAction({
+          runId,
+          action: "agent.execute",
+          allowExpired: true,
+        });
+      } catch (error) {
+        throw error instanceof ExecutionGateError
+          ? new RunNonRetryableError(error.message)
+          : error;
+      }
       const output = effect.receipt.result?.output;
       if (typeof output !== "string") {
         throw new Error("runtime effect replay is missing its output");
@@ -268,6 +297,24 @@ export class RunExecutor {
       throw new RunLeaseLostError("runtime effect is leased elsewhere");
     }
     const effectLeaseToken = effect.leaseToken;
+    try {
+      await this.executionGates.assertRunAction({
+        runId,
+        action: "agent.execute",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "execution gate rejected";
+      await this.repositories.runtimeEffects.fail(
+        effectKey,
+        owner,
+        effectLeaseToken,
+        message,
+      );
+      throw error instanceof ExecutionGateError
+        ? new RunNonRetryableError(message)
+        : error;
+    }
     if (executionSnapshot !== null) {
       try {
         if (run.externalStartedAt !== null && run.status !== "completed") {
@@ -357,6 +404,33 @@ export class RunExecutor {
       run.projectId ?? `direct-chat/${directChatContext!.thread.id}`,
     );
     await mkdir(workspacePath, { recursive: true });
+    const writebackAction = runWritebackAction(run);
+    const writebackKey = runWritebackIdempotencyKey(runId);
+    try {
+      await this.executionGates.beginRunAction({
+        runId,
+        action: "agent.execute",
+        idempotencyKey: effect.receipt.id,
+      });
+      await this.executionGates.beginRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+        allowInProgress: true,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "execution ticket rejected";
+      await this.repositories.runtimeEffects.fail(
+        effectKey,
+        owner,
+        effectLeaseToken,
+        message,
+      );
+      throw error instanceof ExecutionGateError
+        ? new RunNonRetryableError(message)
+        : error;
+    }
 
     await this.repositories.runs.markRunning(runId);
     await this.repositories.runs.appendEvent(
@@ -490,6 +564,12 @@ export class RunExecutor {
             { output: event.output },
           );
           if (completed === undefined) throw new RunLeaseLostError();
+          await this.executionGates.completeRunAction({
+            runId,
+            action: "agent.execute",
+            idempotencyKey: effect.receipt.id,
+            result: { effectReceiptId: completed.id },
+          });
           await this.completeRun(
             runId,
             task,
@@ -706,12 +786,31 @@ export class RunExecutor {
   ): Promise<void> {
     const run = await this.requireRun(runId);
     if (run.status === "cancelled") throw new RunCancelledError();
+    const writebackAction = runWritebackAction(run);
+    const writebackKey = runWritebackIdempotencyKey(runId);
+    try {
+      await this.executionGates.beginRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+        allowInProgress: true,
+      });
+    } catch (error) {
+      throw error instanceof ExecutionGateError
+        ? new RunNonRetryableError(error.message)
+        : error;
+    }
     if (run.status === "completed") {
       if (directChatContext !== null) {
         await this.repositories.directChats.completeTurn(runId, output);
       } else if (meetingContext !== null) {
         await this.repositories.meetingAi.completeTurn(runId, output);
       }
+      await this.executionGates.completeRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+      });
       return;
     }
     if (output.trim() === "") {
@@ -726,6 +825,11 @@ export class RunExecutor {
         "AI 私聊回复已完成",
         { threadId: directChatContext.thread.id },
       );
+      await this.executionGates.completeRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+      });
       return;
     }
     if (meetingContext !== null) {
@@ -736,6 +840,11 @@ export class RunExecutor {
         "Meeting AI turn completed and was published to the meeting",
         { meetingId: meetingContext.meeting.id },
       );
+      await this.executionGates.completeRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+      });
       return;
     }
     const ref = await this.fileStore.put({
@@ -774,6 +883,11 @@ export class RunExecutor {
       },
     );
     await this.repositories.tasks.setStatus(task!.id, "review");
+    await this.executionGates.completeRunAction({
+      runId,
+      action: writebackAction,
+      idempotencyKey: writebackKey,
+    });
   }
 
   private async persistEvent(

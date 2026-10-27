@@ -1,5 +1,11 @@
 export { Database } from "./database.js";
 export {
+  ActionTicketRepository,
+  type BeginTicketUsageResult,
+  type ExpiredExecutionGate,
+  type GateDecisionResult,
+} from "./action-ticket-repository.js";
+export {
   AUTHORIZATION_PERMISSIONS,
   AuthorizationRepository,
   AuthorizationRepositoryError,
