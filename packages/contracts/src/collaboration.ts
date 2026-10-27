@@ -8,6 +8,7 @@ import {
   templateRoleCategorySchema,
   templateRolePermissionSchema,
 } from "./project-templates.js";
+import { meetingCollaborationOverviewSchema } from "./meeting-collaboration.js";
 
 export const projectRoleSchema = z.object({
   id: z.string().uuid(),
@@ -976,6 +977,9 @@ export const meetingMessageSchema = z.object({
   status: z.enum(["sent", "failed"]).default("sent"),
   errorCode: z.string().nullable().default(null),
   errorMessage: z.string().nullable().default(null),
+  clientMessageId: z.string().nullable().default(null),
+  delegateId: z.string().uuid().nullable().default(null),
+  senderPrincipalId: z.string().nullable().default(null),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type MeetingMessage = z.infer<typeof meetingMessageSchema>;
@@ -983,6 +987,7 @@ export type MeetingMessage = z.infer<typeof meetingMessageSchema>;
 export const meetingDetailSchema = z.object({
   meeting: meetingSchema,
   messages: z.array(meetingMessageSchema),
+  collaboration: meetingCollaborationOverviewSchema.optional(),
 });
 export type MeetingDetail = z.infer<typeof meetingDetailSchema>;
 

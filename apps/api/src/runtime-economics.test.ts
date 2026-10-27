@@ -146,7 +146,7 @@ integration("Runtime economics and Workspace visibility API", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 30,
+      expectedMigrationVersion: 31,
     });
     app = built.app;
     await app.ready();

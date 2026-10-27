@@ -89,6 +89,7 @@ import { ActionTicketRepository } from "./action-ticket-repository.js";
 import { SceneContextRepository } from "./scene-context-repository.js";
 import { RuntimeEconomicsRepository } from "./runtime-economics-repository.js";
 import { TeammateRepository } from "./teammate-repository.js";
+import { MeetingCollaborationRepository } from "./meeting-collaboration-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2196,6 +2197,7 @@ export class PlatformRepositories {
   readonly workflowRuntime: WorkflowRuntimeRepository;
   readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
+  readonly meetingCollaboration: MeetingCollaborationRepository;
   readonly meetingAi: MeetingAiRepository;
   readonly directChats: DirectChatRepository;
   readonly meetingDecisions: MeetingDecisionsRepository;
@@ -2237,6 +2239,7 @@ export class PlatformRepositories {
     this.workflowRuntime = new WorkflowRuntimeRepository(database);
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
+    this.meetingCollaboration = new MeetingCollaborationRepository(database);
     this.meetingAi = new MeetingAiRepository(database, this.actionTickets);
     this.directChats = new DirectChatRepository(database, this.actionTickets);
     this.meetingDecisions = new MeetingDecisionsRepository(database);

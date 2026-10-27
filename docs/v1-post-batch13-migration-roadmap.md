@@ -1,6 +1,6 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 13.1A、13.1B、14A-17B 已完成；下一正式批次为 Batch 18
+> 状态：Batch 13.1A、13.1B、14A-18 已完成；下一正式批次为 Batch 19
 >
 > Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
 >
@@ -41,6 +41,8 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
   和重放；Migration 27 已落地。
 - Batch 13.1A 已冻结 Runtime 兼容契约：WorkBuddy 只使用通用 `plain-text`，
   Prompt 走 stdin，不实现专用 stream-json、Provider Session 或工具流解析。
+- Batch 18 已完成 Meeting Facilitator、Delegate、私密嘱咐、投递、文件、
+  Minutes 确认、Meeting Task、归档与恢复；Migration 31 已落地。
 
 ### 2.2 主要缺口
 
@@ -53,7 +55,7 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
 | Action Ticket / Gate | 已完成 15B：持久化 Ticket、Gate、不可变决策与 Worker 门禁 | 高风险动作具备可校验、可过期和可审计的执行边界 |
 | Scene Context | 已完成 16：四类 Scene Session、Contribution、Channel、Cursor 和 Receipt 已统一 | 场景隔离、确定性重放和来源追溯已建立 |
 | Task / Teammate 深度 | 基础任务、AI 伙伴和 Worker 已有，工作队列、输入等待和自动执行深度不足 | 无法承接旧 Teammate 的完整工作流 |
-| Meeting Collaboration | AI 参与、Minutes、Action Item 已有，Delegate、私密嘱咐、文件和归档不足 | 会议协作仍是基础版 |
+| Meeting Collaboration | Batch 18 已完成 Facilitator、Delegate、私密嘱咐、投递、文件、Minutes 确认、Meeting Task、归档与恢复 | 会议协作闭环已建立 |
 | Shared Space | 尚无工作区共享路径、写审批、Locks 和文件审计 | 不能安全开放 Agent 文件写 |
 | Legacy Closeout | 尚无统一迁移台账、dry-run 和 alias 清理计划 | 后续容易出现双主体和旧存储依赖 |
 
@@ -137,7 +139,7 @@ Binding 完成。
 | 16 Scene Context | P1 | 14C、15B | Scene Session、Contribution、Receipt、Channel | 场景隔离、确定性重放、来源可追溯 |
 | 17A Task Execution Depth | P1 | 13.1A、15B、16 | 队列、暂停、Claim、needsInput、文档、自动验收 | 队列、依赖、恢复、Review 和文档权限通过 |
 | 17B AI Teammate | P1 | 14C、16、17A、13.1B | 模板、生命周期、工作计划、周报、统计 | 已完成：模板/实例可追溯、受限任务、转派和统计对账通过 |
-| 18 Meeting Collaboration | P1 | 14C、16 | Facilitator、Delegate、私密嘱咐、文件、归档 | 委托、投递、纪要、归档和敏感信息边界通过 |
+| 18 Meeting Collaboration | P1 | 14C、16 | Facilitator、Delegate、私密嘱咐、文件、归档 | 已完成：委托、投递、纪要、归档和敏感信息边界通过 |
 | 19 Shared Space | P1 | 14C、15B、16 | 路径权限、Global Write、Locks、文件审计 | 路径穿越、越权写、锁竞争和写审批通过 |
 | 20 Governance + Workbench | P2 | 14C、17B | 项目健康度、角色确认、审计、SSE、可配置布局 | 并发保护、只追加审计、三视口无溢出 |
 | 21 Legacy Closeout | P2 | 14-20 | import dry-run、alias 清理、Session/Workspace 映射 | 旧数据报告完整，废弃能力有明确处置 |
@@ -430,6 +432,9 @@ Gate 最低能力：
 
 ### Batch 18：Meeting Collaboration
 
+状态：已完成。交付记录见
+[v1-batch18-meeting-collaboration.md](./v1-batch18-meeting-collaboration.md)。
+
 范围：
 
 - Facilitator、参会人生命周期和 AI Delegate。
@@ -567,7 +572,7 @@ HTTP Request
 - [x] Batch 16 Context 与 Scene Session
 - [x] Batch 17A Task Execution Depth
 - [x] Batch 17B AI Teammate
-- [ ] Batch 18 Meeting Collaboration
+- [x] Batch 18 Meeting Collaboration
 - [ ] Batch 19 Shared Space
 - [ ] Batch 20 Project Governance 与 Workbench
 - [ ] Batch 21 Legacy Compatibility Closeout
@@ -587,17 +592,17 @@ HTTP Request
 
 ## 12. 下一步
 
-下一执行批次为 **Batch 18：Meeting Collaboration**，需独立规划与 worktree。
-Batch 17B 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context、Task
-Execution Depth 或 Runtime 统计查询绕过。
+下一执行批次为 **Batch 19：Shared Space**，需独立安全评审与 worktree。
+Batch 18 已完成；15B 的 Ticket/Gate 语义仍不能由 Meeting Collaboration、
+Scene Context、Task Execution Depth 或 Runtime 统计查询绕过。
 Shared Space 和 sandbox 扩展仍未实现。
 
 建议在独立 worktree 执行：
 
 ```text
-worktree: 独立 `.tmp/pluginmax-platform-batch18-*`
-branch:   `feat/v1-batch18-*`
-base:     Batch 17B local commit
+worktree: 独立 `.tmp/pluginmax-platform-batch19-*`
+branch:   `feat/v1-batch19-*`
+base:     Batch 18 local commit
 ```
 
 ## 13. 参考文档
@@ -614,6 +619,7 @@ base:     Batch 17B local commit
 - [v1-batch17a-task-execution-depth.md](./v1-batch17a-task-execution-depth.md)
 - [v1-batch13.1b-runtime-economics.md](./v1-batch13.1b-runtime-economics.md)
 - [v1-batch17b-ai-teammate.md](./v1-batch17b-ai-teammate.md)
+- [v1-batch18-meeting-collaboration.md](./v1-batch18-meeting-collaboration.md)
 - [v1-batch13-external-agent-runtime-integration.md](./v1-batch13-external-agent-runtime-integration.md)
 - [v1-external-agent-runtime-technical-design.md](./v1-external-agent-runtime-technical-design.md)
 - [engineering-platform-v1-technical-design.md](./engineering-platform-v1-technical-design.md)

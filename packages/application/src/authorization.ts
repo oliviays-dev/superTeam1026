@@ -292,11 +292,23 @@ function resourceRequirement(
       : { projectId, permission: "write" };
   }
   if (route.startsWith("/api/v1/meetings/:meetingId/")) {
+    if (
+      (method === "PUT" && route.endsWith("/read-position")) ||
+      (method === "POST" && route.endsWith("/deliveries/:deliveryId/read"))
+    ) {
+      return {
+        resourceType: "meeting",
+        resourceId: parameter(params, "meetingId"),
+        permission: "read",
+      };
+    }
     return {
       resourceType: "meeting",
       resourceId: parameter(params, "meetingId"),
       permission:
-        route.endsWith("/minutes/publish") || route.endsWith("/memory/ingest")
+        route.endsWith("/minutes/publish") ||
+        route.endsWith("/minutes/confirm") ||
+        route.endsWith("/memory/ingest")
           ? "approve"
           : "write",
     };

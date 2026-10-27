@@ -650,16 +650,28 @@ interface MeetingMessageRow {
   status: MeetingMessage["status"];
   error_code: string | null;
   error_message: string | null;
+  client_message_id: string | null;
+  delegate_id: string | null;
+  sender_principal_id: string | null;
   created_at: Date;
 }
 
 export class MeetingRepository {
   constructor(private readonly database: Database) {}
 
-  async list(projectId: string): Promise<Meeting[]> {
+  async list(
+    projectId: string,
+    includeArchived = false,
+  ): Promise<Meeting[]> {
     const result = await this.database.query<MeetingRow>(
-      "SELECT * FROM meetings WHERE project_id = $1 ORDER BY updated_at DESC",
-      [projectId],
+      `SELECT meeting.*
+       FROM meetings AS meeting
+       LEFT JOIN meeting_collaboration_states AS state
+         ON state.meeting_id = meeting.id
+       WHERE meeting.project_id = $1
+         AND ($2::boolean OR COALESCE(state.lifecycle_status, 'active') = 'active')
+       ORDER BY meeting.updated_at DESC`,
+      [projectId, includeArchived],
     );
     return result.rows.map(meetingFromRow);
   }
@@ -667,10 +679,12 @@ export class MeetingRepository {
   async create(
     input: CreateMeetingInput,
     agents: readonly { id: string; name: string }[],
+    actorId = "local-admin",
+    actorName = "Local Admin",
   ): Promise<Meeting> {
     const meetingId = randomUUID();
     const participants = [
-      { id: "local-admin", name: "Local Admin", kind: "human" as const },
+      { id: actorId, name: actorName, kind: "human" as const },
       ...agents
         .filter((agent) => input.agentIds.includes(agent.id))
         .map((agent) => ({
@@ -715,6 +729,38 @@ export class MeetingRepository {
          )`,
         [randomUUID(), meetingId, input.projectId],
       );
+      await client.query(
+        `INSERT INTO meeting_collaboration_states (
+           meeting_id, project_id, facilitator_principal_id, lifecycle_status,
+           revision, facilitator_assigned_by, facilitator_assigned_at,
+           created_at, updated_at
+         ) VALUES ($1, $2, $3, 'active', 1, $3, NOW(), NOW(), NOW())`,
+        [meetingId, input.projectId, actorId],
+      );
+      await client.query(
+        `INSERT INTO meeting_facilitator_handoffs (
+           id, meeting_id, from_principal_id, to_principal_id,
+           actor_principal_id, reason, resulting_revision, created_at
+         ) VALUES (
+           $1, $2, NULL, $3, $3, 'Initial facilitator assignment', 1, NOW()
+         )`,
+        [randomUUID(), meetingId, actorId],
+      );
+      await client.query(
+        `INSERT INTO meeting_collaboration_events (
+           id, meeting_id, seq, kind, actor_principal_id, summary, data,
+           created_at
+         ) VALUES (
+           $1, $2, 1, 'facilitator', $3,
+           'Meeting facilitator assigned', $4::jsonb, NOW()
+         )`,
+        [
+          randomUUID(),
+          meetingId,
+          actorId,
+          JSON.stringify({ facilitatorPrincipalId: actorId }),
+        ],
+      );
       for (const participant of participants) {
         if (participant.kind !== "agent") continue;
         await client.query(
@@ -746,24 +792,79 @@ export class MeetingRepository {
   }
 
   async postMessage(
+    input: {
+      readonly meetingId: string;
+      readonly authorType: MeetingMessage["authorType"];
+      readonly authorId: string;
+      readonly authorName: string;
+      readonly content: string;
+      readonly clientMessageId?: string;
+      readonly delegateId?: string;
+      readonly senderPrincipalId?: string;
+    },
+  ): Promise<{ readonly message: MeetingMessage; readonly reused: boolean }> {
+    return this.database.transaction(async (client) => {
+      if (input.clientMessageId !== undefined) {
+        await client.query(
+          "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+          [
+            `meeting-message:${input.meetingId}:${input.clientMessageId}`,
+          ],
+        );
+        const existing = await client.query<MeetingMessageRow>(
+          `SELECT * FROM meeting_messages
+           WHERE meeting_id = $1 AND client_message_id = $2`,
+          [input.meetingId, input.clientMessageId],
+        );
+        const row = existing.rows[0];
+        if (row !== undefined) {
+          if (
+            row.content !== input.content ||
+            row.author_id !== input.authorId ||
+            row.delegate_id !== (input.delegateId ?? null)
+          ) {
+            throw new Error("meeting client message id conflict");
+          }
+          return { message: meetingMessageFromRow(row), reused: true };
+        }
+      }
+      const result = await client.query<MeetingMessageRow>(
+        `INSERT INTO meeting_messages (
+           id, meeting_id, author_type, author_id, author_name, content,
+           client_message_id, delegate_id, sender_principal_id, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+         RETURNING *`,
+        [
+          randomUUID(),
+          input.meetingId,
+          input.authorType,
+          input.authorId,
+          input.authorName,
+          input.content,
+          input.clientMessageId ?? null,
+          input.delegateId ?? null,
+          input.senderPrincipalId ?? input.authorId,
+        ],
+      );
+      await client.query(
+        "UPDATE meetings SET updated_at = NOW() WHERE id = $1",
+        [input.meetingId],
+      );
+      return { message: meetingMessageFromRow(result.rows[0]!), reused: false };
+    });
+  }
+
+  async getMessage(
     meetingId: string,
-    authorType: MeetingMessage["authorType"],
-    authorId: string,
-    authorName: string,
-    content: string,
-  ): Promise<MeetingMessage> {
+    messageId: string,
+  ): Promise<MeetingMessage | undefined> {
     const result = await this.database.query<MeetingMessageRow>(
-      `INSERT INTO meeting_messages (
-         id, meeting_id, author_type, author_id, author_name, content, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
-       RETURNING *`,
-      [randomUUID(), meetingId, authorType, authorId, authorName, content],
+      `SELECT * FROM meeting_messages
+       WHERE meeting_id = $1 AND id = $2`,
+      [meetingId, messageId],
     );
-    await this.database.query(
-      "UPDATE meetings SET updated_at = NOW() WHERE id = $1",
-      [meetingId],
-    );
-    return meetingMessageFromRow(result.rows[0]!);
+    const row = result.rows[0];
+    return row === undefined ? undefined : meetingMessageFromRow(row);
   }
 
   async close(id: string, summary: string): Promise<Meeting | undefined> {
@@ -902,6 +1003,9 @@ function meetingMessageFromRow(row: MeetingMessageRow): MeetingMessage {
     status: row.status,
     errorCode: row.error_code,
     errorMessage: row.error_message,
+    clientMessageId: row.client_message_id,
+    delegateId: row.delegate_id,
+    senderPrincipalId: row.sender_principal_id,
     createdAt: row.created_at.toISOString(),
   };
 }

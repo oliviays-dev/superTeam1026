@@ -8,9 +8,11 @@ import type {
   AgentRuntimePreflightInput,
   AgentRuntimePreflightResult,
   ApprovalSlaSweepResult,
+  ArchiveMeetingInput,
   Artifact,
   BlockTaskInput,
   ClaimTaskInput,
+  ConfirmMeetingMinutesInput,
   ConfirmHandoffCardInput,
   ConvertMeetingActionItemInput,
   CosignWorkflowApprovalInput,
@@ -18,7 +20,10 @@ import type {
   CreateAgentEpisodeInput,
   CreateHandoffCardInput,
   CreateMeetingActionItemInput,
+  CreateMeetingDelegateInput,
   CreateMeetingInput,
+  CreateMeetingPrivateBriefingInput,
+  CreateMeetingTaskInput,
   CreateMemoryClaimInput,
   CreateMemoryTopicInput,
   CreateProjectMemberInput,
@@ -38,17 +43,26 @@ import type {
   Job,
   JobListQuery,
   HandoffCard,
+  HandoffMeetingFacilitatorInput,
   Meeting,
   MeetingActionItem,
   MeetingActionItemConversion,
   MeetingAiPolicy,
   MeetingAiPolicyLifecycleInput,
   MeetingDetail,
+  MeetingDelegate,
+  MeetingFacilitatorHandoff,
+  MeetingFile,
   MeetingMessage,
+  MeetingMessageDelivery,
   MeetingMinutes,
+  MeetingMinutesConfirmation,
   MeetingMinutesDraft,
   MeetingMinutesVersion,
   MeetingMemoryIngestionResult,
+  MeetingPrivateBriefing,
+  MeetingReadPosition,
+  MeetingTask,
   MeetingTraceability,
   MemoryClaim,
   MemoryClaimTrace,
@@ -67,6 +81,9 @@ import type {
   ProjectReportSummary,
   PublishMemoryTruthInput,
   PublishMeetingMinutesInput,
+  RestoreMeetingInput,
+  RevokeMeetingDelegateInput,
+  SetMeetingReadPositionInput,
   ProvideTaskInput,
   PauseTaskInput,
   ReviewMemoryClaimsInput,
@@ -122,6 +139,8 @@ import type {
   UpdateMeetingActionItemInput,
   UpdateMeetingAiPolicyInput,
   UpdateMeetingMinutesDraftInput,
+  UpdateMeetingPrivateBriefingInput,
+  UploadMeetingFileInput,
   UpdateProjectMemberInput,
   UpdateProjectInput,
   UpdateProjectRoleInput,
@@ -3485,6 +3504,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingMemoryIngestionResult> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     await this.requireActiveProjectPermission(
       detail.meeting.projectId,
       "approve",
@@ -6714,14 +6734,16 @@ export class PlatformApplication {
   async listMeetings(
     projectId: string,
     actorId = "local-admin",
+    includeArchived = false,
   ): Promise<Meeting[]> {
     await this.requireProjectReadAccess(projectId, actorId);
-    return this.repositories.meetings.list(projectId);
+    return this.repositories.meetings.list(projectId, includeArchived);
   }
 
   async createMeeting(
     input: CreateMeetingInput,
     actorId = "local-admin",
+    actorName = actorId === "local-admin" ? "Local Admin" : actorId,
   ): Promise<Meeting> {
     await this.requireActiveProjectPermission(
       input.projectId,
@@ -6756,7 +6778,12 @@ export class PlatformApplication {
         );
       }
     }
-    return this.repositories.meetings.create(input, agents);
+    return this.repositories.meetings.create(
+      input,
+      agents,
+      actorId,
+      actorName,
+    );
   }
 
   async getMeeting(
@@ -6768,7 +6795,44 @@ export class PlatformApplication {
       throw new ApplicationError("meeting_not_found", "Meeting not found", 404);
     }
     await this.requireProjectReadAccess(detail.meeting.projectId, actorId);
-    return detail;
+    const collaboration =
+      await this.repositories.meetingCollaboration.overview(id);
+    const delegates =
+      await this.repositories.meetingCollaboration.listDelegates(id);
+    const participants = [...detail.meeting.participants];
+    const participantIds = new Set(
+      participants.map((participant) => participant.id),
+    );
+    if (
+      collaboration !== undefined &&
+      !participantIds.has(collaboration.facilitator.principalId)
+    ) {
+      participants.push({
+        id: collaboration.facilitator.principalId,
+        name: collaboration.facilitator.displayName,
+        kind: "human",
+      });
+      participantIds.add(collaboration.facilitator.principalId);
+    }
+    for (const delegate of delegates) {
+      if (
+        delegate.status !== "active" ||
+        participantIds.has(delegate.representativePrincipalId)
+      ) {
+        continue;
+      }
+      participants.push({
+        id: delegate.representativePrincipalId,
+        name: delegate.representativeName,
+        kind: delegate.representativeKind,
+      });
+      participantIds.add(delegate.representativePrincipalId);
+    }
+    return {
+      ...detail,
+      meeting: { ...detail.meeting, participants },
+      ...(collaboration === undefined ? {} : { collaboration }),
+    };
   }
 
   async postMeetingMessage(
@@ -6776,8 +6840,11 @@ export class PlatformApplication {
     content: string,
     actorId = "local-admin",
     mentions: readonly string[] = [],
+    clientMessageId?: string,
+    actorName = actorId,
   ): Promise<MeetingMessage> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     if (detail.meeting.status === "closed") {
       throw new ApplicationError("meeting_closed", "Meeting is closed", 409);
     }
@@ -6802,14 +6869,35 @@ export class PlatformApplication {
         409,
       );
     }
-    const message = await this.repositories.meetings.postMessage(
-      meetingId,
-      "human",
-      actorId,
-      "Local Admin",
-      content,
-    );
-    if (mentionedAgentIds.size > 0) {
+    let posted: {
+      readonly message: MeetingMessage;
+      readonly reused: boolean;
+    };
+    try {
+      posted = await this.repositories.meetings.postMessage({
+        meetingId,
+        authorType: "human",
+        authorId: actorId,
+        authorName: actorName,
+        content,
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
+        senderPrincipalId: actorId,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "meeting client message id conflict"
+      ) {
+        throw new ApplicationError(
+          "meeting_message_idempotency_conflict",
+          "The client message id was already used with different content",
+          409,
+        );
+      }
+      throw error;
+    }
+    const message = posted.message;
+    if (!posted.reused && mentionedAgentIds.size > 0) {
       const policy = await this.repositories.meetingAi.getPolicy(meetingId);
       if (
         policy !== undefined &&
@@ -6859,6 +6947,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingAiPolicy> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     await this.requireActiveProjectPermission(
       detail.meeting.projectId,
       "write",
@@ -6920,6 +7009,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<TriggerMeetingAiResult> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     await this.requireActiveProjectPermission(
       detail.meeting.projectId,
       "write",
@@ -6994,6 +7084,7 @@ export class PlatformApplication {
     actorId: string,
   ): Promise<MeetingAiPolicy> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     await this.requireActiveProjectPermission(
       detail.meeting.projectId,
       "write",
@@ -7024,6 +7115,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<Meeting> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     if (detail.meeting.status === "closed") {
       throw new ApplicationError(
         "meeting_closed",
@@ -7076,6 +7168,13 @@ export class PlatformApplication {
           409,
         );
       }
+      await this.repositories.meetingCollaboration.confirmMinutes({
+        versionId: published.version.id,
+        meetingId,
+        projectId: detail.meeting.projectId,
+        confirmedBy: actorId,
+        note: "Meeting closed with published minutes",
+      });
       await this.repositories.memoryClosure.ingestMeetingMinutes({
         meetingId,
         projectId: detail.meeting.projectId,
@@ -7113,6 +7212,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingMinutesDraft> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     this.assertMeetingSourceMessages(detail, input.sourceMessageIds);
     const saved = await this.repositories.meetingDecisions.saveDraft({
       meetingId,
@@ -7145,6 +7245,7 @@ export class PlatformApplication {
     readonly version: MeetingMinutesVersion;
   }> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     try {
       const published = await this.repositories.meetingDecisions.publish({
         meetingId,
@@ -7198,6 +7299,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingActionItem> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     await this.requireActiveProjectPermission(
       detail.meeting.projectId,
       "write",
@@ -7310,7 +7412,13 @@ export class PlatformApplication {
     input: UpdateMeetingActionItemInput,
     actorId = "local-admin",
   ): Promise<MeetingActionItem> {
-    await this.getMeeting(meetingId, actorId);
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
     const item = await this.repositories.meetingDecisions.getActionItem(
       meetingId,
       actionItemId,
@@ -7352,6 +7460,7 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<MeetingActionItemConversion> {
     const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
     const project = await this.requireActiveProjectPermission(
       detail.meeting.projectId,
       "write",
@@ -7473,6 +7582,1145 @@ export class PlatformApplication {
   ): Promise<MeetingTraceability> {
     await this.getMeeting(meetingId, actorId);
     return this.repositories.meetingDecisions.traceability(meetingId);
+  }
+
+  async getMeetingCollaboration(meetingId: string, actorId = "local-admin") {
+    const detail = await this.getMeeting(meetingId, actorId);
+    if (detail.collaboration === undefined) {
+      throw new ApplicationError(
+        "meeting_collaboration_unavailable",
+        "Meeting collaboration state is not initialized",
+        409,
+      );
+    }
+    return detail.collaboration;
+  }
+
+  async handoffMeetingFacilitator(
+    meetingId: string,
+    input: HandoffMeetingFacilitatorInput,
+    actorId = "local-admin",
+  ) {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.authorizeFacilitatorControl(detail, actorId);
+    await this.requireActiveProjectMemberPrincipal({
+      projectId: detail.meeting.projectId,
+      principalId: input.facilitatorPrincipalId,
+      expectedKind: "human",
+      code: "meeting_facilitator_unavailable",
+    });
+    const overview =
+      await this.repositories.meetingCollaboration.handoffFacilitator({
+        meetingId,
+        expectedRevision: input.expectedRevision,
+        facilitatorPrincipalId: input.facilitatorPrincipalId,
+        actorPrincipalId: actorId,
+        reason: input.reason,
+      });
+    if (overview === undefined) {
+      throw new ApplicationError(
+        "meeting_facilitator_revision_conflict",
+        "The meeting facilitator or lifecycle was changed concurrently",
+        409,
+        { currentRevision: detail.collaboration?.revision ?? null },
+      );
+    }
+    return overview;
+  }
+
+  async listMeetingFacilitatorHandoffs(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingFacilitatorHandoff[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingCollaboration.listFacilitatorHandoffs(
+      meetingId,
+    );
+  }
+
+  async listMeetingDelegates(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingDelegate[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingCollaboration.listDelegates(meetingId);
+  }
+
+  async createMeetingDelegate(
+    meetingId: string,
+    input: CreateMeetingDelegateInput,
+    actorId = "local-admin",
+  ): Promise<MeetingDelegate> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const delegatorPrincipalId = input.delegatorPrincipalId ?? actorId;
+    if (delegatorPrincipalId !== actorId) {
+      const overview = detail.collaboration;
+      if (overview?.facilitator.principalId !== actorId) {
+        await this.requireActiveProjectPermission(
+          detail.meeting.projectId,
+          "manage_members",
+          actorId,
+        );
+      }
+    }
+    await this.requireActiveProjectMemberPrincipal({
+      projectId: detail.meeting.projectId,
+      principalId: delegatorPrincipalId,
+      expectedKind: "human",
+      code: "meeting_delegator_unavailable",
+    });
+    let representativePrincipalId: string;
+    if (input.representativeKind === "agent") {
+      if (input.agentId === undefined) {
+        throw new ApplicationError(
+          "meeting_delegate_agent_required",
+          "An AI delegate requires an agentId",
+          400,
+        );
+      }
+      const agent = await this.repositories.agents.get(input.agentId);
+      if (agent === undefined || agent.status !== "active") {
+        throw new ApplicationError(
+          "meeting_delegate_agent_unavailable",
+          "The AI delegate must be an active agent",
+          409,
+        );
+      }
+      if (agent.principalId === null || agent.principalId === undefined) {
+        throw new ApplicationError(
+          "meeting_delegate_principal_unavailable",
+          "The AI delegate has no active Principal",
+          409,
+        );
+      }
+      representativePrincipalId = agent.principalId;
+      await this.requireActiveProjectMemberPrincipal({
+        projectId: detail.meeting.projectId,
+        principalId: representativePrincipalId,
+        expectedKind: "ai",
+        code: "meeting_delegate_not_member",
+      });
+    } else {
+      if (input.representativePrincipalId === undefined) {
+        throw new ApplicationError(
+          "meeting_delegate_principal_required",
+          "A human delegate requires representativePrincipalId",
+          400,
+        );
+      }
+      representativePrincipalId = input.representativePrincipalId;
+      await this.requireActiveProjectMemberPrincipal({
+        projectId: detail.meeting.projectId,
+        principalId: representativePrincipalId,
+        expectedKind: "human",
+        code: "meeting_delegate_not_member",
+      });
+    }
+    if (representativePrincipalId === delegatorPrincipalId) {
+      throw new ApplicationError(
+        "meeting_delegate_self",
+        "A delegator cannot delegate to itself",
+        409,
+      );
+    }
+    if (
+      input.expiresAt !== undefined &&
+      Date.parse(input.expiresAt) <= Date.now()
+    ) {
+      throw new ApplicationError(
+        "meeting_delegate_expired",
+        "A delegate must expire in the future",
+        400,
+      );
+    }
+    try {
+      return await this.repositories.meetingCollaboration.createDelegate({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        delegatorPrincipalId,
+        actorPrincipalId: actorId,
+        input,
+        representativePrincipalId,
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new ApplicationError(
+          "meeting_delegate_duplicate",
+          "An active delegate already exists for this scope",
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async revokeMeetingDelegate(
+    meetingId: string,
+    delegateId: string,
+    input: RevokeMeetingDelegateInput,
+    actorId = "local-admin",
+  ): Promise<MeetingDelegate> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const delegate = await this.repositories.meetingCollaboration.getDelegate(
+      meetingId,
+      delegateId,
+    );
+    if (delegate === undefined) {
+      throw new ApplicationError(
+        "meeting_delegate_not_found",
+        "Meeting delegate not found",
+        404,
+      );
+    }
+    if (
+      delegate.delegatorPrincipalId !== actorId &&
+      detail.collaboration?.facilitator.principalId !== actorId
+    ) {
+      await this.requireActiveProjectPermission(
+        detail.meeting.projectId,
+        "manage_members",
+        actorId,
+      );
+    }
+    const revoked =
+      await this.repositories.meetingCollaboration.revokeDelegate({
+        meetingId,
+        delegateId,
+        actorPrincipalId: actorId,
+        reason: input.reason,
+      });
+    if (revoked === undefined) {
+      throw new ApplicationError(
+        "meeting_delegate_not_active",
+        "Only an active delegate can be revoked",
+        409,
+      );
+    }
+    return revoked;
+  }
+
+  async postDelegateMeetingMessage(
+    meetingId: string,
+    delegateId: string,
+    content: string,
+    actorId = "local-admin",
+    clientMessageId?: string,
+  ): Promise<MeetingMessage> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    if (detail.meeting.status === "closed") {
+      throw new ApplicationError("meeting_closed", "Meeting is closed", 409);
+    }
+    const delegate = await this.repositories.meetingCollaboration.getDelegate(
+      meetingId,
+      delegateId,
+    );
+    if (delegate === undefined) {
+      throw new ApplicationError(
+        "meeting_delegate_not_found",
+        "Meeting delegate not found",
+        404,
+      );
+    }
+    if (delegate.status !== "active") {
+      throw new ApplicationError(
+        "meeting_delegate_inactive",
+        "The meeting delegate is not active",
+        409,
+      );
+    }
+    if (!delegate.allowedActions.includes("speak")) {
+      throw new ApplicationError(
+        "meeting_delegate_action_denied",
+        "The delegate is not authorized to speak",
+        403,
+      );
+    }
+    if (
+      delegate.delegatorPrincipalId !== actorId &&
+      detail.collaboration?.facilitator.principalId !== actorId
+    ) {
+      throw new ApplicationError(
+        "meeting_delegate_action_denied",
+        "Only the delegator or facilitator may submit delegate speech",
+        403,
+      );
+    }
+    try {
+      const posted = await this.repositories.meetings.postMessage({
+        meetingId,
+        authorType: delegate.representativeKind,
+        authorId: delegate.representativePrincipalId,
+        authorName: delegate.representativeName,
+        content,
+        delegateId,
+        senderPrincipalId: actorId,
+        ...(clientMessageId === undefined ? {} : { clientMessageId }),
+      });
+      return posted.message;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "meeting client message id conflict"
+      ) {
+        throw new ApplicationError(
+          "meeting_message_idempotency_conflict",
+          "The client message id was already used with different content",
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async listMeetingPrivateBriefings(
+    meetingId: string,
+    actorId = "local-admin",
+    includeArchived = false,
+  ): Promise<MeetingPrivateBriefing[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingCollaboration.listPrivateBriefings({
+      meetingId,
+      principalId: actorId,
+      includeArchived,
+    });
+  }
+
+  async createMeetingPrivateBriefing(
+    meetingId: string,
+    input: CreateMeetingPrivateBriefingInput,
+    actorId = "local-admin",
+  ): Promise<MeetingPrivateBriefing> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const audiencePrincipalId = input.audiencePrincipalId ?? actorId;
+    const principal =
+      await this.repositories.authorization.getPrincipal(audiencePrincipalId);
+    if (principal === undefined || principal.status !== "active") {
+      throw new ApplicationError(
+        "meeting_briefing_audience_unavailable",
+        "The private briefing audience must be an active Principal",
+        409,
+      );
+    }
+    const members = await this.repositories.projectMemberships.listMembers(
+      detail.meeting.projectId,
+    );
+    if (
+      !members.some(
+        (member) =>
+          member.status === "active" &&
+          (member.principalId === audiencePrincipalId ||
+            member.actorId === audiencePrincipalId),
+      )
+    ) {
+      throw new ApplicationError(
+        "meeting_briefing_audience_not_member",
+        "The private briefing audience must be an active project member",
+        409,
+      );
+    }
+    const delegates =
+      await this.repositories.meetingCollaboration.listDelegates(meetingId);
+    const audienceAgentId =
+      delegates.find(
+        (delegate) =>
+          delegate.status === "active" &&
+          delegate.representativePrincipalId === audiencePrincipalId &&
+          delegate.agentId !== null,
+      )?.agentId ?? null;
+    return this.repositories.meetingCollaboration.createPrivateBriefing({
+      meetingId,
+      projectId: detail.meeting.projectId,
+      ownerPrincipalId: actorId,
+      audiencePrincipalId,
+      audienceAgentId,
+      content: input.content,
+    });
+  }
+
+  async updateMeetingPrivateBriefing(
+    meetingId: string,
+    briefingId: string,
+    input: UpdateMeetingPrivateBriefingInput,
+    actorId = "local-admin",
+  ): Promise<MeetingPrivateBriefing> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    const briefing =
+      await this.repositories.meetingCollaboration.getPrivateBriefing(
+        meetingId,
+        briefingId,
+      );
+    if (
+      briefing === undefined ||
+      (briefing.ownerPrincipalId !== actorId &&
+        briefing.audiencePrincipalId !== actorId)
+    ) {
+      throw new ApplicationError(
+        "meeting_briefing_not_found",
+        "Private meeting briefing not found",
+        404,
+      );
+    }
+    if (briefing.ownerPrincipalId !== actorId) {
+      throw new ApplicationError(
+        "forbidden",
+        "Only the briefing owner may revise it",
+        403,
+      );
+    }
+    const updated =
+      await this.repositories.meetingCollaboration.updatePrivateBriefing({
+        meetingId,
+        briefingId,
+        ownerPrincipalId: actorId,
+        expectedRevision: input.expectedRevision,
+        content: input.content,
+      });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "meeting_briefing_revision_conflict",
+        "The private briefing was revised or archived",
+        409,
+      );
+    }
+    return updated;
+  }
+
+  async archiveMeetingPrivateBriefing(
+    meetingId: string,
+    briefingId: string,
+    expectedRevision: number,
+    actorId = "local-admin",
+  ): Promise<MeetingPrivateBriefing> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    const briefing =
+      await this.repositories.meetingCollaboration.getPrivateBriefing(
+        meetingId,
+        briefingId,
+      );
+    if (briefing === undefined || briefing.ownerPrincipalId !== actorId) {
+      throw new ApplicationError(
+        "meeting_briefing_not_found",
+        "Private meeting briefing not found",
+        404,
+      );
+    }
+    const archived =
+      await this.repositories.meetingCollaboration.archivePrivateBriefing({
+        meetingId,
+        briefingId,
+        ownerPrincipalId: actorId,
+        expectedRevision,
+      });
+    if (archived === undefined) {
+      throw new ApplicationError(
+        "meeting_briefing_revision_conflict",
+        "The private briefing was revised or archived",
+        409,
+      );
+    }
+    return archived;
+  }
+
+  async setMeetingReadPosition(
+    meetingId: string,
+    input: SetMeetingReadPositionInput,
+    actorId = "local-admin",
+  ): Promise<MeetingReadPosition> {
+    await this.getMeeting(meetingId, actorId);
+    const position =
+      await this.repositories.meetingCollaboration.setReadPosition({
+        meetingId,
+        principalId: actorId,
+        messageId: input.messageId,
+      });
+    if (position === undefined) {
+      throw new ApplicationError(
+        "meeting_message_not_found",
+        "Meeting message not found",
+        404,
+      );
+    }
+    return position;
+  }
+
+  async getMeetingReadPosition(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingReadPosition | null> {
+    await this.getMeeting(meetingId, actorId);
+    return (
+      (await this.repositories.meetingCollaboration.getReadPosition(
+        meetingId,
+        actorId,
+      )) ?? null
+    );
+  }
+
+  async listMeetingMessageDeliveries(
+    meetingId: string,
+    messageId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingMessageDelivery[]> {
+    await this.getMeeting(meetingId, actorId);
+    const message = await this.repositories.meetings.getMessage(
+      meetingId,
+      messageId,
+    );
+    if (message === undefined) {
+      throw new ApplicationError(
+        "meeting_message_not_found",
+        "Meeting message not found",
+        404,
+      );
+    }
+    return this.repositories.meetingCollaboration.listDeliveries(
+      meetingId,
+      messageId,
+    );
+  }
+
+  async retryMeetingMessageDelivery(
+    meetingId: string,
+    messageId: string,
+    deliveryId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingMessageDelivery> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const result = await this.repositories.meetingCollaboration.retryDelivery({
+      meetingId,
+      messageId,
+      deliveryId,
+      actorPrincipalId: actorId,
+    });
+    if (result.kind === "missing") {
+      throw new ApplicationError(
+        "meeting_delivery_not_found",
+        "Meeting message delivery not found",
+        404,
+      );
+    }
+    if (result.kind === "not_retryable") {
+      throw new ApplicationError(
+        "meeting_delivery_not_retryable",
+        "Only a failed delivery can be retried",
+        409,
+        { status: result.delivery.status },
+      );
+    }
+    return result.delivery;
+  }
+
+  async markMeetingMessageDeliveryRead(
+    meetingId: string,
+    messageId: string,
+    deliveryId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingMessageDelivery> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    const delivery = await this.repositories.meetingCollaboration.getDelivery(
+      meetingId,
+      messageId,
+      deliveryId,
+    );
+    if (delivery === undefined) {
+      throw new ApplicationError(
+        "meeting_delivery_not_found",
+        "Meeting message delivery not found",
+        404,
+      );
+    }
+    let readingPrincipalId = actorId;
+    if (delivery.recipientPrincipalId !== actorId) {
+      const delegates =
+        await this.repositories.meetingCollaboration.listDelegates(meetingId);
+      const delegated = delegates.some(
+        (delegate) =>
+          delegate.status === "active" &&
+          delegate.representativePrincipalId ===
+            delivery.recipientPrincipalId &&
+          (delegate.delegatorPrincipalId === actorId ||
+            detail.collaboration?.facilitator.principalId === actorId),
+      );
+      if (!delegated) {
+        throw new ApplicationError(
+          "forbidden",
+          "A delivery can only be read by its recipient or active delegator",
+          403,
+        );
+      }
+      readingPrincipalId = delivery.recipientPrincipalId;
+    }
+    const result =
+      await this.repositories.meetingCollaboration.markDeliveryRead({
+        meetingId,
+        messageId,
+        deliveryId,
+        principalId: readingPrincipalId,
+      });
+    if (result.kind === "missing") {
+      throw new ApplicationError(
+        "meeting_delivery_not_found",
+        "Meeting message delivery not found",
+        404,
+      );
+    }
+    if (result.kind === "not_readable") {
+      throw new ApplicationError(
+        "meeting_delivery_not_readable",
+        "Only a delivered message can be marked read",
+        409,
+        { status: result.delivery.status },
+      );
+    }
+    return result.delivery;
+  }
+
+  async listMeetingFiles(
+    meetingId: string,
+    actorId = "local-admin",
+    includeArchived = false,
+  ): Promise<MeetingFile[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingCollaboration.listFiles({
+      meetingId,
+      includeArchived,
+    });
+  }
+
+  async uploadMeetingFile(
+    meetingId: string,
+    input: UploadMeetingFileInput,
+    actorId = "local-admin",
+  ): Promise<MeetingFile> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    if (this.files === undefined) {
+      throw new ApplicationError(
+        "file_store_unavailable",
+        "FileStore is not configured",
+        503,
+      );
+    }
+    const encoded =
+      input.contentBase64.startsWith("data:") &&
+      input.contentBase64.includes(",")
+        ? input.contentBase64.slice(input.contentBase64.indexOf(",") + 1)
+        : input.contentBase64;
+    const content = Buffer.from(encoded, "base64");
+    if (content.byteLength === 0) {
+      throw new ApplicationError(
+        "invalid_input",
+        "Meeting file content is empty",
+        400,
+      );
+    }
+    const ref = await this.files.put({
+      workspaceId: detail.meeting.projectId,
+      name: input.name,
+      mimeType: input.mimeType,
+      content,
+    });
+    return this.repositories.meetingCollaboration.saveFile({
+      meetingId,
+      projectId: detail.meeting.projectId,
+      uploadedBy: actorId,
+      ref,
+    });
+  }
+
+  async readMeetingFile(
+    meetingId: string,
+    fileId: string,
+    actorId = "local-admin",
+  ): Promise<{ readonly file: MeetingFile; readonly content: Uint8Array }> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    const file = await this.repositories.meetingCollaboration.getFile(
+      meetingId,
+      fileId,
+    );
+    if (file === undefined) {
+      throw new ApplicationError(
+        "meeting_file_not_found",
+        "Meeting file not found",
+        404,
+      );
+    }
+    if (this.files === undefined) {
+      throw new ApplicationError(
+        "file_store_unavailable",
+        "FileStore is not configured",
+        503,
+      );
+    }
+    if (file.projectId !== detail.meeting.projectId) {
+      throw new ApplicationError(
+        "meeting_file_not_found",
+        "Meeting file not found",
+        404,
+      );
+    }
+    return {
+      file,
+      content: await this.files.read({
+        id: file.id,
+        storageKey: file.storageKey,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+        sha256: file.sha256,
+      }),
+    };
+  }
+
+  async archiveMeetingFile(
+    meetingId: string,
+    fileId: string,
+    archived: boolean,
+    actorId = "local-admin",
+  ): Promise<MeetingFile> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const file = await this.repositories.meetingCollaboration.archiveFile({
+      meetingId,
+      fileId,
+      actorPrincipalId: actorId,
+      archived,
+    });
+    if (file === undefined) {
+      throw new ApplicationError(
+        "meeting_file_state_conflict",
+        "Meeting file is already in the requested state",
+        409,
+      );
+    }
+    return file;
+  }
+
+  async generateMeetingMinutes(
+    meetingId: string,
+    expectedRevision: number,
+    actorId = "local-admin",
+  ): Promise<MeetingMinutesDraft> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const messages = detail.messages.filter(
+      (message) => message.status === "sent" && message.content.trim() !== "",
+    );
+    const content = [
+      `Meeting: ${detail.meeting.title}`,
+      ...(detail.meeting.agenda.trim() === ""
+        ? []
+        : [`Agenda: ${detail.meeting.agenda.trim()}`]),
+      "Minutes:",
+      ...(messages.length === 0
+        ? ["No public meeting messages were recorded."]
+        : messages.map(
+            (message) => `- ${message.authorName}: ${message.content.trim()}`,
+          )),
+    ].join("\n");
+    const decisions = messages
+      .map((message) => message.content.trim())
+      .filter((text) =>
+        /^(decision|decided|决定|决议)\s*[:：]/i.test(text),
+      )
+      .map((text) => text.replace(/^[^:：]+[:：]\s*/, ""))
+      .slice(0, 100);
+    const sourceMessageIds = messages.map((message) => message.id);
+    const draft = await this.repositories.meetingDecisions.saveDraft({
+      meetingId,
+      projectId: detail.meeting.projectId,
+      content,
+      decisions,
+      sourceMessageIds,
+      expectedRevision,
+      actorId,
+    });
+    if (draft === undefined) {
+      throw new ApplicationError(
+        "meeting_minutes_revision_conflict",
+        "Meeting minutes were revised by another request",
+        409,
+      );
+    }
+    await this.repositories.meetingCollaboration.recordMinutesEvent({
+      meetingId,
+      actorPrincipalId: actorId,
+      summary: "Meeting minutes generated deterministically",
+      data: {
+        revision: draft.revision,
+        sourceMessageCount: sourceMessageIds.length,
+      },
+    });
+    return draft;
+  }
+
+  async confirmMeetingMinutes(
+    meetingId: string,
+    input: ConfirmMeetingMinutesInput,
+    actorId = "local-admin",
+  ): Promise<{
+    readonly minutes: MeetingMinutes;
+    readonly version: MeetingMinutesVersion;
+    readonly confirmation: MeetingMinutesConfirmation;
+  }> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "approve",
+      actorId,
+    );
+    try {
+      const published = await this.repositories.meetingDecisions.publish({
+        meetingId,
+        projectId: detail.meeting.projectId,
+        expectedRevision: input.expectedRevision,
+        actorId,
+      });
+      if (published === undefined) {
+        throw new ApplicationError(
+          "meeting_minutes_revision_conflict",
+          "Meeting minutes were revised by another request",
+          409,
+        );
+      }
+      const confirmation =
+        await this.repositories.meetingCollaboration.confirmMinutes({
+          versionId: published.version.id,
+          meetingId,
+          projectId: detail.meeting.projectId,
+          confirmedBy: actorId,
+          note: input.note,
+        });
+      await this.repositories.meetingCollaboration.recordMinutesEvent({
+        meetingId,
+        actorPrincipalId: actorId,
+        summary: "Meeting minutes confirmed",
+        data: {
+          versionId: published.version.id,
+          version: published.version.version,
+        },
+      });
+      return { ...published, confirmation };
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "meeting minutes content is empty"
+      ) {
+        throw new ApplicationError(
+          "meeting_minutes_empty",
+          "Meeting minutes content is required before confirmation",
+          400,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async listMeetingMinutesConfirmations(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingMinutesConfirmation[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingCollaboration.listMinutesConfirmations(
+      meetingId,
+    );
+  }
+
+  async listMeetingTasks(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<MeetingTask[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingCollaboration.listTasks(meetingId);
+  }
+
+  async createMeetingTask(
+    meetingId: string,
+    input: CreateMeetingTaskInput,
+    actorId = "local-admin",
+  ): Promise<MeetingTask> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const members = await this.repositories.projectMemberships.listMembers(
+      detail.meeting.projectId,
+    );
+    if (
+      !members.some(
+        (member) =>
+          member.kind === "agent" &&
+          member.actorId === input.assigneeAgentId &&
+          member.status === "active",
+      )
+    ) {
+      throw new ApplicationError(
+        "meeting_task_assignee_not_member",
+        "The meeting task assignee must be an active AI project member",
+        409,
+      );
+    }
+    const agent = await this.repositories.agents.get(input.assigneeAgentId);
+    if (agent === undefined) {
+      throw new ApplicationError(
+        "agent_not_found",
+        "Meeting task assignee not found",
+        404,
+      );
+    }
+    requireExecutableRuntime(agent);
+    this.assertMeetingSourceMessages(detail, input.sourceMessageIds);
+    if (input.sourceType === "action_item") {
+      throw new ApplicationError(
+        "meeting_task_source_invalid",
+        "Action item tasks must be created through action item conversion",
+        400,
+      );
+    }
+    let sourceId = input.sourceId ?? actorId;
+    if (input.sourceType === "message") {
+      const message = detail.messages.find(
+        (candidate) => candidate.id === input.sourceId,
+      );
+      if (message === undefined) {
+        throw new ApplicationError(
+          "meeting_source_message_not_found",
+          "The meeting task source message does not belong to this meeting",
+          409,
+        );
+      }
+      sourceId = message.id;
+    }
+    if (input.sourceType === "minutes_version") {
+      const versions =
+        await this.repositories.meetingDecisions.listMinutesVersions(
+          meetingId,
+        );
+      const version = versions.find(
+        (candidate) => candidate.id === input.sourceId,
+      );
+      if (version === undefined) {
+        throw new ApplicationError(
+          "meeting_minutes_version_not_found",
+          "The meeting task source minutes version is unavailable",
+          409,
+        );
+      }
+      sourceId = version.id;
+    }
+    const created = await this.repositories.meetingCollaboration.createTask({
+      meetingId,
+      projectId: detail.meeting.projectId,
+      title: input.title,
+      description: input.description,
+      priority: input.priority,
+      assigneeAgentId: input.assigneeAgentId,
+      sourceType: input.sourceType,
+      sourceId,
+      idempotencyKey: input.idempotencyKey,
+      sourceMessageIds: input.sourceMessageIds,
+      actorPrincipalId: actorId,
+    });
+    if (
+      input.dispatch &&
+      !created.reused &&
+      created.taskStatus === "queued"
+    ) {
+      await this.dispatchTask(
+        created.taskId,
+        createRootTraceContext(),
+        actorId,
+        actorId === "local-admin",
+      );
+      return (
+        (await this.repositories.meetingCollaboration.getTask(
+          meetingId,
+          created.id,
+        )) ?? created
+      );
+    }
+    return created;
+  }
+
+  async archiveMeeting(
+    meetingId: string,
+    input: ArchiveMeetingInput,
+    actorId = "local-admin",
+  ) {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.authorizeFacilitatorControl(detail, actorId);
+    const policy = await this.repositories.meetingAi.getPolicy(meetingId);
+    if (policy?.status === "active") {
+      await this.repositories.meetingAi.transitionPolicy({
+        id: policy.id,
+        expectedRevision: policy.revision,
+        status: "paused",
+        actorId,
+        reason: "meeting archived",
+      });
+    }
+    const archived = await this.repositories.meetingCollaboration.archive({
+      meetingId,
+      expectedRevision: input.expectedRevision,
+      actorPrincipalId: actorId,
+      reason: input.reason,
+    });
+    if (archived === undefined) {
+      throw new ApplicationError(
+        "meeting_archive_revision_conflict",
+        "The meeting lifecycle was changed concurrently",
+        409,
+      );
+    }
+    await this.repositories.meetingAi.cancelOpenRuns(
+      meetingId,
+      "meeting archived",
+    );
+    return archived;
+  }
+
+  async restoreMeeting(
+    meetingId: string,
+    input: RestoreMeetingInput,
+    actorId = "local-admin",
+  ) {
+    const detail = await this.getMeeting(meetingId, actorId);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    await this.authorizeFacilitatorControl(detail, actorId);
+    const restored = await this.repositories.meetingCollaboration.restore({
+      meetingId,
+      expectedRevision: input.expectedRevision,
+      actorPrincipalId: actorId,
+    });
+    if (restored === undefined) {
+      throw new ApplicationError(
+        "meeting_restore_revision_conflict",
+        "Only an archived meeting at the expected revision can be restored",
+        409,
+      );
+    }
+    return restored;
+  }
+
+  private assertMeetingActive(detail: MeetingDetail): void {
+    if (
+      detail.collaboration !== undefined &&
+      detail.collaboration.lifecycleStatus !== "active"
+    ) {
+      throw new ApplicationError(
+        "meeting_archived",
+        "Archived meetings are read-only until restored",
+        409,
+      );
+    }
+  }
+
+  private async authorizeFacilitatorControl(
+    detail: MeetingDetail,
+    actorId: string,
+  ): Promise<void> {
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "read",
+      actorId,
+    );
+    if (detail.collaboration?.facilitator.principalId === actorId) return;
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "manage_members",
+      actorId,
+    );
+  }
+
+  private async requireActiveProjectMemberPrincipal(input: {
+    readonly projectId: string;
+    readonly principalId: string;
+    readonly expectedKind: "human" | "ai";
+    readonly code: string;
+  }): Promise<void> {
+    const principal = await this.repositories.authorization.getPrincipal(
+      input.principalId,
+    );
+    if (
+      principal === undefined ||
+      principal.status !== "active" ||
+      principal.kind !== input.expectedKind
+    ) {
+      throw new ApplicationError(
+        input.code,
+        `The ${input.expectedKind} Principal is unavailable`,
+        409,
+      );
+    }
+    const members = await this.repositories.projectMemberships.listMembers(
+      input.projectId,
+    );
+    if (
+      !members.some(
+        (member) =>
+          member.status === "active" &&
+          (member.principalId === input.principalId ||
+            member.actorId === input.principalId),
+      )
+    ) {
+      throw new ApplicationError(
+        input.code,
+        "The Principal must be an active project member",
+        409,
+      );
+    }
   }
 
   private assertMeetingSourceMessages(

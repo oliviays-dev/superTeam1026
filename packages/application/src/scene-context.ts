@@ -4,6 +4,7 @@ import type {
   ContextPack,
   ContextReceipt,
   CreateSceneContextContributionInput,
+  MeetingPrivateBriefing,
   Project,
   Run,
   SceneChatChannel,
@@ -107,8 +108,9 @@ function sourceClassForContribution(
     case "project-memory":
       return "project-memory";
     case "meeting-minutes":
-    case "meeting-private-note":
       return "workspace";
+    case "meeting-private-note":
+      return "private-local-data";
     case "direct-chat-message":
       return "private-local-data";
     default:
@@ -154,6 +156,7 @@ function contributionInputs(
   meetingMinutes: Awaited<
     ReturnType<PlatformRepositories["meetingDecisions"]["getMinutes"]>
   >,
+  privateBriefings: readonly MeetingPrivateBriefing[],
 ): {
   readonly sourceKey: string;
   readonly kind: SceneContextContribution["kind"];
@@ -321,6 +324,38 @@ function contributionInputs(
       });
     }
   }
+  for (const briefing of privateBriefings) {
+    values.push({
+      sourceKey: `meeting-private-briefing:${briefing.id}`,
+      kind: "meeting-private-note",
+      version: String(briefing.revision),
+      authority: "instruction",
+      visibility: "private",
+      text: `[Private briefing from ${briefing.ownerPrincipalId}] ${briefing.content}`,
+      sourceRefs: [
+        {
+          type: "meeting",
+          id: sceneId,
+          projectId: input.run.projectId ?? undefined,
+          sceneType: "meeting",
+          sceneId,
+        },
+        {
+          type: "meeting-private-briefing",
+          id: briefing.id,
+          label: "Private meeting briefing",
+          version: String(briefing.revision),
+          projectId: input.run.projectId ?? undefined,
+          sceneType: "meeting",
+          sceneId,
+        },
+      ],
+      createdBy: briefing.ownerPrincipalId,
+      ownerPrincipalId:
+        input.run.executionEnvelope?.principalId ??
+        briefing.audiencePrincipalId,
+    });
+  }
   for (const episode of input.episodes) {
     values.push({
       sourceKey: `agent-episode:${episode.id}`,
@@ -373,7 +408,13 @@ export class SceneContextService {
       ownerPrincipalId: scene.ownerPrincipalId,
       channelId: channel?.id ?? null,
     });
-    const [projectTasks, messages, attachments, minutes] = await Promise.all([
+    const [
+      projectTasks,
+      messages,
+      attachments,
+      minutes,
+      privateBriefings,
+    ] = await Promise.all([
       input.project === null
         ? Promise.resolve([])
         : this.repositories.tasks.list(input.project.id),
@@ -386,6 +427,14 @@ export class SceneContextService {
       scene.sceneType === "meeting"
         ? this.repositories.meetingDecisions.getMinutes(scene.sceneId)
         : Promise.resolve(undefined),
+      scene.sceneType === "meeting"
+        ? this.repositories.meetingCollaboration.listBriefingsForContext({
+            meetingId: scene.sceneId,
+            principalId,
+            agentId: input.agent.id,
+            agentPrincipalId,
+          })
+        : Promise.resolve([]),
     ]);
     for (const contribution of contributionInputs(
       input,
@@ -395,6 +444,7 @@ export class SceneContextService {
       messages,
       attachments,
       minutes,
+      privateBriefings,
     )) {
       await this.repositories.sceneContext.addContribution({
         session: binding,

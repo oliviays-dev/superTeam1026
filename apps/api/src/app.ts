@@ -35,12 +35,18 @@ import {
   createWorkflowInputSchema,
   changePasswordInputSchema,
   completeWorkflowNodeInputSchema,
+  confirmMeetingMinutesInputSchema,
   convertMeetingActionItemInputSchema,
+  createMeetingDelegateInputSchema,
+  createMeetingPrivateBriefingInputSchema,
+  createMeetingTaskInputSchema,
   cosignWorkflowApprovalInputSchema,
   decideWorkflowApprovalInputSchema,
   decideExecutionGateInputSchema,
   executionHistoryQuerySchema,
+  generateMeetingMinutesInputSchema,
   generateProjectReportInputSchema,
+  handoffMeetingFacilitatorInputSchema,
   importWorkflowMarkdownInputSchema,
   idempotencyCleanupInputSchema,
   jobListQuerySchema,
@@ -51,6 +57,9 @@ import {
   projectReportQuerySchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
+  restoreMeetingInputSchema,
+  revokeMeetingDelegateInputSchema,
+  setMeetingReadPositionInputSchema,
   pauseTaskInputSchema,
   provideTaskInputSchema,
   refreshWorkbenchBriefInputSchema,
@@ -89,6 +98,9 @@ import {
   updateMeetingActionItemInputSchema,
   updateMeetingAiPolicyInputSchema,
   updateMeetingMinutesDraftInputSchema,
+  updateMeetingPrivateBriefingInputSchema,
+  uploadMeetingFileInputSchema,
+  archiveMeetingInputSchema,
   updateMemoryClaimInputSchema,
   updateProjectMemberInputSchema,
   updateProjectInputSchema,
@@ -175,6 +187,40 @@ const directChatTurnParamsSchema = directChatParamsSchema.extend({
 const meetingActionItemParamsSchema = meetingParamsSchema.extend({
   actionItemId: z.string().uuid(),
 });
+const meetingDelegateParamsSchema = meetingParamsSchema.extend({
+  delegateId: z.string().uuid(),
+});
+const meetingMessageParamsSchema = meetingParamsSchema.extend({
+  messageId: z.string().uuid(),
+});
+const meetingDeliveryParamsSchema = meetingMessageParamsSchema.extend({
+  deliveryId: z.string().uuid(),
+});
+const meetingBriefingParamsSchema = meetingParamsSchema.extend({
+  briefingId: z.string().uuid(),
+});
+const meetingFileParamsSchema = meetingParamsSchema.extend({
+  fileId: z.string().uuid(),
+});
+const meetingListQuerySchema = z.object({
+  projectId: z.string().uuid(),
+  includeArchived: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+});
+const meetingListFilterQuerySchema = z.object({
+  includeArchived: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+});
+const archiveMeetingBriefingInputSchema = z.object({
+  expectedRevision: z.number().int().positive(),
+});
+const archiveMeetingFileInputSchema = z.object({
+  archived: z.boolean().default(false),
+});
 const projectParamsSchema = z.object({ projectId: z.string().uuid() });
 const projectReportParamsSchema = projectParamsSchema.extend({
   reportId: z.string().uuid(),
@@ -240,6 +286,13 @@ const episodeQuerySchema = z.object({
 });
 const meetingMessageInputSchema = z.object({
   content: z.string().trim().min(1).max(20_000),
+  clientMessageId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(160)
+    .regex(/^[a-zA-Z0-9_.:-]+$/)
+    .optional(),
   mentions: z
     .array(z.string().uuid())
     .max(20)
@@ -398,7 +451,7 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 30;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 31;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -3304,13 +3357,16 @@ export function buildApi(options: BuildApiOptions): {
   );
 
   app.get("/api/v1/meetings", async (request, reply) => {
-    const { projectId } = listTasksQuerySchema.parse(request.query);
-    if (projectId === undefined) {
-      throw new ApplicationError("invalid_input", "projectId is required", 400);
-    }
+    const { projectId, includeArchived } = meetingListQuerySchema.parse(
+      request.query,
+    );
     const actorId = requestActorId(request.headers);
     return reply.send({
-      items: await application.listMeetings(projectId, actorId),
+      items: await application.listMeetings(
+        projectId,
+        actorId,
+        includeArchived,
+      ),
     });
   });
 
@@ -3319,13 +3375,416 @@ export function buildApi(options: BuildApiOptions): {
     const actorId = requestActorId(request.headers);
     return reply
       .status(201)
-      .send(await application.createMeeting(input, actorId));
+      .send(
+        await application.createMeeting(
+          input,
+          actorId,
+          requestActorName(request.headers, actorId),
+        ),
+      );
   });
 
   app.get("/api/v1/meetings/:meetingId", async (request, reply) => {
     const { meetingId } = meetingParamsSchema.parse(request.params);
     const actorId = requestActorId(request.headers);
     return reply.send(await application.getMeeting(meetingId, actorId));
+  });
+
+  app.get(
+    "/api/v1/meetings/:meetingId/collaboration",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.getMeetingCollaboration(meetingId, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/facilitator/handoff",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const input = handoffMeetingFacilitatorInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.handoffMeetingFacilitator(
+          meetingId,
+          input,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/meetings/:meetingId/facilitator/history",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.listMeetingFacilitatorHandoffs(
+          meetingId,
+          actorId,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/meetings/:meetingId/delegates",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.listMeetingDelegates(meetingId, actorId),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/delegates",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const input = createMeetingDelegateInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply
+        .status(201)
+        .send(
+          await application.createMeetingDelegate(meetingId, input, actorId),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/delegates/:delegateId/revoke",
+    async (request, reply) => {
+      const { meetingId, delegateId } = meetingDelegateParamsSchema.parse(
+        request.params,
+      );
+      const input = revokeMeetingDelegateInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.revokeMeetingDelegate(
+          meetingId,
+          delegateId,
+          input,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/delegates/:delegateId/messages",
+    async (request, reply) => {
+      const { meetingId, delegateId } = meetingDelegateParamsSchema.parse(
+        request.params,
+      );
+      const input = meetingMessageInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.status(201).send(
+        await application.postDelegateMeetingMessage(
+          meetingId,
+          delegateId,
+          input.content,
+          actorId,
+          input.clientMessageId,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/meetings/:meetingId/private-briefings",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const { includeArchived } = meetingListFilterQuerySchema.parse(
+        request.query,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.listMeetingPrivateBriefings(
+          meetingId,
+          actorId,
+          includeArchived,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/private-briefings",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const input = createMeetingPrivateBriefingInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply
+        .status(201)
+        .send(
+          await application.createMeetingPrivateBriefing(
+            meetingId,
+            input,
+            actorId,
+          ),
+        );
+    },
+  );
+
+  app.patch(
+    "/api/v1/meetings/:meetingId/private-briefings/:briefingId",
+    async (request, reply) => {
+      const { meetingId, briefingId } = meetingBriefingParamsSchema.parse(
+        request.params,
+      );
+      const input = updateMeetingPrivateBriefingInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.updateMeetingPrivateBriefing(
+          meetingId,
+          briefingId,
+          input,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/private-briefings/:briefingId/archive",
+    async (request, reply) => {
+      const { meetingId, briefingId } = meetingBriefingParamsSchema.parse(
+        request.params,
+      );
+      const { expectedRevision } = archiveMeetingBriefingInputSchema.parse(
+        request.body,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.archiveMeetingPrivateBriefing(
+          meetingId,
+          briefingId,
+          expectedRevision,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/meetings/:meetingId/read-position",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.getMeetingReadPosition(meetingId, actorId),
+      );
+    },
+  );
+
+  app.put(
+    "/api/v1/meetings/:meetingId/read-position",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const input = setMeetingReadPositionInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.setMeetingReadPosition(meetingId, input, actorId),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/meetings/:meetingId/messages/:messageId/deliveries",
+    async (request, reply) => {
+      const { meetingId, messageId } = meetingMessageParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.listMeetingMessageDeliveries(
+          meetingId,
+          messageId,
+          actorId,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/messages/:messageId/deliveries/:deliveryId/retry",
+    async (request, reply) => {
+      const { meetingId, messageId, deliveryId } =
+        meetingDeliveryParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.retryMeetingMessageDelivery(
+          meetingId,
+          messageId,
+          deliveryId,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/messages/:messageId/deliveries/:deliveryId/read",
+    async (request, reply) => {
+      const { meetingId, messageId, deliveryId } =
+        meetingDeliveryParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.markMeetingMessageDeliveryRead(
+          meetingId,
+          messageId,
+          deliveryId,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/meetings/:meetingId/files", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const { includeArchived } = meetingListFilterQuerySchema.parse(
+      request.query,
+    );
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listMeetingFiles(
+        meetingId,
+        actorId,
+        includeArchived,
+      ),
+    });
+  });
+
+  app.post("/api/v1/meetings/:meetingId/files", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = uploadMeetingFileInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply
+      .status(201)
+      .send(await application.uploadMeetingFile(meetingId, input, actorId));
+  });
+
+  app.get(
+    "/api/v1/meetings/:meetingId/files/:fileId/download",
+    async (request, reply) => {
+      const { meetingId, fileId } = meetingFileParamsSchema.parse(
+        request.params,
+      );
+      const actorId = requestActorId(request.headers);
+      const { file, content } = await application.readMeetingFile(
+        meetingId,
+        fileId,
+        actorId,
+      );
+      return reply
+        .header("content-type", file.mimeType)
+        .header(
+          "content-disposition",
+          `attachment; filename="${file.name.replaceAll('"', "")}"`,
+        )
+        .send(Buffer.from(content));
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/files/:fileId/archive",
+    async (request, reply) => {
+      const { meetingId, fileId } = meetingFileParamsSchema.parse(
+        request.params,
+      );
+      const { archived } = archiveMeetingFileInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.archiveMeetingFile(
+          meetingId,
+          fileId,
+          archived,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/minutes/generate",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const input = generateMeetingMinutesInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.generateMeetingMinutes(
+          meetingId,
+          input.expectedRevision,
+          actorId,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/meetings/:meetingId/minutes/confirm",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const input = confirmMeetingMinutesInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.confirmMeetingMinutes(meetingId, input, actorId),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/meetings/:meetingId/minutes/confirmations",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.listMeetingMinutesConfirmations(
+          meetingId,
+          actorId,
+        ),
+      });
+    },
+  );
+
+  app.get("/api/v1/meetings/:meetingId/tasks", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listMeetingTasks(meetingId, actorId),
+    });
+  });
+
+  app.post("/api/v1/meetings/:meetingId/tasks", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = createMeetingTaskInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply
+      .status(201)
+      .send(await application.createMeetingTask(meetingId, input, actorId));
+  });
+
+  app.post("/api/v1/meetings/:meetingId/archive", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = archiveMeetingInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.archiveMeeting(meetingId, input, actorId),
+    );
+  });
+
+  app.post("/api/v1/meetings/:meetingId/restore", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = restoreMeetingInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.restoreMeeting(meetingId, input, actorId),
+    );
   });
 
   app.get("/api/v1/meetings/:meetingId/ai-policy", async (request, reply) => {
@@ -3517,6 +3976,8 @@ export function buildApi(options: BuildApiOptions): {
           input.content,
           actorId,
           input.mentions,
+          input.clientMessageId,
+          requestActorName(request.headers, actorId),
         ),
       );
   });

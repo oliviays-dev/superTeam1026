@@ -3977,3 +3977,660 @@ INSERT INTO runtime_maintenance_schedules (
 )
 ON CONFLICT (kind) DO NOTHING;
 `;
+
+export const MEETING_COLLABORATION_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS meeting_collaboration_states (
+  meeting_id UUID PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  facilitator_principal_id TEXT NOT NULL
+    CHECK (length(btrim(facilitator_principal_id)) BETWEEN 1 AND 180),
+  lifecycle_status TEXT NOT NULL DEFAULT 'active'
+    CHECK (lifecycle_status IN ('active', 'archived')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  facilitator_assigned_by TEXT
+    CHECK (
+      facilitator_assigned_by IS NULL
+      OR length(btrim(facilitator_assigned_by)) BETWEEN 1 AND 180
+    ),
+  facilitator_assigned_at TIMESTAMPTZ NOT NULL,
+  archived_by TEXT
+    CHECK (
+      archived_by IS NULL
+      OR length(btrim(archived_by)) BETWEEN 1 AND 180
+    ),
+  archived_at TIMESTAMPTZ,
+  archive_reason TEXT
+    CHECK (archive_reason IS NULL OR length(btrim(archive_reason)) <= 4000),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    (lifecycle_status = 'active'
+      AND archived_by IS NULL
+      AND archived_at IS NULL
+      AND archive_reason IS NULL)
+    OR
+    (lifecycle_status = 'archived'
+      AND archived_by IS NOT NULL
+      AND archived_at IS NOT NULL
+      AND archive_reason IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS meeting_collaboration_states_project_idx
+  ON meeting_collaboration_states(project_id, lifecycle_status, updated_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_meeting_collaboration_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.meeting_id IS DISTINCT FROM NEW.meeting_id
+    OR OLD.project_id IS DISTINCT FROM NEW.project_id
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'meeting collaboration identity is immutable';
+  END IF;
+  IF NEW.revision < OLD.revision
+    OR (OLD.lifecycle_status = 'archived'
+      AND NEW.lifecycle_status = 'active'
+      AND NEW.archived_at IS NOT NULL)
+  THEN
+    RAISE EXCEPTION 'meeting collaboration revision cannot move backwards';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_collaboration_states_identity_guard
+  ON meeting_collaboration_states;
+CREATE TRIGGER meeting_collaboration_states_identity_guard
+BEFORE UPDATE ON meeting_collaboration_states
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_meeting_collaboration_identity();
+
+CREATE TABLE IF NOT EXISTS meeting_facilitator_handoffs (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL
+    REFERENCES meeting_collaboration_states(meeting_id) ON DELETE CASCADE,
+  from_principal_id TEXT
+    CHECK (
+      from_principal_id IS NULL
+      OR length(btrim(from_principal_id)) BETWEEN 1 AND 180
+    ),
+  to_principal_id TEXT NOT NULL
+    CHECK (length(btrim(to_principal_id)) BETWEEN 1 AND 180),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  reason TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 4000),
+  resulting_revision INTEGER NOT NULL CHECK (resulting_revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (meeting_id, resulting_revision)
+);
+
+CREATE INDEX IF NOT EXISTS meeting_facilitator_handoffs_meeting_idx
+  ON meeting_facilitator_handoffs(meeting_id, resulting_revision DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_meeting_handoff_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'meeting facilitator handoffs are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_facilitator_handoffs_append_only
+  ON meeting_facilitator_handoffs;
+CREATE TRIGGER meeting_facilitator_handoffs_append_only
+BEFORE UPDATE OR DELETE ON meeting_facilitator_handoffs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_meeting_handoff_mutation();
+
+CREATE TABLE IF NOT EXISTS meeting_delegates (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  delegator_principal_id TEXT NOT NULL
+    CHECK (length(btrim(delegator_principal_id)) BETWEEN 1 AND 180),
+  representative_kind TEXT NOT NULL
+    CHECK (representative_kind IN ('human', 'agent')),
+  representative_principal_id TEXT NOT NULL
+    CHECK (length(btrim(representative_principal_id)) BETWEEN 1 AND 180),
+  agent_id UUID REFERENCES agents(id) ON DELETE RESTRICT,
+  allowed_actions TEXT[] NOT NULL DEFAULT ARRAY['speak']::text[]
+    CHECK (
+      cardinality(allowed_actions) > 0
+      AND allowed_actions <@ ARRAY[
+        'speak',
+        'read_private',
+        'attach_file',
+        'summarize'
+      ]::text[]
+    ),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'revoked', 'expired')),
+  reason TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 4000),
+  expires_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  revoked_by TEXT
+    CHECK (
+      revoked_by IS NULL
+      OR length(btrim(revoked_by)) BETWEEN 1 AND 180
+    ),
+  revoked_at TIMESTAMPTZ,
+  CHECK (
+    (representative_kind = 'agent' AND agent_id IS NOT NULL)
+    OR (representative_kind = 'human' AND agent_id IS NULL)
+  ),
+  CHECK (
+    (status = 'revoked' AND revoked_by IS NOT NULL AND revoked_at IS NOT NULL)
+    OR (status <> 'revoked' AND revoked_by IS NULL AND revoked_at IS NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS meeting_delegates_active_scope_idx
+  ON meeting_delegates(
+    meeting_id,
+    delegator_principal_id,
+    representative_principal_id
+  )
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS meeting_delegates_meeting_idx
+  ON meeting_delegates(meeting_id, status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS meeting_delegates_representative_idx
+  ON meeting_delegates(representative_principal_id, status);
+
+CREATE TABLE IF NOT EXISTS meeting_private_briefings (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  owner_principal_id TEXT NOT NULL
+    CHECK (length(btrim(owner_principal_id)) BETWEEN 1 AND 180),
+  audience_principal_id TEXT NOT NULL
+    CHECK (length(btrim(audience_principal_id)) BETWEEN 1 AND 180),
+  audience_agent_id UUID REFERENCES agents(id) ON DELETE SET NULL,
+  content TEXT NOT NULL CHECK (length(btrim(content)) BETWEEN 1 AND 20000),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS meeting_private_briefings_owner_idx
+  ON meeting_private_briefings(
+    meeting_id,
+    owner_principal_id,
+    status,
+    updated_at DESC
+  );
+
+CREATE INDEX IF NOT EXISTS meeting_private_briefings_audience_idx
+  ON meeting_private_briefings(
+    meeting_id,
+    audience_principal_id,
+    status,
+    updated_at DESC
+  );
+
+CREATE INDEX IF NOT EXISTS meeting_private_briefings_agent_idx
+  ON meeting_private_briefings(audience_agent_id, status)
+  WHERE audience_agent_id IS NOT NULL;
+
+ALTER TABLE meeting_messages
+  ADD COLUMN IF NOT EXISTS client_message_id TEXT
+    CHECK (
+      client_message_id IS NULL
+      OR (
+        length(btrim(client_message_id)) BETWEEN 1 AND 160
+        AND client_message_id ~ '^[a-zA-Z0-9_.:-]+$'
+      )
+    ),
+  ADD COLUMN IF NOT EXISTS delegate_id UUID
+    REFERENCES meeting_delegates(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS sender_principal_id TEXT
+    CHECK (
+      sender_principal_id IS NULL
+      OR length(btrim(sender_principal_id)) BETWEEN 1 AND 180
+    );
+
+CREATE UNIQUE INDEX IF NOT EXISTS meeting_messages_client_id_idx
+  ON meeting_messages(meeting_id, client_message_id)
+  WHERE client_message_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS meeting_message_deliveries (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  message_id UUID NOT NULL REFERENCES meeting_messages(id) ON DELETE CASCADE,
+  recipient_principal_id TEXT NOT NULL
+    CHECK (length(btrim(recipient_principal_id)) BETWEEN 1 AND 180),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'delivered', 'read', 'failed')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 240),
+  last_error TEXT CHECK (last_error IS NULL OR length(last_error) <= 4000),
+  delivered_at TIMESTAMPTZ,
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (message_id, recipient_principal_id),
+  UNIQUE (message_id, idempotency_key),
+  CHECK (
+    (status = 'pending' AND delivered_at IS NULL AND read_at IS NULL)
+    OR (status = 'failed' AND delivered_at IS NULL AND read_at IS NULL)
+    OR (status = 'delivered'
+      AND delivered_at IS NOT NULL
+      AND read_at IS NULL)
+    OR (status = 'read'
+      AND delivered_at IS NOT NULL
+      AND read_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS meeting_message_deliveries_recipient_idx
+  ON meeting_message_deliveries(
+    recipient_principal_id,
+    status,
+    updated_at DESC
+  );
+
+CREATE INDEX IF NOT EXISTS meeting_message_deliveries_message_idx
+  ON meeting_message_deliveries(message_id, status);
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_meeting_delivery_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'meeting deliveries cannot be deleted';
+  END IF;
+  IF OLD.id IS DISTINCT FROM NEW.id
+    OR OLD.meeting_id IS DISTINCT FROM NEW.meeting_id
+    OR OLD.message_id IS DISTINCT FROM NEW.message_id
+    OR OLD.recipient_principal_id IS DISTINCT FROM NEW.recipient_principal_id
+    OR OLD.idempotency_key IS DISTINCT FROM NEW.idempotency_key
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'meeting delivery identity is immutable';
+  END IF;
+  IF OLD.status = 'read' AND NEW.status IS DISTINCT FROM OLD.status THEN
+    RAISE EXCEPTION 'read meeting deliveries are terminal';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_message_deliveries_identity_guard
+  ON meeting_message_deliveries;
+CREATE TRIGGER meeting_message_deliveries_identity_guard
+BEFORE UPDATE OR DELETE ON meeting_message_deliveries
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_meeting_delivery_identity();
+
+CREATE TABLE IF NOT EXISTS meeting_read_positions (
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  principal_id TEXT NOT NULL
+    CHECK (length(btrim(principal_id)) BETWEEN 1 AND 180),
+  last_read_message_id UUID
+    REFERENCES meeting_messages(id) ON DELETE SET NULL,
+  last_read_at TIMESTAMPTZ NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (meeting_id, principal_id)
+);
+
+CREATE TABLE IF NOT EXISTS meeting_files (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 240),
+  mime_type TEXT NOT NULL CHECK (length(btrim(mime_type)) BETWEEN 1 AND 160),
+  size BIGINT NOT NULL CHECK (size >= 0),
+  sha256 TEXT NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),
+  storage_key TEXT NOT NULL
+    CHECK (
+      length(storage_key) BETWEEN 1 AND 800
+      AND storage_key !~ '(^|/)\\.\\.?(/|$)'
+      AND storage_key !~ '^/'
+      AND storage_key !~ '\\\\'
+    ),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  uploaded_by TEXT NOT NULL
+    CHECK (length(btrim(uploaded_by)) BETWEEN 1 AND 180),
+  archived_by TEXT
+    CHECK (
+      archived_by IS NULL
+      OR length(btrim(archived_by)) BETWEEN 1 AND 180
+    ),
+  archived_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    (status = 'active' AND archived_by IS NULL AND archived_at IS NULL)
+    OR (status = 'archived'
+      AND archived_by IS NOT NULL
+      AND archived_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS meeting_files_meeting_idx
+  ON meeting_files(meeting_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS meeting_minutes_confirmations (
+  version_id UUID PRIMARY KEY
+    REFERENCES meeting_minutes_versions(id) ON DELETE RESTRICT,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  confirmed_by TEXT NOT NULL
+    CHECK (length(btrim(confirmed_by)) BETWEEN 1 AND 180),
+  note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 4000),
+  confirmed_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS meeting_minutes_confirmations_meeting_idx
+  ON meeting_minutes_confirmations(meeting_id, confirmed_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_minutes_confirmation_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'meeting minutes confirmations are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_minutes_confirmations_immutable
+  ON meeting_minutes_confirmations;
+CREATE TRIGGER meeting_minutes_confirmations_immutable
+BEFORE UPDATE OR DELETE ON meeting_minutes_confirmations
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_minutes_confirmation_mutation();
+
+CREATE TABLE IF NOT EXISTS meeting_tasks (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  task_id UUID NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE RESTRICT,
+  source_type TEXT NOT NULL
+    CHECK (source_type IN (
+      'manual',
+      'message',
+      'minutes_version',
+      'action_item'
+    )),
+  source_id TEXT NOT NULL CHECK (length(btrim(source_id)) BETWEEN 1 AND 180),
+  idempotency_key TEXT NOT NULL
+    CHECK (
+      length(btrim(idempotency_key)) BETWEEN 1 AND 200
+      AND idempotency_key ~ '^[a-zA-Z0-9_.:-]+$'
+    ),
+  created_by TEXT NOT NULL
+    CHECK (length(btrim(created_by)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (meeting_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS meeting_tasks_meeting_idx
+  ON meeting_tasks(meeting_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_meeting_task_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'meeting task links are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_tasks_immutable ON meeting_tasks;
+CREATE TRIGGER meeting_tasks_immutable
+BEFORE UPDATE OR DELETE ON meeting_tasks
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_meeting_task_mutation();
+
+CREATE TABLE IF NOT EXISTS meeting_collaboration_events (
+  id UUID PRIMARY KEY,
+  meeting_id UUID NOT NULL
+    REFERENCES meeting_collaboration_states(meeting_id) ON DELETE CASCADE,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'facilitator',
+    'delegate',
+    'private-briefing',
+    'delivery',
+    'archive',
+    'restore',
+    'file',
+    'minutes',
+    'task',
+    'read-position'
+  )),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  summary TEXT NOT NULL CHECK (length(btrim(summary)) BETWEEN 1 AND 4000),
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (meeting_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS meeting_collaboration_events_meeting_idx
+  ON meeting_collaboration_events(meeting_id, created_at DESC, id DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_meeting_collaboration_event_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'meeting collaboration events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_collaboration_events_append_only
+  ON meeting_collaboration_events;
+CREATE TRIGGER meeting_collaboration_events_append_only
+BEFORE UPDATE OR DELETE ON meeting_collaboration_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_meeting_collaboration_event_mutation();
+
+INSERT INTO meeting_collaboration_states (
+  meeting_id,
+  project_id,
+  facilitator_principal_id,
+  lifecycle_status,
+  revision,
+  facilitator_assigned_by,
+  facilitator_assigned_at,
+  archived_by,
+  archived_at,
+  archive_reason,
+  created_at,
+  updated_at
+)
+SELECT
+  meeting.id,
+  meeting.project_id,
+  COALESCE(
+    NULLIF(
+      (
+        SELECT participant.value ->> 'id'
+        FROM jsonb_array_elements(meeting.participants) AS participant(value)
+        WHERE participant.value ->> 'kind' = 'human'
+          AND participant.value ->> 'id'
+            ~ '^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,179}$'
+        LIMIT 1
+      ),
+      ''
+    ),
+    'local-admin'
+  ),
+  'active',
+  1,
+  NULL,
+  meeting.created_at,
+  NULL,
+  NULL,
+  NULL,
+  meeting.created_at,
+  meeting.updated_at
+FROM meetings AS meeting
+ON CONFLICT (meeting_id) DO NOTHING;
+
+INSERT INTO meeting_facilitator_handoffs (
+  id,
+  meeting_id,
+  from_principal_id,
+  to_principal_id,
+  actor_principal_id,
+  reason,
+  resulting_revision,
+  created_at
+)
+SELECT
+  gen_random_uuid(),
+  state.meeting_id,
+  NULL,
+  state.facilitator_principal_id,
+  state.facilitator_principal_id,
+  'Batch 18 additive facilitator backfill',
+  state.revision,
+  state.created_at
+FROM meeting_collaboration_states AS state
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM meeting_facilitator_handoffs AS handoff
+  WHERE handoff.meeting_id = state.meeting_id
+);
+
+INSERT INTO meeting_collaboration_events (
+  id,
+  meeting_id,
+  seq,
+  kind,
+  actor_principal_id,
+  summary,
+  data,
+  created_at
+)
+SELECT
+  gen_random_uuid(),
+  state.meeting_id,
+  1,
+  'facilitator',
+  state.facilitator_principal_id,
+  'Facilitator initialized from the meeting creator',
+  jsonb_build_object(
+    'facilitatorPrincipalId',
+    state.facilitator_principal_id
+  ),
+  state.created_at
+FROM meeting_collaboration_states AS state
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM meeting_collaboration_events AS event
+  WHERE event.meeting_id = state.meeting_id
+);
+
+INSERT INTO meeting_tasks (
+  id,
+  meeting_id,
+  project_id,
+  task_id,
+  source_type,
+  source_id,
+  idempotency_key,
+  created_by,
+  created_at
+)
+SELECT
+  gen_random_uuid(),
+  item.meeting_id,
+  item.project_id,
+  item.task_id,
+  'action_item',
+  item.id::text,
+  'action-item:' || item.id::text,
+  COALESCE(item.converted_by, item.owner_actor_id),
+  COALESCE(item.converted_at, item.updated_at)
+FROM meeting_action_items AS item
+WHERE item.task_id IS NOT NULL
+ON CONFLICT DO NOTHING;
+
+CREATE OR REPLACE FUNCTION pluginmax_seed_meeting_message_deliveries()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  INSERT INTO meeting_message_deliveries (
+    id,
+    meeting_id,
+    message_id,
+    recipient_principal_id,
+    status,
+    attempts,
+    idempotency_key,
+    last_error,
+    delivered_at,
+    read_at,
+    created_at,
+    updated_at
+  )
+  SELECT
+    gen_random_uuid(),
+    NEW.meeting_id,
+    NEW.id,
+    recipients.principal_id,
+    'delivered',
+    1,
+    'message:' || NEW.id::text || ':recipient:' || recipients.principal_id,
+    NULL,
+    NEW.created_at,
+    NULL,
+    NEW.created_at,
+    NEW.created_at
+  FROM (
+    SELECT participant.value ->> 'id' AS principal_id
+    FROM meetings AS meeting
+    CROSS JOIN LATERAL jsonb_array_elements(meeting.participants)
+      AS participant(value)
+    WHERE meeting.id = NEW.meeting_id
+      AND participant.value ->> 'kind' = 'human'
+    UNION
+    SELECT state.facilitator_principal_id
+    FROM meeting_collaboration_states AS state
+    WHERE state.meeting_id = NEW.meeting_id
+      AND state.lifecycle_status = 'active'
+    UNION
+    SELECT delegate.representative_principal_id
+    FROM meeting_delegates AS delegate
+    WHERE delegate.meeting_id = NEW.meeting_id
+      AND delegate.status = 'active'
+      AND (delegate.expires_at IS NULL OR delegate.expires_at > NOW())
+  ) AS recipients(principal_id)
+  JOIN principals AS principal ON principal.id = recipients.principal_id
+  WHERE principal.status = 'active'
+    AND recipients.principal_id <> COALESCE(
+      NEW.sender_principal_id,
+      NEW.author_id
+    )
+  ON CONFLICT (message_id, recipient_principal_id) DO NOTHING;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_messages_seed_deliveries
+  ON meeting_messages;
+CREATE TRIGGER meeting_messages_seed_deliveries
+AFTER INSERT ON meeting_messages
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_seed_meeting_message_deliveries();
+`;

@@ -43,7 +43,7 @@ integration("meeting AI participation", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 30,
+      expectedMigrationVersion: 31,
     });
     app = built.app;
     await app.ready();

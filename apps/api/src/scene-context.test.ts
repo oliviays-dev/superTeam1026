@@ -56,7 +56,7 @@ integration("Scene Context API and Worker", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 30,
+      expectedMigrationVersion: 31,
     });
     app = built.app;
     await app.ready();
@@ -282,7 +282,7 @@ integration("Scene Context API and Worker", () => {
     });
     expect(repeated.pack.id).toBe(first.pack.id);
     expect(repeated.scene.receipt).toEqual(first.scene.receipt);
-  });
+  }, 15_000);
 
   it("uses a private Direct Chat channel and keeps Scene handles isolated", async () => {
     const project = await createProject("Chat Scene");

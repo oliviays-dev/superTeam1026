@@ -407,6 +407,24 @@ export class MeetingDecisionsRepository {
          WHERE meeting_id = $1 AND id = $2`,
         [input.meetingId, input.actionItemId, taskId, input.actorId],
       );
+      await client.query(
+        `INSERT INTO meeting_tasks (
+           id, meeting_id, project_id, task_id, source_type, source_id,
+           idempotency_key, created_by, created_at
+         ) VALUES (
+           $1, $2, $3, $4, 'action_item', $5, $6, $7, NOW()
+         )
+         ON CONFLICT (meeting_id, idempotency_key) DO NOTHING`,
+        [
+          randomUUID(),
+          input.meetingId,
+          input.projectId,
+          taskId,
+          input.actionItemId,
+          `action-item:${input.actionItemId}`,
+          input.actorId,
+        ],
+      );
       return { taskId, reused: false };
     });
   }

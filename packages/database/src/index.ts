@@ -50,6 +50,7 @@ export {
   type MeetingAiRunContext,
   type MeetingAiTurnRecord,
 } from "./meeting-ai-repository.js";
+export { MeetingCollaborationRepository } from "./meeting-collaboration-repository.js";
 export {
   DirectChatPreconditionError,
   DirectChatRepository,

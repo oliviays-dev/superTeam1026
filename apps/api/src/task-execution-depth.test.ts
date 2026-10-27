@@ -55,7 +55,7 @@ integration("Batch 17A task execution depth", () => {
       fileStoreRoot,
       logger: { level: "error" },
       localActorId: "local-admin",
-      expectedMigrationVersion: 30,
+      expectedMigrationVersion: 31,
     });
     app = built.app;
     await app.ready();

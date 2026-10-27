@@ -60,6 +60,7 @@ export const sceneSourceRefTypeSchema = z.enum([
   "meeting",
   "meeting-message",
   "minutes-version",
+  "meeting-private-briefing",
   "direct-chat",
   "direct-chat-message",
   "memory",

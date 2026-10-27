@@ -447,12 +447,18 @@ export class MeetingAiRepository {
       const meeting = await client.query<{
         status: "open" | "closed";
         project_status: "active" | "archived";
+        lifecycle_status: "active" | "archived";
       }>(
-        `SELECT meeting.status, project.status AS project_status
+        `SELECT
+           meeting.status,
+           project.status AS project_status,
+           state.lifecycle_status
          FROM meetings AS meeting
          JOIN projects AS project ON project.id = meeting.project_id
+         JOIN meeting_collaboration_states AS state
+           ON state.meeting_id = meeting.id
          WHERE meeting.id = $1 AND meeting.project_id = $2
-         FOR SHARE OF meeting, project`,
+         FOR SHARE OF meeting, project, state`,
         [input.meetingId, input.projectId],
       );
       const meetingRow = meeting.rows[0];
@@ -466,6 +472,12 @@ export class MeetingAiRepository {
         throw new MeetingAiPreconditionError(
           "meeting_closed",
           "A closed meeting cannot trigger AI participation",
+        );
+      }
+      if (meetingRow.lifecycle_status !== "active") {
+        throw new MeetingAiPreconditionError(
+          "meeting_archived",
+          "An archived meeting cannot trigger AI participation",
         );
       }
       if (meetingRow.project_status !== "active") {
@@ -1017,6 +1029,7 @@ export class MeetingAiRepository {
           meeting_agenda: string;
           meeting_status: "open" | "closed";
           project_status: "active" | "archived";
+          lifecycle_status: "active" | "archived";
           policy_status: MeetingAiPolicyStatus;
           policy_triggers: MeetingAiTriggerKind[];
           run_budget_ms: number;
@@ -1032,6 +1045,7 @@ export class MeetingAiRepository {
            meeting.agenda AS meeting_agenda,
            meeting.status AS meeting_status,
            project.status AS project_status,
+           state.lifecycle_status AS lifecycle_status,
            policy.status AS policy_status,
            policy.trigger_kinds AS policy_triggers,
           policy.run_budget_ms AS run_budget_ms,
@@ -1040,6 +1054,8 @@ export class MeetingAiRepository {
          ${TURN_FROM}
          JOIN meetings AS meeting ON meeting.id = turn.meeting_id
          JOIN projects AS project ON project.id = turn.project_id
+         JOIN meeting_collaboration_states AS state
+           ON state.meeting_id = meeting.id
          JOIN meeting_ai_policies AS policy ON policy.id = turn.policy_id
          LEFT JOIN project_members AS member
            ON member.project_id = turn.project_id
@@ -1084,6 +1100,12 @@ export class MeetingAiRepository {
         throw new MeetingAiPreconditionError(
           "project_archived",
           "An archived project cannot continue AI participation",
+        );
+      }
+      if (row.lifecycle_status !== "active") {
+        throw new MeetingAiPreconditionError(
+          "meeting_archived",
+          "An archived meeting cannot continue AI participation",
         );
       }
       if (row.policy_status !== "active") {

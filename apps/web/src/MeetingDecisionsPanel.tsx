@@ -19,6 +19,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Send,
+  UsersRound,
   X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -32,8 +33,9 @@ import {
   saveMeetingMinutesDraft,
   updateMeetingActionItem,
 } from "./api.js";
+import { MeetingCollaborationPanel } from "./MeetingCollaborationPanel.js";
 
-type MeetingDecisionTab = "minutes" | "actions" | "trace";
+type MeetingDecisionTab = "minutes" | "actions" | "trace" | "collaboration";
 
 const priorityLabel: Record<MeetingActionItem["priority"], string> = {
   low: "低",
@@ -229,6 +231,16 @@ export function MeetingDecisionsPanel({
         >
           <Link2 size={13} />
           闭环
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === "collaboration"}
+          className={tab === "collaboration" ? "active" : undefined}
+          onClick={() => setTab("collaboration")}
+        >
+          <UsersRound size={13} />
+          协作
         </button>
       </div>
 
@@ -591,6 +603,16 @@ export function MeetingDecisionsPanel({
             </div>
           )}
         </div>
+      )}
+
+      {tab === "collaboration" && (
+        <MeetingCollaborationPanel
+          meeting={meeting}
+          members={members}
+          agents={agents}
+          canWrite={canWrite}
+          canApprove={canApprove}
+        />
       )}
     </section>
   );

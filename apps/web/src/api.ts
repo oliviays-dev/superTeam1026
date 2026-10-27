@@ -59,11 +59,20 @@ import type {
   MeetingActionItemConversion,
   MeetingAiPolicy,
   MeetingAiPolicyLifecycleInput,
+  MeetingCollaborationOverview,
+  MeetingDelegate,
   MeetingDetail,
+  MeetingFacilitatorHandoff,
+  MeetingFile,
   MeetingMessage,
+  MeetingMessageDelivery,
   MeetingMinutes,
+  MeetingMinutesConfirmation,
   MeetingMinutesDraft,
   MeetingMinutesVersion,
+  MeetingPrivateBriefing,
+  MeetingReadPosition,
+  MeetingTask,
   MeetingTraceability,
   MemoryClaim,
   MemoryClaimTrace,
@@ -1723,10 +1732,13 @@ export function cancelDirectChatTurn(
   });
 }
 
-export async function listMeetings(projectId: string): Promise<Meeting[]> {
+export async function listMeetings(
+  projectId: string,
+  includeArchived = false,
+): Promise<Meeting[]> {
   return (
     await request<ListResponse<Meeting>>(
-      `/meetings?projectId=${encodeURIComponent(projectId)}`,
+      `/meetings?projectId=${encodeURIComponent(projectId)}&includeArchived=${includeArchived ? "1" : "0"}`,
     )
   ).items;
 }
@@ -1890,6 +1902,308 @@ export function getMeetingTraceability(
   meetingId: string,
 ): Promise<MeetingTraceability> {
   return request(`/meetings/${meetingId}/traceability`);
+}
+
+export function getMeetingCollaboration(
+  meetingId: string,
+): Promise<MeetingCollaborationOverview> {
+  return request(`/meetings/${meetingId}/collaboration`);
+}
+
+export function handoffMeetingFacilitator(
+  meetingId: string,
+  input: {
+    expectedRevision: number;
+    facilitatorPrincipalId: string;
+    reason: string;
+  },
+): Promise<MeetingCollaborationOverview> {
+  return request(`/meetings/${meetingId}/facilitator/handoff`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listMeetingFacilitatorHandoffs(
+  meetingId: string,
+): Promise<MeetingFacilitatorHandoff[]> {
+  return (
+    await request<{ items: MeetingFacilitatorHandoff[] }>(
+      `/meetings/${meetingId}/facilitator/history`,
+    )
+  ).items;
+}
+
+export async function listMeetingDelegates(
+  meetingId: string,
+): Promise<MeetingDelegate[]> {
+  return (
+    await request<{ items: MeetingDelegate[] }>(
+      `/meetings/${meetingId}/delegates`,
+    )
+  ).items;
+}
+
+export function createMeetingDelegate(
+  meetingId: string,
+  input: {
+    delegatorPrincipalId?: string;
+    representativeKind: "human" | "agent";
+    representativePrincipalId?: string;
+    agentId?: string;
+    allowedActions: MeetingDelegate["allowedActions"];
+    expiresAt?: string;
+    reason: string;
+  },
+): Promise<MeetingDelegate> {
+  return request(`/meetings/${meetingId}/delegates`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function revokeMeetingDelegate(
+  meetingId: string,
+  delegateId: string,
+  reason: string,
+): Promise<MeetingDelegate> {
+  return request(`/meetings/${meetingId}/delegates/${delegateId}/revoke`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export function postDelegateMeetingMessage(
+  meetingId: string,
+  delegateId: string,
+  content: string,
+  clientMessageId: string,
+): Promise<MeetingMessage> {
+  return request(`/meetings/${meetingId}/delegates/${delegateId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ content, clientMessageId }),
+  });
+}
+
+export async function listMeetingPrivateBriefings(
+  meetingId: string,
+  includeArchived = false,
+): Promise<MeetingPrivateBriefing[]> {
+  return (
+    await request<{ items: MeetingPrivateBriefing[] }>(
+      `/meetings/${meetingId}/private-briefings?includeArchived=${includeArchived ? "1" : "0"}`,
+    )
+  ).items;
+}
+
+export function createMeetingPrivateBriefing(
+  meetingId: string,
+  input: { audiencePrincipalId?: string; content: string },
+): Promise<MeetingPrivateBriefing> {
+  return request(`/meetings/${meetingId}/private-briefings`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateMeetingPrivateBriefing(
+  meetingId: string,
+  briefingId: string,
+  input: { expectedRevision: number; content: string },
+): Promise<MeetingPrivateBriefing> {
+  return request(
+    `/meetings/${meetingId}/private-briefings/${briefingId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function archiveMeetingPrivateBriefing(
+  meetingId: string,
+  briefingId: string,
+  expectedRevision: number,
+): Promise<MeetingPrivateBriefing> {
+  return request(
+    `/meetings/${meetingId}/private-briefings/${briefingId}/archive`,
+    {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision }),
+    },
+  );
+}
+
+export function getMeetingReadPosition(
+  meetingId: string,
+): Promise<MeetingReadPosition | null> {
+  return request(`/meetings/${meetingId}/read-position`);
+}
+
+export function setMeetingReadPosition(
+  meetingId: string,
+  messageId: string,
+): Promise<MeetingReadPosition> {
+  return request(`/meetings/${meetingId}/read-position`, {
+    method: "PUT",
+    body: JSON.stringify({ messageId }),
+  });
+}
+
+export async function listMeetingMessageDeliveries(
+  meetingId: string,
+  messageId: string,
+): Promise<MeetingMessageDelivery[]> {
+  return (
+    await request<{ items: MeetingMessageDelivery[] }>(
+      `/meetings/${meetingId}/messages/${messageId}/deliveries`,
+    )
+  ).items;
+}
+
+export function retryMeetingMessageDelivery(
+  meetingId: string,
+  messageId: string,
+  deliveryId: string,
+): Promise<MeetingMessageDelivery> {
+  return request(
+    `/meetings/${meetingId}/messages/${messageId}/deliveries/${deliveryId}/retry`,
+    { method: "POST" },
+  );
+}
+
+export function markMeetingMessageDeliveryRead(
+  meetingId: string,
+  messageId: string,
+  deliveryId: string,
+): Promise<MeetingMessageDelivery> {
+  return request(
+    `/meetings/${meetingId}/messages/${messageId}/deliveries/${deliveryId}/read`,
+    { method: "POST" },
+  );
+}
+
+export async function listMeetingFiles(
+  meetingId: string,
+  includeArchived = false,
+): Promise<MeetingFile[]> {
+  return (
+    await request<{ items: MeetingFile[] }>(
+      `/meetings/${meetingId}/files?includeArchived=${includeArchived ? "1" : "0"}`,
+    )
+  ).items;
+}
+
+export function uploadMeetingFile(
+  meetingId: string,
+  input: { name: string; mimeType: string; contentBase64: string },
+): Promise<MeetingFile> {
+  return request(`/meetings/${meetingId}/files`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function downloadMeetingFile(
+  meetingId: string,
+  fileId: string,
+): Promise<Blob> {
+  return requestBlob(`/meetings/${meetingId}/files/${fileId}/download`);
+}
+
+export function archiveMeetingFile(
+  meetingId: string,
+  fileId: string,
+  archived: boolean,
+): Promise<MeetingFile> {
+  return request(`/meetings/${meetingId}/files/${fileId}/archive`, {
+    method: "POST",
+    body: JSON.stringify({ archived }),
+  });
+}
+
+export function generateMeetingMinutes(
+  meetingId: string,
+  expectedRevision: number,
+): Promise<MeetingMinutesDraft> {
+  return request(`/meetings/${meetingId}/minutes/generate`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+export function confirmMeetingMinutes(
+  meetingId: string,
+  input: { expectedRevision: number; note: string },
+): Promise<{
+  minutes: MeetingMinutes;
+  version: MeetingMinutesVersion;
+  confirmation: MeetingMinutesConfirmation;
+}> {
+  return request(`/meetings/${meetingId}/minutes/confirm`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function listMeetingMinutesConfirmations(
+  meetingId: string,
+): Promise<MeetingMinutesConfirmation[]> {
+  return (
+    await request<{ items: MeetingMinutesConfirmation[] }>(
+      `/meetings/${meetingId}/minutes/confirmations`,
+    )
+  ).items;
+}
+
+export async function listMeetingTasks(
+  meetingId: string,
+): Promise<MeetingTask[]> {
+  return (
+    await request<{ items: MeetingTask[] }>(
+      `/meetings/${meetingId}/tasks`,
+    )
+  ).items;
+}
+
+export function createMeetingTask(
+  meetingId: string,
+  input: {
+    title: string;
+    description: string;
+    assigneeAgentId: string;
+    priority: Task["priority"];
+    sourceType: MeetingTask["sourceType"];
+    sourceId?: string;
+    sourceMessageIds: string[];
+    idempotencyKey: string;
+    dispatch: boolean;
+  },
+): Promise<MeetingTask> {
+  return request(`/meetings/${meetingId}/tasks`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function archiveMeeting(
+  meetingId: string,
+  input: { expectedRevision: number; reason: string },
+): Promise<MeetingCollaborationOverview> {
+  return request(`/meetings/${meetingId}/archive`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function restoreMeeting(
+  meetingId: string,
+  expectedRevision: number,
+): Promise<MeetingCollaborationOverview> {
+  return request(`/meetings/${meetingId}/restore`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision }),
+  });
 }
 
 async function requestBlob(path: string): Promise<Blob> {
