@@ -315,6 +315,11 @@ exit non-zero: failed
 signal/abort: cancelled
 ```
 
+`provider = workbuddy` 只提供来源标签，仍使用同一个 `PlainTextAdapter`。平台不自动
+追加 WorkBuddy/CodeBuddy 参数，不解析 `stream-json`，也不读取 Provider Session。
+具体 CLI 协议参数由 Runtime Owner 显式登记。该收口决定见
+[v1-batch13.1a-runtime-compatibility.md](./v1-batch13.1a-runtime-compatibility.md)。
+
 plain-text 默认：
 
 - `planVisibility = opaque`

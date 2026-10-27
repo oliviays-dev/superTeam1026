@@ -135,6 +135,16 @@ async function runCodex() {
 }
 
 async function runPlain() {
+  if (scenario === "argv-and-stdin") {
+    const prompt = await readPrompt();
+    process.stdout.write(
+      JSON.stringify({
+        args: args.slice(2),
+        prompt,
+      }),
+    );
+    return;
+  }
   if (scenario === "stdin-base64") {
     const chunks = [];
     for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));

@@ -4,7 +4,9 @@
 > 包括 `/api/collab/agent/...`、插件 KV Runtime 和旧 AgentRun 链路。它不能作为
 > Pluginmax Platform V1 已接入外部 Runtime 的证据。V1 的重新适配设计见
 > `docs/v1-external-agent-runtime-technical-design.md` 和
-> `docs/v1-batch13-external-agent-runtime-integration.md`。
+> `docs/v1-batch13-external-agent-runtime-integration.md`。V1 WorkBuddy 兼容结论
+> 见 `docs/v1-batch13.1a-runtime-compatibility.md`：只使用通用 `plain-text`，
+> 不实现专用 stream-json、Provider Session 或工具流解析。
 
 ## 1. 目标
 

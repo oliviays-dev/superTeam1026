@@ -39,11 +39,11 @@ DSH_HOME="$PWD/.tmp/external-agent-home" node vendor/deepseek-harness/apps/cli/l
 
 ### 1.4 真实 WorkBuddy 接入准备
 
-本节只测真实 WorkBuddy，不使用 `docs/fixtures/external-agent/` 下的任何文件，也不使用 shell 脚本伪装 WorkBuddy。当前平台通过第一版 `plain-text` 外部运行时承接 WorkBuddy，契约如下：
+本节只测真实 WorkBuddy，不使用 `docs/fixtures/external-agent/` 下的任何文件，也不使用 shell 脚本伪装 WorkBuddy。当前平台只通过通用 `plain-text` 外部运行时承接 WorkBuddy，契约如下：
 
 ```text
-argv:   最后一个非选项位置参数是 UTF-8 平台 Prompt
-stdin:  平台不依赖 WorkBuddy 从 stdin 读取 Prompt
+argv:   只使用 Runtime 注册参数，平台不追加 Prompt 或协议参数
+stdin:  UTF-8 完整平台 Prompt
 stdout: UTF-8 最终结果
 stderr: 登录、网络、权限、执行诊断
 exit 0: 成功
@@ -57,7 +57,7 @@ macOS 安装包内置的 CLI 可能缺少运行入口并报 `Cannot find module 
 /Users/oliviayang/.npm-global/bin/codebuddy
 ```
 
-本地非交互执行已确认使用 `--print`，平台 Prompt 作为 CLI 的位置参数传入，最终文本写入 stdout。Prompt-only 探测和真实任务不要共用同一套回合上限；本地运行时建议如下：
+本地非交互执行已确认使用 `--print`，平台通过 stdin 传入完整 Prompt，最终文本写入 stdout。平台不会自动追加 `--print`、`--output-format` 或 `--max-turns`，因此这些参数必须在 Runtime 中显式登记。Prompt-only 探测和真实任务不要共用同一套回合上限；本地运行时建议如下：
 
 | 字段     | 值                                                                         |
 | -------- | -------------------------------------------------------------------------- |
@@ -80,13 +80,15 @@ acceptEdits
 
 Prompt-only 连通性检查可以继续用 `--max-turns 1`；需要读取上下文、写文件或调用工具的任务必须给更高的回合计数。文件写入用例使用独立测试目录，并保持 `acceptEdits` 权限范围。不要为了绕过权限提示注册 `--dangerously-skip-permissions`。
 
-启动 DSH 前，先在运行 DSH 的同一台机器和同一用户会话完成 WorkBuddy 登录，再执行：
+启动 DSH 前，先在运行 DSH 的同一台机器和同一用户会话完成 WorkBuddy 登录，再执行下面的终端连通性检查：
 
 ```bash
 <WORKBUDDY_CLI> --print --output-format text --max-turns 1 --permission-mode acceptEdits 'Reply with exactly WORKBUDDY_CONNECTIVITY_OK and no other text'
 ```
 
 输出必须恰好包含 `WORKBUDDY_CONNECTIVITY_OK`。只看退出码不够：WorkBuddy CLI 在未登录时可能输出 `Authentication required...`，但退出码可能是 0。连通性门禁必须同时校验退出码和输出；未满足时不要继续 WB-02 之后的用例。
+
+上面的终端命令使用位置参数，是 CLI 自身的诊断方式；平台派发不依赖位置参数，必须用 WB-01 单独验证 stdin 输入链路。平台不解析 `stream-json`，不读取 Provider Session，也不生成 reasoning/tool 事件。
 
 真实接入分两种模式：
 

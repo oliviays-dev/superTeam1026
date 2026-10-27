@@ -114,6 +114,38 @@ describe("PlainTextAdapter", () => {
     });
   });
 
+  it("keeps WorkBuddy on generic argv and stdin semantics", async () => {
+    const instruction = "完整 WorkBuddy Prompt\n第二行";
+    const workbuddy = new PlainTextAdapter({
+      provider: "workbuddy",
+      command: process.execPath,
+      args: [
+        fixture,
+        "plain",
+        "argv-and-stdin",
+        "--print",
+        "--output-format",
+        "text",
+      ],
+      timeoutMs: 2_000,
+      terminationGraceMs: 25,
+    });
+    const events = await collect(workbuddy, await input(instruction));
+    const completed = events.at(-1);
+    if (completed?.type !== "completed") throw new Error("missing completion");
+
+    expect(JSON.parse(completed.output)).toEqual({
+      args: ["--print", "--output-format", "text"],
+      prompt: instruction,
+    });
+    expect(completed.execution).toMatchObject({
+      provider: "workbuddy",
+      model: "unknown",
+    });
+    expect(events.some((event) => event.type === "plan")).toBe(false);
+    expect(events.some((event) => event.type === "tool.started")).toBe(false);
+  });
+
   it("keeps stderr as a bounded warning on success", async () => {
     const events = await collect(adapter("stderr"), await input("stderr"));
     expect(events.some((event) => event.type === "warning")).toBe(true);

@@ -64,6 +64,39 @@ describe("external runtime contracts", () => {
     ).toThrow(/defaultModel must belong/);
   });
 
+  it("keeps WorkBuddy on the generic plain-text contract", () => {
+    const parsed = createExternalRuntimeInputSchema.parse({
+      ...validRuntime,
+      provider: "workbuddy",
+      protocol: "plain-text",
+      command: "codebuddy",
+      customArgs: ["--print", "--output-format", "text", "--max-turns", "8"],
+      supportedModels: [],
+      defaultModel: null,
+      contextWindowTokens: null,
+      supportedTools: ["read_file"],
+      networkMode: "unknown",
+      sandboxMode: "workspace-write",
+    });
+    expect(parsed.provider).toBe("workbuddy");
+    expect(parsed.protocol).toBe("plain-text");
+
+    const capability = adapterCapabilityProfile(parsed.protocol);
+    expect(capability.structuredPlan).toBe("unsupported");
+    expect(capability.structuredToolEvents).toBe("unsupported");
+    expect(capability.structuredSubagent).toBe("unsupported");
+    expect(capability.sessionResume).toBe("unknown");
+
+    expect(() =>
+      createExternalRuntimeInputSchema.parse({
+        ...validRuntime,
+        provider: "workbuddy",
+        protocol: "codex-jsonl",
+        command: "codebuddy",
+      }),
+    ).toThrow(/this provider requires plain-text/);
+  });
+
   it("merges adapter, declaration, and probe capability sources", () => {
     const adapter = adapterCapabilityProfile("codex-jsonl");
     const declared = declaredCapabilityProfile(

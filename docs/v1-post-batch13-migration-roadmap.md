@@ -1,6 +1,6 @@
 # Pluginmax Platform V1：Batch 13 后续迁移路线图
 
-> 状态：Batch 14A-16 已完成；下一正式批次为 Batch 17A
+> 状态：Batch 13.1A、14A-16 已完成；下一正式批次为 Batch 17A
 >
 > Batch 15B 基线（15A HEAD）：`7a2643ec78ceca768ec25893e353f77c62aa1ed0`
 >
@@ -39,6 +39,8 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
 - Batch 16 已完成 Task、Workflow Node、Meeting、Direct Chat 的统一 Scene
   Session Binding、Contribution、Chat Channel、增量 Cursor、确定性 Receipt
   和重放；Migration 27 已落地。
+- Batch 13.1A 已冻结 Runtime 兼容契约：WorkBuddy 只使用通用 `plain-text`，
+  Prompt 走 stdin，不实现专用 stream-json、Provider Session 或工具流解析。
 
 ### 2.2 主要缺口
 
@@ -73,8 +75,6 @@ Batch 13 已通过发布门禁，当前没有已知 P0/P1 缺陷。详细证据�
 ```text
 Batch 13：External Runtime 发布门禁
   |
-  +-> 13.1A：Runtime 兼容承诺收口
-  |
   v
 Batch 14A：身份清点与 Principal 映射
   |
@@ -96,7 +96,13 @@ Batch 15B：Action Ticket + Execution Gate
   v
 Batch 16：Scene Context / Session Binding
   |
+  v
+Batch 13.1A：Runtime 兼容承诺收口
+  |
   +----> Batch 17A：Task Execution Depth
+  |          |
+  |          v
+  |       Batch 13.1B：Runtime 经济与可见性
   |          |
   |          v
   |       Batch 17B：AI Teammate
@@ -120,17 +126,17 @@ Binding 完成。
 
 | 批次 | 优先级 | 依赖 | 核心范围 | 退出条件 |
 | --- | --- | --- | --- | --- |
-| 13.1A Runtime 兼容收口 | P1 | Batch 13 | WorkBuddy 参数/流解析决策；文档承诺纠偏 | 要么等价实现并回归，要么明确非目标并删除误导承诺 |
-| 13.1B Runtime 经济与可见性 | P2 | 14C、15A | Workspace Runtime 可见范围、Token/耗时统计 | 权限可见性、Token 对账和 Run 遥测测试通过 |
-| 14A Principal 清点与模型 | P0 | 13.1A、Batch 13 | Human/AI Principal、Account、Alias、Grant 映射 | 旧数据来源和映射报告完整，模型/Migration 评审通过 |
+| 13.1A Runtime 兼容收口 | P1 | Batch 13 | WorkBuddy 通用 plain-text 决策；文档承诺纠偏 | 已完成：契约、回归和文档一致 |
+| 13.1B Runtime 经济与可见性 | P2 | 14C、15A、17A | Workspace Runtime 可见范围、Token/耗时统计 | 权限可见性、Token 对账和 Run 遥测测试通过 |
+| 14A Principal 清点与模型 | P0 | Batch 13 | Human/AI Principal、Account、Alias、Grant 映射 | 旧数据来源和映射报告完整，模型/Migration 评审通过 |
 | 14B 认证与登录 Session | P0 | 14A | Bearer Session、登录、改密、启停、Credential | 无认证拒绝，账号状态与 Principal 状态同步 |
 | 14C RBAC 消费与审计 | P0 | 14B | Platform/Workspace/Project Grant、项目角色授权 | 越权写入拒绝，Grant 撤销立即生效，审计可追溯 |
 | 14D RBAC 读授权闭环 | P0 | 14C | Project Capability；项目、Task、Run、Workflow、Meeting、Memory、Report、Handoff、Attachment、Trace、SSE 和批量的读隔离 | 非成员/跨项目读取拒绝，列表、搜索、Trace、事件流和文件下载无泄露 |
 | 15A Policy / Envelope | P0 | 14D | 版本化 TaskExecutionPolicy、Preflight、快照 | 四类执行入口共用策略，策略不能扩权 |
 | 15B Ticket / Gate | P0 | 15A | Action Ticket、阻塞 Gate、决策和恢复 | 无 Ticket 或 Gate 不放行，重试无重复副作用 |
 | 16 Scene Context | P1 | 14C、15B | Scene Session、Contribution、Receipt、Channel | 场景隔离、确定性重放、来源可追溯 |
-| 17A Task Execution Depth | P1 | 15B、16 | 队列、暂停、Claim、needsInput、文档、自动验收 | 队列、依赖、恢复、Review 和文档权限通过 |
-| 17B AI Teammate | P1 | 14C、16、17A | 模板、生命周期、工作计划、周报、统计 | 模板/实例可追溯，受限任务、转派和统计对账通过 |
+| 17A Task Execution Depth | P1 | 13.1A、15B、16 | 队列、暂停、Claim、needsInput、文档、自动验收 | 队列、依赖、恢复、Review 和文档权限通过 |
+| 17B AI Teammate | P1 | 14C、16、17A、13.1B | 模板、生命周期、工作计划、周报、统计 | 模板/实例可追溯、受限任务、转派和统计对账通过 |
 | 18 Meeting Collaboration | P1 | 14C、16 | Facilitator、Delegate、私密嘱咐、文件、归档 | 委托、投递、纪要、归档和敏感信息边界通过 |
 | 19 Shared Space | P1 | 14C、15B、16 | 路径权限、Global Write、Locks、文件审计 | 路径穿越、越权写、锁竞争和写审批通过 |
 | 20 Governance + Workbench | P2 | 14C、17B | 项目健康度、角色确认、审计、SSE、可配置布局 | 并发保护、只追加审计、三视口无溢出 |
@@ -140,23 +146,25 @@ Binding 完成。
 
 ### Batch 13.1A：Runtime 兼容承诺收口
 
-目标：
+状态：已完成。决策记录见
+[v1-batch13.1a-runtime-compatibility.md](./v1-batch13.1a-runtime-compatibility.md)。
 
-- 明确 WorkBuddy 是否只使用通用 `plain-text`，还是需要专用参数、JSONL 或会话解析。
-- 明确输出 Token、成本统计是否属于本轮兼容目标。
-- 明确 Workspace 级 Runtime 可见范围的产品语义。
+结论：
 
-实施规则：
+- WorkBuddy 只使用通用 `plain-text`；
+- Prompt 走 stdin，stdout 是最终结果；
+- 平台不自动追加协议参数，也不解析 `stream-json`；
+- 不实现 WorkBuddy/CodeBuddy 专用 Parser、Provider Session 或工具流；
+- Token、成本和 Workspace Runtime 可见性延后到 13.1B。
 
-- 有真实兼容承诺时，实现专用 Parser/Adapter、夹具和回归。
-- 无明确需求时，写入非目标矩阵并同步修正文档，不保留“支持但未实现”的模糊状态。
-- Token 统计和 Workspace 可见范围分别延后到 17B 与 14C/15A，不混入 Batch 13 收口。
+### Batch 13.1B：Runtime 经济与可见性
 
-退出条件：
+依赖：Batch 14C、15A、17A。
 
-- WorkBuddy 兼容结论可验证。
-- 文档与实际 Provider/Protocol 能力一致。
-- 不依赖真实模型凭证。
+- 收口 Workspace 级 Runtime 可见范围。
+- 建立 Token、时长和成本遥测口径，并覆盖队列、Claim、等待与恢复。
+- 与 17A 的 Task Event / Run 时间线对账。
+- 必须早于 17B，避免 Teammate 统计和 Workspace 归属返工。
 
 ### Batch 14A：身份、Principal 与迁移清点
 
@@ -532,7 +540,7 @@ HTTP Request
 ## 10. 进度跟踪
 
 - [x] Batch 13 Phase 6 发布门禁
-- [ ] Batch 13.1A Runtime 兼容承诺收口
+- [x] Batch 13.1A Runtime 兼容承诺收口
 - [ ] Batch 13.1B Runtime 经济与可见性
 - [x] Batch 14A Principal 清点与模型
 - [x] Batch 14B 认证与登录 Session
@@ -555,7 +563,8 @@ HTTP Request
 1. 首个 V1 登录协议是否采用账号密码 + Bearer Session，SSO 是否后置。
 2. V1 的首个工作区模型是否支持多 Workspace，还是先单 Workspace + 多 Project。
 3. 旧账号、Employee、Teammate 的迁移来源和 alias 优先级。
-4. WorkBuddy 是否仍有必须实现的专用兼容承诺。
+4. ~~WorkBuddy 是否仍有必须实现的专用兼容承诺。~~ 已解决：V1 只使用通用
+   `plain-text`，专用 stream-json、Session resume 和工具流解析为非目标。
 5. Shared Space 写能力的首发范围和审批责任人。
 6. Legacy import 的数据导出方式、保留窗口和敏感字段处理。
 7. AI Teammate 模板的产品归属和平台/个人可编辑边界。
@@ -563,7 +572,8 @@ HTTP Request
 ## 12. 下一步
 
 下一执行批次为 **Batch 17A：Task Execution Depth**。
-Batch 16 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context 绕过。
+Batch 13.1A 与 Batch 16 已完成；15B 的 Ticket/Gate 语义仍不能由 Scene Context
+绕过。17A 完成后先执行 13.1B，再进入 17B。
 Shared Space、sandbox 扩展和 Batch 17 均未实现。
 
 建议在独立 worktree 执行：
@@ -571,7 +581,7 @@ Shared Space、sandbox 扩展和 Batch 17 均未实现。
 ```text
 worktree: 独立 `.tmp/pluginmax-platform-batch17a-*`
 branch:   `feat/v1-batch17a-*`
-base:     Batch 16 local commit
+base:     Batch 13.1A local commit（其基线为 Batch 16）
 ```
 
 ## 13. 参考文档
@@ -581,6 +591,7 @@ base:     Batch 16 local commit
 - [v1-batch14c-rbac-authorization.md](./v1-batch14c-rbac-authorization.md)
 - [v1-batch14d-read-authorization.md](./v1-batch14d-read-authorization.md)
 - [v1-batch13-release-gate.md](./v1-batch13-release-gate.md)
+- [v1-batch13.1a-runtime-compatibility.md](./v1-batch13.1a-runtime-compatibility.md)
 - [v1-batch15a-task-execution-policy.md](./v1-batch15a-task-execution-policy.md)
 - [v1-batch15b-action-ticket-gate.md](./v1-batch15b-action-ticket-gate.md)
 - [v1-batch16-scene-context.md](./v1-batch16-scene-context.md)

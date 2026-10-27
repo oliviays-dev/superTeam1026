@@ -1,5 +1,11 @@
 # 阶段一测试资料
 
+> **历史范围说明**：本目录只保留旧插件阶段一的测试夹具。`WorkBuddy
+> stream-json` 夹具不代表 Platform V1 现行协议，也不要注册为 V1
+> `plain-text` Runtime 的推荐样例。V1 的通用外部 Agent 夹具位于
+> `docs/fixtures/external-agent/`，契约见
+> [v1-batch13.1a-runtime-compatibility.md](../../v1-batch13.1a-runtime-compatibility.md)。
+
 本目录服务于 [阶段一 Runtime Agent Execution Plan 测试设计](../../phase1-agent-execution-plan-test-design.md)。
 
 ## 文件清单
@@ -16,7 +22,7 @@
 | `browser-evidence-snippet.js`         | 从浏览器 Console 读取 Task Execution Projection               | 替换 `<TASK_ID>` 后在页面 Console 执行     |
 | `research-execution-policy.json`      | 公开来源研究策略的完整契约样本                                | API 集成或排障；GUI 按字段勾选             |
 | `tool-approval-execution-policy.json` | 写文件审批策略的完整契约样本                                  | API 集成或排障；GUI 按字段勾选             |
-| `workbuddy-stream-fake.mjs`           | 稳定输出 WorkBuddy stream-json、搜索/写入工具事件与会话元数据 | 注册为 Provider `WorkBuddy` 的外部 Runtime |
+| `workbuddy-stream-fake.mjs`           | 历史 WorkBuddy stream-json、搜索/写入工具事件与会话元数据夹具 | 仅用于复现旧插件阶段一，不代表 V1 协议 |
 | `codex-trace-fake.mjs`                | 稳定输出 Codex JSONL 工具事件和最终消息                       | 注册为 Provider `Codex` 的外部 Runtime     |
 
 ## Fake Runtime 预检
@@ -106,6 +112,9 @@ Codex 轨迹运行时：
 /Users/oliviayang/Codex/一切皆插件/dsh-pluginmax
 ```
 
-高级参数默认折叠。需要时把额外 argv 粘贴为一段带引号的文本，平台会实时解析成 token；`--print`、`--output-format stream-json` 等协议参数由 WorkBuddy Adapter 自动追加，不要手工填写。`--model` 和 `--effort` 也不属于这里，它们由任务执行配置决定。
+上述参数说明属于旧插件阶段一。Platform V1 不会为 WorkBuddy 自动追加
+`--print`、`--output-format` 或其他协议参数，也不解析 `stream-json`；如复用真实
+CLI，必须在 V1 Runtime 注册参数中显式填写经过验证的 `--print` 与
+`--output-format text`。
 
 `--write-report` 会让搜索场景在当前工作区生成 `phase1-market-research-report.md`；带 `PHASE1_FEEDBACK_*` 的第二轮生成 `phase1-market-research-report-feedback.md`。`--write-file` 会让写入观察场景生成 `phase1-external-write.txt`。

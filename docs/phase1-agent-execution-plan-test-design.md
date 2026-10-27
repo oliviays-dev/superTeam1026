@@ -1,5 +1,11 @@
 # 测试设计：阶段一 Runtime Agent Execution Plan 闭环
 
+> **历史范围说明**：本文与 `docs/fixtures/phase1/` 记录旧插件阶段一的测试方案。
+> 其中 WorkBuddy/CodeBuddy `stream-json`、thinking/tool 事件和位置参数描述不是
+> Platform V1 现行契约。V1 只使用通用 `plain-text`：stdin Prompt、stdout 最终
+> 文本、无专用流解析。现行决策见
+> [v1-batch13.1a-runtime-compatibility.md](./v1-batch13.1a-runtime-compatibility.md)。
+>
 > 版本：v1.0  
 > 日期：2026-10-25  
 > 测试对象：`dsh-collab-task`、`dsh-collab-agent`、`dsh-collab-context`、`dsh-collab-teammate` 的阶段一组合能力  

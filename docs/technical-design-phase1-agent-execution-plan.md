@@ -1,5 +1,12 @@
 # 技术设计：阶段一 Runtime Agent Execution Plan 闭环
 
+> **历史范围说明**：本文是阶段一旧插件的设计快照。文中 CodeBuddy
+> thinking/tool trace、stream-json 和旧 AgentRun 链路不代表 Pluginmax Platform
+> V1 现行 Runtime 契约。V1 已由 Batch 13.1A 冻结为：WorkBuddy 使用通用
+> `plain-text`、stdin Prompt、stdout 最终文本，不实现专用 stream-json 或
+> Provider Session 解析。现行决策见
+> [v1-batch13.1a-runtime-compatibility.md](./v1-batch13.1a-runtime-compatibility.md)。
+>
 > 版本：v1.0  
 > 日期：2026-10-25  
 > 实现状态：核心链路已落地（Execution Domain、Plan/Event/Gate/Snapshot、Task Policy、Context Policy、Task 详情 UI）  
