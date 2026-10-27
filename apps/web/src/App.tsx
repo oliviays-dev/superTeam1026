@@ -11,6 +11,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  ShieldCheck,
   SquareTerminal,
   Sun,
   UsersRound,
@@ -38,6 +39,7 @@ import {
 } from "./api.js";
 import type { WorkbenchSourceRef } from "@pluginmax/contracts";
 import { LoginView } from "./LoginView.js";
+import { IdentityAdministrationView } from "./IdentityAdministrationView.js";
 
 type AppView =
   | "workbench"
@@ -49,6 +51,7 @@ type AppView =
   | "teammates"
   | "runtimes"
   | "operations"
+  | "identity"
   | "project-templates";
 
 type Theme = "dark" | "light";
@@ -63,6 +66,7 @@ const navItems = [
   { key: "teammates", label: "AI Teammate", icon: UsersRound },
   { key: "runtimes", label: "运行时", icon: SquareTerminal },
   { key: "operations", label: "运维", icon: Activity },
+  { key: "identity", label: "账号与权限", icon: ShieldCheck },
 ] as const satisfies ReadonlyArray<{
   key: AppView;
   label: string;
@@ -505,6 +509,16 @@ export function App() {
           <RuntimesView workspaceId={selectedProjectId} />
         )}
         {view === "operations" && <OperationsDashboardView />}
+        {view === "identity" && (
+          <IdentityAdministrationView
+            platformAdministrator={
+              viewerQuery.data.platformAdministrator ?? false
+            }
+            viewerPrincipalId={
+              viewerQuery.data.principalId ?? viewerQuery.data.actorId
+            }
+          />
+        )}
       </div>
     </div>
   );

@@ -588,6 +588,7 @@ HTTP Request
 - [x] Batch 17A Task Execution Depth
 - [x] Batch 17B AI Teammate
 - [x] Batch 18 Meeting Collaboration
+- [x] Batch 20A Identity Administration（独立身份运营批次，不包含 Batch 19/20）
 - [ ] Batch 19 Shared Space
 - [ ] Batch 20 Project Governance 与 Workbench
 - [ ] Batch 21 Legacy Compatibility Closeout

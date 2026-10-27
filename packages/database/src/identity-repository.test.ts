@@ -104,6 +104,13 @@ integration("identity repository authentication", () => {
       }),
     ).resolves.toMatchObject({ principalId });
 
+    await identity.bootstrapAdministrator({
+      principalId: `principal-human-auth-backup-${suffix}`,
+      accountId: `account-auth-backup-${suffix}`,
+      loginId: `auth-backup-${suffix}`,
+      displayName: "Backup Admin",
+      password: "backup-password",
+    });
     const disabled = await identity.setAccountStatus(principalId, accountId, {
       status: "disabled",
     });

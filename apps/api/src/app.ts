@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ApiError,
+  acceptCredentialActivationInputSchema,
   agentRuntimePreflightInputSchema,
   agentStatusInputSchema,
+  accountDirectoryQuerySchema,
   accountStatusInputSchema,
+  addWorkspaceMemberInputSchema,
   cancelExecutionGateInputSchema,
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
@@ -15,6 +18,7 @@ import {
   createAgentInputSchema,
   createAgentEpisodeInputSchema,
   createHandoffCardInputSchema,
+  createManagedAccountInputSchema,
   createMeetingActionItemInputSchema,
   createMemoryClaimInputSchema,
   createMemoryTopicInputSchema,
@@ -24,7 +28,10 @@ import {
   createProjectRoleInputSchema,
   createSceneContextContributionInputSchema,
   createProjectTemplateInputSchema,
+  createPlatformGrantInputSchema,
   createTemplateRoleInputSchema,
+  createWorkspaceGrantInputSchema,
+  createWorkspaceInputSchema,
   createWorkflowTemplateInputSchema,
   copyProjectTemplateInputSchema,
   archiveProjectTemplateInputSchema,
@@ -49,11 +56,14 @@ import {
   handoffMeetingFacilitatorInputSchema,
   importWorkflowMarkdownInputSchema,
   idempotencyCleanupInputSchema,
+  identityAuditQuerySchema,
+  issueCredentialActivationInputSchema,
   jobListQuerySchema,
   jobRecoveryInputSchema,
   markReportReadInputSchema,
   meetingAiPolicyLifecycleInputSchema,
   loginInputSchema,
+  platformGrantQuerySchema,
   projectReportQuerySchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
@@ -87,6 +97,7 @@ import {
   transferTeammateInputSchema,
   updateTeammateAutoExecuteInputSchema,
   retryWorkflowNodeInputSchema,
+  revokeGrantInputSchema,
   runtimeRevisionInputSchema,
   setAgentRuntimeBindingInputSchema,
   startWorkflowInputSchema,
@@ -95,6 +106,8 @@ import {
   updateAgentInputSchema,
   updateExternalRuntimeInputSchema,
   updateHandoffCardInputSchema,
+  updateGrantExpiryInputSchema,
+  updateManagedAccountInputSchema,
   updateMeetingActionItemInputSchema,
   updateMeetingAiPolicyInputSchema,
   updateMeetingMinutesDraftInputSchema,
@@ -112,6 +125,9 @@ import {
   updateTaskExecutionPolicyInputSchema,
   type TaskExecutionPolicyContextType,
   updateWorkbenchBriefSettingsInputSchema,
+  updateWorkspaceInputSchema,
+  updateWorkspaceMemberStatusInputSchema,
+  workspaceListQuerySchema,
   transferWorkflowApprovalInputSchema,
   validateWorkflowMarkdownInputSchema,
   workflowAuditQuerySchema,
@@ -131,6 +147,7 @@ import {
 } from "@pluginmax/application";
 import {
   Database,
+  IdentityAdministrationRepositoryError,
   IdentityRepository,
   IdentityRepositoryError,
   PlatformRepositories,
@@ -179,6 +196,18 @@ const teammateTemplateParamsSchema = z.object({
 });
 const workspaceParamsSchema = z.object({
   workspaceId: z.string().trim().min(1).max(180),
+});
+const accountAdministrationParamsSchema = z.object({
+  accountId: z.string().trim().min(1).max(180),
+});
+const workspaceMemberParamsSchema = workspaceParamsSchema.extend({
+  memberId: z.string().uuid(),
+});
+const workspaceGrantParamsSchema = workspaceParamsSchema.extend({
+  grantId: z.string().uuid(),
+});
+const platformGrantParamsSchema = z.object({
+  grantId: z.string().uuid(),
 });
 const agentParamsSchema = z.object({ agentId: z.string().uuid() });
 const directChatTurnParamsSchema = directChatParamsSchema.extend({
@@ -404,7 +433,8 @@ function publicApiPath(path: string): boolean {
     path === "/api/v1/health" ||
     path === "/api/v1/ready" ||
     path === "/api/v1/metrics" ||
-    path === "/api/v1/auth/login"
+    path === "/api/v1/auth/login" ||
+    path === "/api/v1/auth/credential-activations"
   );
 }
 
@@ -451,7 +481,7 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 31;
+  const expectedMigrationVersion = options.expectedMigrationVersion ?? 32;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -735,6 +765,11 @@ export function buildApi(options: BuildApiOptions): {
         .status(400)
         .send(apiError(String(request.id), "invalid_input", error.message));
     }
+    if (error instanceof IdentityAdministrationRepositoryError) {
+      return reply
+        .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
     if (error instanceof IdentityRepositoryError) {
       return reply
         .status(error.statusCode)
@@ -914,6 +949,290 @@ export function buildApi(options: BuildApiOptions): {
     await identity.changePassword(token, input);
     return reply.status(204).send();
   });
+
+  app.post("/api/v1/auth/credential-activations", async (request, reply) => {
+    const input = acceptCredentialActivationInputSchema.parse(request.body);
+    await application.identityAdministration.acceptCredentialActivation(input);
+    return reply.status(204).send();
+  });
+
+  app.get("/api/v1/admin/accounts", async (request, reply) => {
+    const query = accountDirectoryQuerySchema.parse(request.query);
+    return reply.send(
+      await application.identityAdministration.listAccounts(query),
+    );
+  });
+
+  app.post("/api/v1/admin/accounts", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = createManagedAccountInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await application.identityAdministration.createAccount(actorId, input),
+      );
+  });
+
+  app.get("/api/v1/admin/accounts/:accountId", async (request, reply) => {
+    const { accountId } = accountAdministrationParamsSchema.parse(
+      request.params,
+    );
+    const account =
+      await application.identityAdministration.getAccount(accountId);
+    if (account === undefined) {
+      throw new ApplicationError("account_not_found", "Account not found", 404);
+    }
+    return reply.send(account);
+  });
+
+  app.patch("/api/v1/admin/accounts/:accountId", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const { accountId } = accountAdministrationParamsSchema.parse(
+      request.params,
+    );
+    const input = updateManagedAccountInputSchema.parse(request.body);
+    return reply.send(
+      await application.identityAdministration.updateAccount(
+        actorId,
+        accountId,
+        input,
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/admin/accounts/:accountId/credential",
+    async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const { accountId } = accountAdministrationParamsSchema.parse(
+        request.params,
+      );
+      const input = issueCredentialActivationInputSchema.parse(request.body);
+      return reply.send(
+        await application.identityAdministration.issueCredentialActivation(
+          actorId,
+          accountId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/admin/platform-roles", async (_request, reply) => {
+    return reply.send({
+      items: await application.identityAdministration.listPlatformRoles(),
+    });
+  });
+
+  app.get("/api/v1/admin/platform-grants", async (request, reply) => {
+    const query = platformGrantQuerySchema.parse(request.query);
+    return reply.send(
+      await application.identityAdministration.listPlatformGrants(query),
+    );
+  });
+
+  app.post("/api/v1/admin/platform-grants", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = createPlatformGrantInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await application.identityAdministration.createPlatformGrant(
+          actorId,
+          input,
+        ),
+      );
+  });
+
+  app.patch(
+    "/api/v1/admin/platform-grants/:grantId/expiry",
+    async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const { grantId } = platformGrantParamsSchema.parse(request.params);
+      const input = updateGrantExpiryInputSchema.parse(request.body);
+      return reply.send(
+        await application.identityAdministration.updatePlatformGrantExpiry(
+          actorId,
+          grantId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/admin/platform-grants/:grantId/revoke",
+    async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const { grantId } = platformGrantParamsSchema.parse(request.params);
+      const input = revokeGrantInputSchema.parse(request.body);
+      return reply.send(
+        await application.identityAdministration.revokePlatformGrant(
+          actorId,
+          grantId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/admin/identity-audit", async (request, reply) => {
+    const query = identityAuditQuerySchema.parse(request.query);
+    return reply.send(
+      await application.identityAdministration.listIdentityAudit(query),
+    );
+  });
+
+  app.get("/api/v1/workspaces", async (request, reply) => {
+    const principal = requestPrincipals.get(request);
+    if (principal === undefined) {
+      throw new ApplicationError(
+        "unauthorized",
+        "Authentication is required",
+        401,
+      );
+    }
+    const query = workspaceListQuerySchema.parse(request.query);
+    return reply.send({
+      items: await application.identityAdministration.listWorkspaces(
+        {
+          principalId: principal.principalId,
+          platformAdministrator: principal.platformAdministrator,
+        },
+        query,
+      ),
+    });
+  });
+
+  app.post("/api/v1/workspaces", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = createWorkspaceInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await application.identityAdministration.createWorkspace(
+          actorId,
+          input,
+        ),
+      );
+  });
+
+  app.get("/api/v1/workspaces/:workspaceId", async (request, reply) => {
+    const { workspaceId } = workspaceParamsSchema.parse(request.params);
+    const workspace =
+      await application.identityAdministration.getWorkspace(workspaceId);
+    if (workspace === undefined) {
+      throw new ApplicationError(
+        "workspace_not_found",
+        "Workspace not found",
+        404,
+      );
+    }
+    return reply.send(workspace);
+  });
+
+  app.patch("/api/v1/workspaces/:workspaceId", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const { workspaceId } = workspaceParamsSchema.parse(request.params);
+    const input = updateWorkspaceInputSchema.parse(request.body);
+    return reply.send(
+      await application.identityAdministration.updateWorkspace(
+        actorId,
+        workspaceId,
+        input,
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/members",
+    async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = addWorkspaceMemberInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await application.identityAdministration.addWorkspaceMember(
+            actorId,
+            workspaceId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.patch(
+    "/api/v1/workspaces/:workspaceId/members/:memberId",
+    async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const { workspaceId, memberId } = workspaceMemberParamsSchema.parse(
+        request.params,
+      );
+      const input = updateWorkspaceMemberStatusInputSchema.parse(request.body);
+      return reply.send(
+        await application.identityAdministration.updateWorkspaceMemberStatus(
+          actorId,
+          workspaceId,
+          memberId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post("/api/v1/workspaces/:workspaceId/grants", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const { workspaceId } = workspaceParamsSchema.parse(request.params);
+    const input = createWorkspaceGrantInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await application.identityAdministration.createWorkspaceGrant(
+          actorId,
+          workspaceId,
+          input,
+        ),
+      );
+  });
+
+  app.patch(
+    "/api/v1/workspaces/:workspaceId/grants/:grantId/expiry",
+    async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const { workspaceId, grantId } = workspaceGrantParamsSchema.parse(
+        request.params,
+      );
+      const input = updateGrantExpiryInputSchema.parse(request.body);
+      return reply.send(
+        await application.identityAdministration.updateWorkspaceGrantExpiry(
+          actorId,
+          workspaceId,
+          grantId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/grants/:grantId/revoke",
+    async (request, reply) => {
+      const actorId = requestActorId(request.headers);
+      const { workspaceId, grantId } = workspaceGrantParamsSchema.parse(
+        request.params,
+      );
+      const input = revokeGrantInputSchema.parse(request.body);
+      return reply.send(
+        await application.identityAdministration.revokeWorkspaceGrant(
+          actorId,
+          workspaceId,
+          grantId,
+          input,
+        ),
+      );
+    },
+  );
 
   app.get("/api/v1/viewer", async (request, reply) => {
     const actorId = requestActorId(request.headers);
@@ -3408,11 +3727,7 @@ export function buildApi(options: BuildApiOptions): {
       const input = handoffMeetingFacilitatorInputSchema.parse(request.body);
       const actorId = requestActorId(request.headers);
       return reply.send(
-        await application.handoffMeetingFacilitator(
-          meetingId,
-          input,
-          actorId,
-        ),
+        await application.handoffMeetingFacilitator(meetingId, input, actorId),
       );
     },
   );
@@ -3431,30 +3746,22 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
-  app.get(
-    "/api/v1/meetings/:meetingId/delegates",
-    async (request, reply) => {
-      const { meetingId } = meetingParamsSchema.parse(request.params);
-      const actorId = requestActorId(request.headers);
-      return reply.send({
-        items: await application.listMeetingDelegates(meetingId, actorId),
-      });
-    },
-  );
+  app.get("/api/v1/meetings/:meetingId/delegates", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listMeetingDelegates(meetingId, actorId),
+    });
+  });
 
-  app.post(
-    "/api/v1/meetings/:meetingId/delegates",
-    async (request, reply) => {
-      const { meetingId } = meetingParamsSchema.parse(request.params);
-      const input = createMeetingDelegateInputSchema.parse(request.body);
-      const actorId = requestActorId(request.headers);
-      return reply
-        .status(201)
-        .send(
-          await application.createMeetingDelegate(meetingId, input, actorId),
-        );
-    },
-  );
+  app.post("/api/v1/meetings/:meetingId/delegates", async (request, reply) => {
+    const { meetingId } = meetingParamsSchema.parse(request.params);
+    const input = createMeetingDelegateInputSchema.parse(request.body);
+    const actorId = requestActorId(request.headers);
+    return reply
+      .status(201)
+      .send(await application.createMeetingDelegate(meetingId, input, actorId));
+  });
 
   app.post(
     "/api/v1/meetings/:meetingId/delegates/:delegateId/revoke",
@@ -3483,15 +3790,17 @@ export function buildApi(options: BuildApiOptions): {
       );
       const input = meetingMessageInputSchema.parse(request.body);
       const actorId = requestActorId(request.headers);
-      return reply.status(201).send(
-        await application.postDelegateMeetingMessage(
-          meetingId,
-          delegateId,
-          input.content,
-          actorId,
-          input.clientMessageId,
-        ),
-      );
+      return reply
+        .status(201)
+        .send(
+          await application.postDelegateMeetingMessage(
+            meetingId,
+            delegateId,
+            input.content,
+            actorId,
+            input.clientMessageId,
+          ),
+        );
     },
   );
 

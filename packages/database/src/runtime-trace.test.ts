@@ -110,6 +110,6 @@ integration("runtime trace correlation", () => {
     const migration = await database.query<{ version: number }>(
       "SELECT MAX(version) AS version FROM platform_migrations",
     );
-    expect(migration.rows[0]?.version).toBe(31);
+    expect(migration.rows[0]?.version).toBe(32);
   });
 });

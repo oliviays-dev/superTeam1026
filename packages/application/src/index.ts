@@ -247,6 +247,7 @@ import {
 } from "./runtime-economics.js";
 import { ApplicationError } from "./errors.js";
 import { TeammateApplicationService } from "./teammates.js";
+import { IdentityAdministrationService } from "./identity-administration.js";
 
 export {
   TaskExecutionPreflightError,
@@ -283,6 +284,10 @@ export {
   weekRange,
   type TeammateDetail,
 } from "./teammates.js";
+export {
+  IdentityAdministrationService,
+  type IdentityAdministrationPrincipal,
+} from "./identity-administration.js";
 
 const implementedRuntimeKinds = new Set<Agent["runtimeKind"]>([
   "fake",
@@ -334,6 +339,7 @@ function scopedPermissions(
 
 export class PlatformApplication {
   readonly teammates: TeammateApplicationService;
+  readonly identityAdministration: IdentityAdministrationService;
   private readonly agentRuntimePreflight: AgentRuntimePreflightService;
   private readonly taskExecutionPreflight: TaskExecutionPreflightService;
   private readonly executionGates: ExecutionGateService;
@@ -349,6 +355,9 @@ export class PlatformApplication {
     );
     this.executionGates = new ExecutionGateService(repositories);
     this.sceneContext = new SceneContextService(repositories);
+    this.identityAdministration = new IdentityAdministrationService(
+      repositories.identityAdministration,
+    );
     this.teammates = new TeammateApplicationService(
       repositories,
       (taskId, aiPrincipalId) =>
@@ -6778,12 +6787,7 @@ export class PlatformApplication {
         );
       }
     }
-    return this.repositories.meetings.create(
-      input,
-      agents,
-      actorId,
-      actorName,
-    );
+    return this.repositories.meetings.create(input, agents, actorId, actorName);
   }
 
   async getMeeting(
@@ -7795,13 +7799,14 @@ export class PlatformApplication {
         actorId,
       );
     }
-    const revoked =
-      await this.repositories.meetingCollaboration.revokeDelegate({
+    const revoked = await this.repositories.meetingCollaboration.revokeDelegate(
+      {
         meetingId,
         delegateId,
         actorPrincipalId: actorId,
         reason: input.reason,
-      });
+      },
+    );
     if (revoked === undefined) {
       throw new ApplicationError(
         "meeting_delegate_not_active",
@@ -8363,9 +8368,7 @@ export class PlatformApplication {
     ].join("\n");
     const decisions = messages
       .map((message) => message.content.trim())
-      .filter((text) =>
-        /^(decision|decided|决定|决议)\s*[:：]/i.test(text),
-      )
+      .filter((text) => /^(decision|decided|决定|决议)\s*[:：]/i.test(text))
       .map((text) => text.replace(/^[^:：]+[:：]\s*/, ""))
       .slice(0, 100);
     const sourceMessageIds = messages.map((message) => message.id);
@@ -8540,9 +8543,7 @@ export class PlatformApplication {
     }
     if (input.sourceType === "minutes_version") {
       const versions =
-        await this.repositories.meetingDecisions.listMinutesVersions(
-          meetingId,
-        );
+        await this.repositories.meetingDecisions.listMinutesVersions(meetingId);
       const version = versions.find(
         (candidate) => candidate.id === input.sourceId,
       );
@@ -8568,11 +8569,7 @@ export class PlatformApplication {
       sourceMessageIds: input.sourceMessageIds,
       actorPrincipalId: actorId,
     });
-    if (
-      input.dispatch &&
-      !created.reused &&
-      created.taskStatus === "queued"
-    ) {
+    if (input.dispatch && !created.reused && created.taskStatus === "queued") {
       await this.dispatchTask(
         created.taskId,
         createRootTraceContext(),

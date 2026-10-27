@@ -33,6 +33,7 @@ export class IdentityRepositoryError extends Error {
       | "invalid_credentials"
       | "session_invalid"
       | "account_conflict"
+      | "last_platform_admin"
       | "forbidden"
       | "not_found",
     message: string,
@@ -582,6 +583,22 @@ export class IdentityRepository {
           404,
         );
       }
+      if (row.account_status === input.status) {
+        return {
+          accountId,
+          principalId: row.principal_id,
+          accountStatus: row.account_status,
+          principalStatus: row.principal_status,
+          sessionsRevoked: 0,
+        };
+      }
+      if (row.account_status === "pending" && input.status === "active") {
+        throw new IdentityRepositoryError(
+          "account_conflict",
+          "A pending account must complete credential activation before it can be enabled",
+          409,
+        );
+      }
       if (
         input.status === "active" &&
         (row.principal_status === "archived" ||
@@ -592,6 +609,46 @@ export class IdentityRepository {
           "Archived or HRM-controlled Principal cannot be reactivated",
           409,
         );
+      }
+      if (input.status === "disabled") {
+        const ownAdmin = await client.query(
+          `SELECT 1
+           FROM role_grants
+           WHERE principal_id = $1
+             AND scope_type = 'platform'
+             AND scope_id = 'platform'
+             AND role_key = 'ADMIN'
+             AND status = 'active'
+             AND (expires_at IS NULL OR expires_at > $2)
+           LIMIT 1`,
+          [row.principal_id, now],
+        );
+        if ((ownAdmin.rowCount ?? 0) > 0) {
+          const otherAdmins = await client.query<{ count: number }>(
+            `SELECT COUNT(*)::int AS count
+             FROM role_grants AS grant_row
+             JOIN principals AS principal
+               ON principal.id = grant_row.principal_id
+             LEFT JOIN accounts AS account
+               ON account.principal_id = principal.id
+             WHERE grant_row.principal_id <> $1
+               AND grant_row.scope_type = 'platform'
+               AND grant_row.scope_id = 'platform'
+               AND grant_row.role_key = 'ADMIN'
+               AND grant_row.status = 'active'
+               AND (grant_row.expires_at IS NULL OR grant_row.expires_at > $2)
+               AND principal.status = 'active'
+               AND (principal.kind = 'ai' OR account.status = 'active')`,
+            [row.principal_id, now],
+          );
+          if (Number(otherAdmins.rows[0]?.count ?? 0) === 0) {
+            throw new IdentityRepositoryError(
+              "last_platform_admin",
+              "The last active platform administrator account cannot be disabled",
+              409,
+            );
+          }
+        }
       }
       const principalStatus =
         input.status === "active"
@@ -613,10 +670,19 @@ export class IdentityRepository {
         [accountId, input.status, now],
       );
       await client.query(
-        `UPDATE account_credentials
-         SET status = $2, updated_at = $3, version = version + 1
-         WHERE account_id = $1 AND credential_type = 'password'`,
-        [accountId, input.status, now],
+        input.status === "disabled"
+          ? `UPDATE account_credentials
+             SET status = 'disabled', updated_at = $2, version = version + 1
+             WHERE account_id = $1
+               AND credential_type = 'password'
+               AND status = 'active'`
+          : `UPDATE account_credentials
+             SET status = 'active', updated_at = $2, version = version + 1
+             WHERE account_id = $1
+               AND credential_type = 'password'
+               AND status = 'disabled'
+               AND secret_scheme = 'scrypt'`,
+        [accountId, now],
       );
       if (principalStatus !== row.principal_status) {
         await client.query(

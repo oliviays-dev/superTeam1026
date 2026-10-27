@@ -4634,3 +4634,68 @@ AFTER INSERT ON meeting_messages
 FOR EACH ROW
 EXECUTE FUNCTION pluginmax_seed_meeting_message_deliveries();
 `;
+
+export const IDENTITY_ADMINISTRATION_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS workspaces (
+  id TEXT PRIMARY KEY
+    CHECK (
+      length(id) BETWEEN 1 AND 180
+      AND id ~ '^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$'
+    ),
+  display_name TEXT NOT NULL
+    CHECK (length(btrim(display_name)) BETWEEN 1 AND 160),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  created_by_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL,
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS workspaces_status_name_idx
+  ON workspaces(status, display_name, id);
+
+ALTER TABLE workspace_members
+  ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1
+    CHECK (version > 0);
+
+CREATE INDEX IF NOT EXISTS accounts_status_login_idx
+  ON accounts(status, lower(login_id));
+
+CREATE INDEX IF NOT EXISTS identity_audit_account_idx
+  ON identity_audit_events(account_id, created_at DESC)
+  WHERE account_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS identity_audit_action_idx
+  ON identity_audit_events(action, created_at DESC);
+
+INSERT INTO workspaces (
+  id, display_name, status, created_by_principal_id, version,
+  created_at, updated_at
+)
+SELECT
+  workspace_ref.workspace_id,
+  workspace_ref.workspace_id,
+  'active',
+  NULL,
+  1,
+  NOW(),
+  NOW()
+FROM (
+  SELECT DISTINCT workspace_id
+  FROM workspace_members
+  UNION
+  SELECT DISTINCT scope_id AS workspace_id
+  FROM role_grants
+  WHERE scope_type = 'workspace'
+  UNION
+  SELECT DISTINCT workspace_id
+  FROM external_runtimes
+  WHERE workspace_id IS NOT NULL
+) AS workspace_ref
+WHERE length(btrim(workspace_ref.workspace_id)) BETWEEN 1 AND 180
+  AND workspace_ref.workspace_id ~ '^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$'
+ON CONFLICT (id) DO NOTHING;
+`;
