@@ -105,6 +105,9 @@ importers:
       '@pluginmax/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@pluginmax/files':
+        specifier: workspace:*
+        version: link:../../packages/files
 
   packages/agent-runtime:
     dependencies:
