@@ -126,9 +126,11 @@ jobs:
           cache: pnpm
       - name: Install Pluginmax workspace
         run: pnpm install --frozen-lockfile
-      - name: Install Playwright Chromium
-        run: ./node_modules/.bin/playwright install chromium
+      - name: Verify system Chrome
+        run: google-chrome --version
       - name: API, process recovery, and browser smoke
+        env:
+          PLAYWRIGHT_USE_SYSTEM_CHROME: "true"
         run: pnpm test:ci
       - name: Upload runtime logs
         if: failure()

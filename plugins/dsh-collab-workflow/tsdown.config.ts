@@ -9,10 +9,13 @@ export default defineConfig({
     "@pluginmax/shared": fileURLToPath(
       new URL("../../packages/shared/src/index.ts", import.meta.url),
     ),
+    zod: fileURLToPath(
+      new URL("../../packages/shared/node_modules/zod/index.js", import.meta.url),
+    ),
   },
   deps: {
-    alwaysBundle: [/^@pluginmax\//],
-    neverBundle: ["zod"],
+    alwaysBundle: [/^@pluginmax\//, /^zod$/],
+    dts: { neverBundle: ["zod"] },
   },
   entry: ["src/index.ts"],
   dts: true,
