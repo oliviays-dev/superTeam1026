@@ -7,6 +7,7 @@ import {
   accountDirectoryQuerySchema,
   accountStatusInputSchema,
   addWorkspaceMemberInputSchema,
+  addInstanceSkillExtensionInputSchema,
   cancelExecutionGateInputSchema,
   approvalSlaSweepInputSchema,
   archiveTaskAttachmentInputSchema,
@@ -26,7 +27,24 @@ import {
   createProjectMemberInputSchema,
   createProjectInputSchema,
   createProjectRoleInputSchema,
+  createSkillDefinitionInputSchema,
+  createSkillVersionInputSchema,
   createSceneContextContributionInputSchema,
+  createSharedSpaceClaimInputSchema,
+  createSharedSpaceDirectoryInputSchema,
+  createSharedSpaceFileInputSchema,
+  createSharedSpacePolicyInputSchema,
+  createSharedSpaceWriteRequestInputSchema,
+  decideSharedSpaceWriteRequestInputSchema,
+  sharedSpaceAuditQuerySchema,
+  SharedSpacePathError,
+  sharedSpacePolicyPreviewInputSchema,
+  updateSharedSpaceFileInputSchema,
+  updateSharedSpacePolicyInputSchema,
+  updateSharedSpaceRootInputSchema,
+  archiveSharedSpaceFileInputSchema,
+  acquireSharedSpaceLockInputSchema,
+  generateSharedSpaceDigestInputSchema,
   createProjectTemplateInputSchema,
   createPlatformGrantInputSchema,
   createTemplateRoleInputSchema,
@@ -39,6 +57,17 @@ import {
   createSupplierRiskInputSchema,
   createTaskMessageInputSchema,
   createTaskInputSchema,
+  createTaskCaptureSessionInputSchema,
+  createTaskCaptureCandidateInputSchema,
+  invalidateTaskCaptureCandidateInputSchema,
+  createTaskDraftBatchInputSchema,
+  updateTaskDraftInputSchema,
+  commitTaskDraftBatchInputSchema,
+  updateContextPolicyInputSchema,
+  resetContextPolicyInputSchema,
+  createGroupSceneParticipantInputSchema,
+  updateGroupSceneParticipantInputSchema,
+  createGroupSceneSessionInputSchema,
   createWorkflowInputSchema,
   changePasswordInputSchema,
   completeWorkflowNodeInputSchema,
@@ -47,9 +76,27 @@ import {
   createMeetingDelegateInputSchema,
   createMeetingPrivateBriefingInputSchema,
   createMeetingTaskInputSchema,
+  createDelegationConfirmationInputSchema,
+  createDelegationInputSchema,
+  createDataAgentAnswerInputSchema,
+  createDataAgentConversationInputSchema,
+  createDataAgentMessageInputSchema,
+  createDataConnectionInputSchema,
+  createDataPolicyInputSchema,
+  createDataPolicyVersionInputSchema,
+  createDatasetColumnInputSchema,
+  createDatasetInputSchema,
+  createSemanticMetricInputSchema,
+  createSemanticMetricVersionInputSchema,
+  decideDelegationConfirmationInputSchema,
+  delegationActionCheckInputSchema,
+  delegationRevisionCommandSchema,
+  extendDelegationInputSchema,
+  updateDelegationInputSchema,
   cosignWorkflowApprovalInputSchema,
   decideWorkflowApprovalInputSchema,
   decideExecutionGateInputSchema,
+  executeDataQueryInputSchema,
   executionHistoryQuerySchema,
   generateMeetingMinutesInputSchema,
   generateProjectReportInputSchema,
@@ -57,6 +104,7 @@ import {
   importWorkflowMarkdownInputSchema,
   idempotencyCleanupInputSchema,
   identityAuditQuerySchema,
+  installSkillInputSchema,
   issueCredentialActivationInputSchema,
   jobListQuerySchema,
   jobRecoveryInputSchema,
@@ -64,6 +112,7 @@ import {
   meetingAiPolicyLifecycleInputSchema,
   loginInputSchema,
   platformGrantQuerySchema,
+  provisionProjectAiPmInputSchema,
   projectReportQuerySchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
@@ -86,6 +135,7 @@ import {
   triggerMeetingAiInputSchema,
   transferTaskInputSchema,
   archiveTeammateTemplateInputSchema,
+  bindTemplateSkillInputSchema,
   changeTeammateStatusInputSchema,
   createTeammateInputSchema,
   createTeammateTemplateInputSchema,
@@ -101,6 +151,35 @@ import {
   runtimeRevisionInputSchema,
   setAgentRuntimeBindingInputSchema,
   startWorkflowInputSchema,
+  updateWorkflowDefinitionInputSchema,
+  workflowInstancePreflightInputSchema,
+  replaceWorkflowInstanceBindingsInputSchema,
+  upsertProjectRoleMappingPresetInputSchema,
+  approveWorkflowPlanInputSchema,
+  createWorkflowPlanInputSchema,
+  createWorkflowPlanVersionInputSchema,
+  createMarketAssetInputSchema,
+  createWorkbenchInputSchema,
+  createWorkbenchLayoutInputSchema,
+  copyMarketTemplateInputSchema,
+  grantMarketEntitlementInputSchema,
+  installMarketAssetInputSchema,
+  marketAssetKindSchema,
+  publishMarketAssetVersionInputSchema,
+  rollbackMarketAssetInputSchema,
+  saveWorkbenchLayoutInputSchema,
+  setDefaultWorkbenchLayoutInputSchema,
+  setMarketAssetStatusInputSchema,
+  setMarketAssetVersionStatusInputSchema,
+  updateWorkbenchInputSchema,
+  finalizeWorkflowPlanInputSchema,
+  materializeWorkflowPlanInputSchema,
+  provisionRouterTemplateInputSchema,
+  registerRouterAgentInputSchema,
+  resumeWorkflowPlanInputSchema,
+  setRouterFeatureGateInputSchema,
+  sweepWorkflowPlansInputSchema,
+  submitTaskAcceptanceEvidenceInputSchema,
   submitTaskInputSchema,
   uploadTaskAttachmentInputSchema,
   updateAgentInputSchema,
@@ -110,6 +189,7 @@ import {
   updateManagedAccountInputSchema,
   updateMeetingActionItemInputSchema,
   updateMeetingAiPolicyInputSchema,
+  updateMeetingAiParticipantInputSchema,
   updateMeetingMinutesDraftInputSchema,
   updateMeetingPrivateBriefingInputSchema,
   uploadMeetingFileInputSchema,
@@ -141,16 +221,31 @@ import {
 import {
   ApplicationError,
   AuthorizationService,
+  DelegationApplicationError,
+  DataFabricApplication,
+  DataFabricApplicationError,
+  MarketApplication,
   PlatformApplication,
+  SharedSpaceApplication,
+  SharedSpaceApplicationError,
+  WorkbenchConfigurationApplication,
+  WorkbenchMarketApplicationError,
   renderRuntimePrometheusMetrics,
   type AuthorizedRequestPrincipal,
+  type DataFabricQueryAdapter,
 } from "@pluginmax/application";
 import {
   Database,
+  DataFabricRepositoryError,
   IdentityAdministrationRepositoryError,
   IdentityRepository,
   IdentityRepositoryError,
+  LATEST_MIGRATION_VERSION,
+  MarketRepositoryError,
   PlatformRepositories,
+  SharedSpaceRepositoryError,
+  SkillRepositoryError,
+  WorkbenchConfigurationRepositoryError,
 } from "@pluginmax/database";
 import { LocalFileStore, type FileRef } from "@pluginmax/files";
 import Fastify, {
@@ -172,10 +267,18 @@ export interface BuildApiOptions {
   readonly workerHeartbeatStaleAfterSeconds?: number;
   readonly logger?: FastifyServerOptions["logger"];
   readonly database?: Database;
+  readonly dataFabricQueryAdapter?: DataFabricQueryAdapter;
 }
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
 const runParamsSchema = z.object({ runId: z.string().uuid() });
+const taskPlanParamsSchema = z.object({
+  planId: z.string().uuid(),
+});
+const taskPlanVersionParamsSchema = z.object({
+  planId: z.string().uuid(),
+  version: z.coerce.number().int().positive(),
+});
 const executionGateParamsSchema = z.object({ gateId: z.string().uuid() });
 const traceParamsSchema = z.object({ traceId: traceIdSchema });
 const artifactParamsSchema = z.object({ artifactId: z.string().uuid() });
@@ -194,6 +297,71 @@ const teammateParamsSchema = z.object({ teammateId: z.string().uuid() });
 const teammateTemplateParamsSchema = z.object({
   templateId: z.string().uuid(),
 });
+const skillParamsSchema = z.object({ skillId: z.string().uuid() });
+const skillInstallationParamsSchema = z.object({
+  installationId: z.string().uuid(),
+});
+const dataDatasetParamsSchema = z.object({ datasetId: z.string().uuid() });
+const dataMetricParamsSchema = z.object({ metricId: z.string().uuid() });
+const dataPolicyParamsSchema = dataDatasetParamsSchema.extend({
+  policyId: z.string().uuid(),
+});
+const dataAgentConversationParamsSchema = z.object({
+  conversationId: z.string().uuid(),
+});
+const workbenchParamsSchema = z.object({
+  workbenchId: z.string().uuid(),
+});
+const workbenchLayoutParamsSchema = z.object({
+  workbenchId: z.string().uuid(),
+  layoutId: z.string().uuid(),
+});
+const workbenchPanelParamsSchema = z.object({
+  workbenchId: z.string().uuid(),
+  panelInstanceId: z.string().uuid(),
+});
+const workbenchPanelDataQuerySchema = z.object({
+  projectId: z.string().uuid().optional(),
+});
+const marketAssetParamsSchema = z.object({
+  assetId: z.string().uuid(),
+});
+const marketAssetVersionParamsSchema = z.object({
+  assetId: z.string().uuid(),
+  version: z.coerce.number().int().positive(),
+});
+const marketTemplateParamsSchema = z.object({
+  templateId: z.string().uuid(),
+});
+const marketEntitlementParamsSchema = z.object({
+  entitlementId: z.string().uuid(),
+});
+const marketInstallationParamsSchema = z.object({
+  assetId: z.string().uuid(),
+});
+const marketAssetListQuerySchema = z.object({
+  kind: marketAssetKindSchema.optional(),
+});
+const dataQueryRunParamsSchema = z.object({ queryRunId: z.string().uuid() });
+const dataConnectionListQuerySchema = z.object({
+  projectId: z.string().uuid(),
+  workspaceId: z.string().trim().min(1).max(180).optional(),
+});
+const dataDatasetListQuerySchema = z.object({
+  projectId: z.string().uuid(),
+});
+const templateSkillBindingParamsSchema = teammateTemplateParamsSchema.extend({
+  bindingId: z.string().uuid(),
+});
+const teammateSkillExtensionParamsSchema = teammateParamsSchema.extend({
+  extensionId: z.string().uuid(),
+});
+const skillListQuerySchema = z.object({
+  includeInactive: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+});
 const workspaceParamsSchema = z.object({
   workspaceId: z.string().trim().min(1).max(180),
 });
@@ -206,6 +374,38 @@ const workspaceMemberParamsSchema = workspaceParamsSchema.extend({
 const workspaceGrantParamsSchema = workspaceParamsSchema.extend({
   grantId: z.string().uuid(),
 });
+const sharedSpacePolicyParamsSchema = workspaceParamsSchema.extend({
+  policyId: z.string().uuid(),
+});
+const sharedSpaceEntryParamsSchema = workspaceParamsSchema.extend({
+  entryId: z.string().uuid(),
+});
+const sharedSpaceLockParamsSchema = workspaceParamsSchema.extend({
+  lockId: z.string().uuid(),
+});
+const sharedSpaceClaimParamsSchema = workspaceParamsSchema.extend({
+  claimId: z.string().uuid(),
+});
+const sharedSpaceRequestParamsSchema = workspaceParamsSchema.extend({
+  requestId: z.string().uuid(),
+});
+const sharedSpaceListQuerySchema = z.object({
+  path: z.string().max(500).default(""),
+  includeArchived: z
+    .enum(["0", "1", "true", "false"])
+    .optional()
+    .transform((value) => value === "1" || value === "true"),
+});
+const sharedSpaceRequestQuerySchema = z.object({
+  scope: z.enum(["workspace", "global"]).optional(),
+});
+const sharedSpaceWorkspaceQuerySchema = z.object({
+  workspaceId: z.string().trim().min(1).max(180),
+});
+const sharedSpaceGlobalCreateSchema =
+  createSharedSpaceWriteRequestInputSchema.extend({
+    workspaceId: z.string().trim().min(1).max(180),
+  });
 const platformGrantParamsSchema = z.object({
   grantId: z.string().uuid(),
 });
@@ -218,6 +418,10 @@ const meetingActionItemParamsSchema = meetingParamsSchema.extend({
 });
 const meetingDelegateParamsSchema = meetingParamsSchema.extend({
   delegateId: z.string().uuid(),
+});
+const delegationParamsSchema = z.object({ delegationId: z.string().uuid() });
+const delegationConfirmationParamsSchema = delegationParamsSchema.extend({
+  requestId: z.string().uuid(),
 });
 const meetingMessageParamsSchema = meetingParamsSchema.extend({
   messageId: z.string().uuid(),
@@ -428,6 +632,27 @@ function requestIsAdministrator(headers: Record<string, unknown>): boolean {
   return headerValue(headers, AUTHENTICATED_ADMIN_HEADER) === "1";
 }
 
+function sharedSpaceActor(
+  request: FastifyRequest,
+  principals: WeakMap<FastifyRequest, RequestPrincipalContext>,
+): {
+  readonly principalId: string;
+  readonly authSource: "bearer" | "local-development";
+} {
+  const principal = principals.get(request);
+  if (principal === undefined) {
+    throw new ApplicationError(
+      "unauthorized",
+      "Authentication is required",
+      401,
+    );
+  }
+  return {
+    principalId: principal.principalId,
+    authSource: principal.authSource,
+  };
+}
+
 function publicApiPath(path: string): boolean {
   return (
     path === "/api/v1/health" ||
@@ -446,6 +671,20 @@ function requestIdempotencyKey(
   return typeof key === "string" && key.trim() !== ""
     ? key.trim().slice(0, 200)
     : undefined;
+}
+
+function requireIdempotencyKey(
+  headers: Record<string, unknown>,
+): string {
+  const key = requestIdempotencyKey(headers);
+  if (key === undefined) {
+    throw new ApplicationError(
+      "idempotency_key_required",
+      "Idempotency-Key is required for this operation",
+      400,
+    );
+  }
+  return key;
 }
 
 function stableJson(value: unknown): string {
@@ -468,11 +707,40 @@ function requestHash(input: unknown): string {
 export function buildApi(options: BuildApiOptions): {
   app: FastifyInstance;
   database: Database;
+  sharedSpace: SharedSpaceApplication;
+  dataFabric: DataFabricApplication;
+  workbenchConfiguration: WorkbenchConfigurationApplication;
+  market: MarketApplication;
 } {
   const database = options.database ?? new Database(options.databaseUrl);
   const fileStore = new LocalFileStore(options.fileStoreRoot);
   const repositories = new PlatformRepositories(database);
   const application = new PlatformApplication(repositories, fileStore);
+  const sharedSpace = new SharedSpaceApplication(repositories, fileStore);
+  const dataFabric =
+    options.dataFabricQueryAdapter === undefined
+      ? new DataFabricApplication(
+          repositories.dataFabric,
+          repositories.authorization,
+        )
+      : new DataFabricApplication(
+          repositories.dataFabric,
+          repositories.authorization,
+          options.dataFabricQueryAdapter,
+        );
+  const workbenchConfiguration = new WorkbenchConfigurationApplication(
+    repositories.workbenchConfiguration,
+    repositories.market,
+    repositories.workbenchReports,
+    repositories.authorization,
+    repositories.featureFlags,
+  );
+  const market = new MarketApplication(
+    repositories.market,
+    repositories.workbenchConfiguration,
+    repositories.authorization,
+    repositories.featureFlags,
+  );
   const authorization = new AuthorizationService(repositories.authorization);
   const localActorId = options.localActorId ?? "local-admin";
   const authMode =
@@ -481,7 +749,8 @@ export function buildApi(options: BuildApiOptions): {
   const authSessionTtlSeconds = options.authSessionTtlSeconds ?? 604_800;
   const identity =
     options.identityRepository ?? new IdentityRepository(database);
-  const expectedMigrationVersion = options.expectedMigrationVersion ?? 32;
+  const expectedMigrationVersion =
+    options.expectedMigrationVersion ?? LATEST_MIGRATION_VERSION;
   const workerHeartbeatStaleAfterSeconds =
     options.workerHeartbeatStaleAfterSeconds ?? 30;
   const startedAt = Date.now();
@@ -495,6 +764,38 @@ export function buildApi(options: BuildApiOptions): {
     FastifyRequest,
     RequestPrincipalContext
   >();
+
+  function requestDataFabricActor(request: FastifyRequest) {
+    const principal = requestPrincipals.get(request);
+    if (principal === undefined) {
+      throw new ApplicationError(
+        "unauthorized",
+        "Authentication is required",
+        401,
+      );
+    }
+    return {
+      principalId: principal.principalId,
+      authSource: principal.authSource,
+      platformAdministrator: principal.platformAdministrator,
+    } as const;
+  }
+
+  function requestWorkbenchMarketActor(request: FastifyRequest) {
+    const principal = requestPrincipals.get(request);
+    if (principal === undefined) {
+      throw new ApplicationError(
+        "unauthorized",
+        "Authentication is required",
+        401,
+      );
+    }
+    return {
+      principalId: principal.principalId,
+      authSource: principal.authSource,
+      platformAdministrator: principal.platformAdministrator,
+    } as const;
+  }
 
   app.addHook("onRequest", async (request, reply) => {
     const header = request.headers.traceparent;
@@ -765,6 +1066,24 @@ export function buildApi(options: BuildApiOptions): {
         .status(400)
         .send(apiError(String(request.id), "invalid_input", error.message));
     }
+    if (error instanceof SharedSpacePathError) {
+      return reply
+        .status(error.code === "shared_space_path_escape" ? 403 : 400)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof SkillRepositoryError) {
+      const statusCode =
+        error.code === "skill_definition_not_found" ||
+        error.code === "skill_version_not_found" ||
+        error.code === "skill_installation_not_found" ||
+        error.code === "skill_binding_not_found" ||
+        error.code === "skill_extension_not_found"
+          ? 404
+          : 409;
+      return reply
+        .status(statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
     if (error instanceof IdentityAdministrationRepositoryError) {
       return reply
         .status(error.statusCode)
@@ -773,6 +1092,90 @@ export function buildApi(options: BuildApiOptions): {
     if (error instanceof IdentityRepositoryError) {
       return reply
         .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof DelegationApplicationError) {
+      return reply
+        .status(error.statusCode)
+        .send(
+          apiError(
+            String(request.id),
+            error.code,
+            error.message,
+            error.details,
+          ),
+        );
+    }
+    if (error instanceof SharedSpaceApplicationError) {
+      return reply
+        .status(error.statusCode)
+        .send(
+          apiError(
+            String(request.id),
+            error.code,
+            error.message,
+            error.details,
+          ),
+        );
+    }
+    if (error instanceof SharedSpaceRepositoryError) {
+      return reply
+        .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof DataFabricApplicationError) {
+      return reply
+        .status(error.statusCode)
+        .send(
+          apiError(
+            String(request.id),
+            error.code,
+            error.message,
+            error.details,
+          ),
+        );
+    }
+    if (error instanceof DataFabricRepositoryError) {
+      return reply
+        .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof WorkbenchMarketApplicationError) {
+      return reply
+        .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof WorkbenchConfigurationRepositoryError) {
+      const statusCode =
+        error.code === "workbench_not_found" ||
+        error.code === "workbench_layout_not_found"
+          ? 404
+          : error.code === "workbench_revision_conflict" ||
+              error.code === "workbench_name_conflict" ||
+              error.code === "workbench_layout_name_conflict"
+            ? 409
+            : 400;
+      return reply
+        .status(statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof MarketRepositoryError) {
+      const statusCode =
+        error.code === "market_asset_not_found" ||
+        error.code === "market_asset_version_not_found" ||
+        error.code === "market_installation_not_found" ||
+        error.code === "market_template_not_found" ||
+        error.code === "market_template_copy_not_found"
+          ? 404
+          : error.code === "market_visibility_denied" ||
+              error.code === "market_entitlement_required"
+            ? 403
+            : error.code === "market_asset_not_active" ||
+                error.code === "market_manifest_invalid"
+              ? 409
+              : 400;
+      return reply
+        .status(statusCode)
         .send(apiError(String(request.id), error.code, error.message));
     }
     if (error instanceof ApplicationError) {
@@ -1234,6 +1637,485 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      return reply.send(
+        await sharedSpace.getWorkspace(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+        ),
+      );
+    },
+  );
+
+  app.patch(
+    "/api/v1/workspaces/:workspaceId/shared-space",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = updateSharedSpaceRootInputSchema.parse(request.body);
+      return reply.send(
+        await sharedSpace.updateRoot(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/policies",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      return reply.send({
+        items: await sharedSpace.listPolicies(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/policies",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = createSharedSpacePolicyInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await sharedSpace.createPolicy(
+            sharedSpaceActor(request, requestPrincipals),
+            workspaceId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.patch(
+    "/api/v1/workspaces/:workspaceId/shared-space/policies/:policyId",
+    async (request, reply) => {
+      const { workspaceId, policyId } = sharedSpacePolicyParamsSchema.parse(
+        request.params,
+      );
+      const input = updateSharedSpacePolicyInputSchema.parse(request.body);
+      return reply.send(
+        await sharedSpace.updatePolicy(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          policyId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.delete(
+    "/api/v1/workspaces/:workspaceId/shared-space/policies/:policyId",
+    async (request, reply) => {
+      const { workspaceId, policyId } = sharedSpacePolicyParamsSchema.parse(
+        request.params,
+      );
+      const input = z
+        .object({ expectedVersion: z.number().int().positive() })
+        .parse(request.body);
+      return reply.send(
+        await sharedSpace.revokePolicy(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          policyId,
+          input.expectedVersion,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/policy-preview",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = sharedSpacePolicyPreviewInputSchema.parse(request.body);
+      return reply.send(
+        await sharedSpace.previewPolicy({
+          actor: sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          principalId: input.principalId,
+          path: input.path,
+        }),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/files",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const query = sharedSpaceListQuerySchema.parse(request.query);
+      return reply.send(
+        await sharedSpace.listFiles({
+          actor: sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          path: query.path,
+          includeArchived: query.includeArchived,
+        }),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/directories",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = createSharedSpaceDirectoryInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await sharedSpace.createDirectory(
+            sharedSpaceActor(request, requestPrincipals),
+            workspaceId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/files",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = createSharedSpaceFileInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await sharedSpace.createFile(
+            sharedSpaceActor(request, requestPrincipals),
+            workspaceId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/files/:entryId",
+    async (request, reply) => {
+      const { workspaceId, entryId } = sharedSpaceEntryParamsSchema.parse(
+        request.params,
+      );
+      return reply.send(
+        await sharedSpace.getEntry(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          entryId,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/files/:entryId/content",
+    async (request, reply) => {
+      const { workspaceId, entryId } = sharedSpaceEntryParamsSchema.parse(
+        request.params,
+      );
+      return reply.send(
+        await sharedSpace.readContent(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          entryId,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/files/:entryId/download",
+    async (request, reply) => {
+      const { workspaceId, entryId } = sharedSpaceEntryParamsSchema.parse(
+        request.params,
+      );
+      const download = await sharedSpace.download(
+        sharedSpaceActor(request, requestPrincipals),
+        workspaceId,
+        entryId,
+      );
+      const filename = encodeURIComponent(download.entry.name);
+      return reply
+        .type(download.entry.mimeType ?? "application/octet-stream")
+        .header(
+          "content-disposition",
+          `attachment; filename*=UTF-8''${filename}`,
+        )
+        .send(Buffer.from(download.contentBase64, "base64"));
+    },
+  );
+
+  app.put(
+    "/api/v1/workspaces/:workspaceId/shared-space/files/:entryId/content",
+    async (request, reply) => {
+      const { workspaceId, entryId } = sharedSpaceEntryParamsSchema.parse(
+        request.params,
+      );
+      const input = updateSharedSpaceFileInputSchema.parse(request.body);
+      return reply.send(
+        await sharedSpace.updateFile(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          entryId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/files/:entryId/archive",
+    async (request, reply) => {
+      const { workspaceId, entryId } = sharedSpaceEntryParamsSchema.parse(
+        request.params,
+      );
+      const input = archiveSharedSpaceFileInputSchema.parse(request.body);
+      return reply.send(
+        await sharedSpace.archiveFile(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          entryId,
+          input.expectedVersion,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/files/:entryId/versions",
+    async (request, reply) => {
+      const { workspaceId, entryId } = sharedSpaceEntryParamsSchema.parse(
+        request.params,
+      );
+      return reply.send({
+        items: await sharedSpace.listVersions(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          entryId,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/locks",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      return reply.send({
+        items: await sharedSpace.listLocks(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/locks",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = acquireSharedSpaceLockInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await sharedSpace.acquireLock(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          {
+            path: input.path,
+            mode: input.mode,
+            leaseSeconds: input.leaseSeconds,
+            ...(input.sessionId === undefined
+              ? {}
+              : { sessionId: input.sessionId }),
+          },
+        ),
+      );
+    },
+  );
+
+  app.delete(
+    "/api/v1/workspaces/:workspaceId/shared-space/locks/:lockId",
+    async (request, reply) => {
+      const { workspaceId, lockId } = sharedSpaceLockParamsSchema.parse(
+        request.params,
+      );
+      return reply.send({
+        released: await sharedSpace.releaseLock(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          lockId,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/claims",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      return reply.send({
+        items: await sharedSpace.listClaims(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/claims",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = createSharedSpaceClaimInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await sharedSpace.createClaim(
+            sharedSpaceActor(request, requestPrincipals),
+            workspaceId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.delete(
+    "/api/v1/workspaces/:workspaceId/shared-space/claims/:claimId",
+    async (request, reply) => {
+      const { workspaceId, claimId } = sharedSpaceClaimParamsSchema.parse(
+        request.params,
+      );
+      return reply.send({
+        released: await sharedSpace.releaseClaim(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          claimId,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/write-requests",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const query = sharedSpaceRequestQuerySchema.parse(request.query);
+      return reply.send({
+        items: await sharedSpace.listWriteRequests(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          query.scope,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/write-requests/:requestId/decision",
+    async (request, reply) => {
+      const { workspaceId, requestId } = sharedSpaceRequestParamsSchema.parse(
+        request.params,
+      );
+      const input = decideSharedSpaceWriteRequestInputSchema.parse(
+        request.body,
+      );
+      return reply.send(
+        await sharedSpace.decideWriteRequest(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          requestId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/shared-space/global-write-requests",
+    async (request, reply) => {
+      const parsed = sharedSpaceGlobalCreateSchema.parse(request.body);
+      const { workspaceId, ...input } = parsed;
+      return reply
+        .status(201)
+        .send(
+          await sharedSpace.createHumanGlobalWriteRequest(
+            sharedSpaceActor(request, requestPrincipals),
+            workspaceId,
+            input,
+            requestIdempotencyKey(request.headers) ?? randomUUID(),
+          ),
+        );
+    },
+  );
+
+  app.get(
+    "/api/v1/shared-space/global-write-requests",
+    async (request, reply) => {
+      const { workspaceId } = sharedSpaceWorkspaceQuerySchema.parse(
+        request.query,
+      );
+      return reply.send({
+        items: await sharedSpace.listWriteRequests(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          "global",
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/audit",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const query = sharedSpaceAuditQuerySchema.parse(request.query);
+      return reply.send(
+        await sharedSpace.listAudit(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+          query,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workspaces/:workspaceId/shared-space/digests",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      return reply.send({
+        items: await sharedSpace.listDigests(
+          sharedSpaceActor(request, requestPrincipals),
+          workspaceId,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/workspaces/:workspaceId/shared-space/digests",
+    async (request, reply) => {
+      const { workspaceId } = workspaceParamsSchema.parse(request.params);
+      const input = generateSharedSpaceDigestInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await sharedSpace.generateDigest(
+            sharedSpaceActor(request, requestPrincipals),
+            workspaceId,
+            input,
+          ),
+        );
+    },
+  );
+
   app.get("/api/v1/viewer", async (request, reply) => {
     const actorId = requestActorId(request.headers);
     const platformAdministrator = requestIsAdministrator(request.headers);
@@ -1606,6 +2488,31 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.updateProject(projectId, input));
   });
 
+  app.get("/api/v1/projects/:projectId/ai-pm", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.getProjectAiPm(projectId, actorId),
+    );
+  });
+
+  app.post("/api/v1/projects/:projectId/ai-pm", async (request, reply) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const input = provisionProjectAiPmInputSchema.parse(request.body ?? {});
+    const actorId = requestActorId(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `project:${projectId}:ai-pm`,
+      operation: "project.ai_pm.provision",
+      actorId,
+      payload: input,
+      statusCode: 200,
+      execute: () =>
+        application.provisionProjectAiPm(projectId, input, actorId),
+    });
+  });
+
   app.get("/api/v1/projects/:projectId/reports", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);
     const query = projectReportQuerySchema.parse(request.query);
@@ -1632,7 +2539,7 @@ export function buildApi(options: BuildApiOptions): {
         execute: () =>
           application.generateProjectReport(
             projectId,
-            input.reportDate,
+            input,
             actorId,
           ),
       });
@@ -1666,6 +2573,313 @@ export function buildApi(options: BuildApiOptions): {
           reportId,
           actorId,
           input.read,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/data-fabric/connections", async (request, reply) => {
+    const query = dataConnectionListQuerySchema.parse(request.query);
+    return reply.send({
+      items: await dataFabric.listConnections(
+        query.projectId,
+        requestDataFabricActor(request),
+        query.workspaceId,
+      ),
+    });
+  });
+
+  app.post("/api/v1/data-fabric/connections", async (request, reply) => {
+    const input = createDataConnectionInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await dataFabric.createConnection(
+          input,
+          requestDataFabricActor(request),
+        ),
+      );
+  });
+
+  app.get("/api/v1/data-fabric/datasets", async (request, reply) => {
+    const query = dataDatasetListQuerySchema.parse(request.query);
+    return reply.send({
+      items: await dataFabric.listDatasets(
+        query.projectId,
+        requestDataFabricActor(request),
+      ),
+    });
+  });
+
+  app.post("/api/v1/data-fabric/datasets", async (request, reply) => {
+    const input = createDatasetInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await dataFabric.createDataset(
+          input,
+          requestDataFabricActor(request),
+        ),
+      );
+  });
+
+  app.get(
+    "/api/v1/data-fabric/datasets/:datasetId",
+    async (request, reply) => {
+      const { datasetId } = dataDatasetParamsSchema.parse(request.params);
+      return reply.send(
+        await dataFabric.getDataset(
+          datasetId,
+          requestDataFabricActor(request),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-fabric/datasets/:datasetId/columns",
+    async (request, reply) => {
+      const { datasetId } = dataDatasetParamsSchema.parse(request.params);
+      const input = createDatasetColumnInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createColumn(
+            datasetId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-fabric/datasets/:datasetId/metrics",
+    async (request, reply) => {
+      const { datasetId } = dataDatasetParamsSchema.parse(request.params);
+      const input = createSemanticMetricInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createMetric(
+            datasetId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-fabric/metrics/:metricId/versions",
+    async (request, reply) => {
+      const { metricId } = dataMetricParamsSchema.parse(request.params);
+      const input = createSemanticMetricVersionInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createMetricVersion(
+            metricId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.get(
+    "/api/v1/data-fabric/datasets/:datasetId/policies",
+    async (request, reply) => {
+      const { datasetId } = dataDatasetParamsSchema.parse(request.params);
+      return reply.send({
+        items: await dataFabric.listPolicies(
+          datasetId,
+          requestDataFabricActor(request),
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/data-fabric/datasets/:datasetId/policies",
+    async (request, reply) => {
+      const { datasetId } = dataDatasetParamsSchema.parse(request.params);
+      const input = createDataPolicyInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createPolicy(
+            datasetId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-fabric/datasets/:datasetId/policies/:policyId/versions",
+    async (request, reply) => {
+      const { datasetId, policyId } = dataPolicyParamsSchema.parse(
+        request.params,
+      );
+      const input = createDataPolicyVersionInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createPolicyVersion(
+            datasetId,
+            policyId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.post("/api/v1/data-agent/conversations", async (request, reply) => {
+    const input = createDataAgentConversationInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await dataFabric.createConversation(
+          input.runId,
+          input.title,
+          requestDataFabricActor(request),
+        ),
+      );
+  });
+
+  app.get(
+    "/api/v1/data-agent/conversations/:conversationId",
+    async (request, reply) => {
+      const { conversationId } = dataAgentConversationParamsSchema.parse(
+        request.params,
+      );
+      return reply.send(
+        await dataFabric.getConversation(
+          conversationId,
+          requestDataFabricActor(request),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-agent/conversations/:conversationId/messages",
+    async (request, reply) => {
+      const { conversationId } = dataAgentConversationParamsSchema.parse(
+        request.params,
+      );
+      const input = createDataAgentMessageInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createUserMessage(
+            conversationId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-agent/conversations/:conversationId/queries",
+    async (request, reply) => {
+      const { conversationId } = dataAgentConversationParamsSchema.parse(
+        request.params,
+      );
+      const input = executeDataQueryInputSchema.parse(request.body);
+      return reply.send(
+        await dataFabric.executeQuery(
+          conversationId,
+          input,
+          requestDataFabricActor(request),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-agent/conversations/:conversationId/answers",
+    async (request, reply) => {
+      const { conversationId } = dataAgentConversationParamsSchema.parse(
+        request.params,
+      );
+      const input = createDataAgentAnswerInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createAnswer(
+            conversationId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-agent/conversations/:conversationId/reports",
+    async (request, reply) => {
+      const { conversationId } = dataAgentConversationParamsSchema.parse(
+        request.params,
+      );
+      const input = createDataAgentAnswerInputSchema.parse(request.body);
+      if (input.projectReportId === undefined) {
+        throw new DataFabricApplicationError(
+          "project_report_required",
+          "Data Agent reports must reference an existing Project Report",
+          400,
+        );
+      }
+      return reply
+        .status(201)
+        .send(
+          await dataFabric.createAnswer(
+            conversationId,
+            input,
+            requestDataFabricActor(request),
+          ),
+        );
+    },
+  );
+
+  app.get(
+    "/api/v1/data-agent/query-runs/:queryRunId",
+    async (request, reply) => {
+      const { queryRunId } = dataQueryRunParamsSchema.parse(request.params);
+      return reply.send(
+        await dataFabric.getQueryRun(
+          queryRunId,
+          requestDataFabricActor(request),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/data-agent/query-runs/:queryRunId/result",
+    async (request, reply) => {
+      const { queryRunId } = dataQueryRunParamsSchema.parse(request.params);
+      return reply.send(
+        await dataFabric.getQueryResult(
+          queryRunId,
+          requestDataFabricActor(request),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/data-agent/query-runs/:queryRunId/cancel",
+    async (request, reply) => {
+      const { queryRunId } = dataQueryRunParamsSchema.parse(request.params);
+      return reply.send(
+        await dataFabric.cancelQueryRun(
+          queryRunId,
+          requestDataFabricActor(request),
         ),
       );
     },
@@ -1718,7 +2932,53 @@ export function buildApi(options: BuildApiOptions): {
       const { projectId, roleId } = projectRoleParamsSchema.parse(
         request.params,
       );
-      await application.deleteProjectRole(projectId, roleId);
+      await application.deleteProjectRole(
+        projectId,
+        roleId,
+        requestActorId(request.headers),
+      );
+      return reply.status(204).send();
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/role-mapping-presets",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      return reply.send({
+        items: await application.listProjectRoleMappingPresets(projectId),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/role-mapping-presets",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = upsertProjectRoleMappingPresetInputSchema.parse(
+        request.body,
+      );
+      return reply.status(201).send(
+        await application.upsertProjectRoleMappingPreset(
+          projectId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.delete(
+    "/api/v1/projects/:projectId/role-mapping-presets/:roleId",
+    async (request, reply) => {
+      const { projectId, roleId } = projectRoleParamsSchema.parse(
+        request.params,
+      );
+      await application.deleteProjectRoleMappingPreset(
+        projectId,
+        roleId,
+        requestActorId(request.headers),
+      );
       return reply.status(204).send();
     },
   );
@@ -2137,6 +3397,106 @@ export function buildApi(options: BuildApiOptions): {
     );
   });
 
+  app.get("/api/v1/runs/:runId/skills", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    return reply.send(
+      await application.skills.getRunSnapshot(
+        runId,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.get("/api/v1/skills", async (request, reply) => {
+    const query = skillListQuerySchema.parse(request.query);
+    return reply.send({
+      items: await application.skills.listDefinitions(
+        requestActorId(request.headers),
+        requestIsAdministrator(request.headers) &&
+          (query.includeInactive ?? false),
+      ),
+    });
+  });
+
+  app.post("/api/v1/skills", async (request, reply) => {
+    const input = createSkillDefinitionInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.skills.createDefinition({
+        value: input,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    );
+  });
+
+  app.get("/api/v1/skills/:skillId", async (request, reply) => {
+    const { skillId } = skillParamsSchema.parse(request.params);
+    return reply.send(
+      await application.skills.getDefinition({
+        skillId,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    );
+  });
+
+  app.post("/api/v1/skills/:skillId/versions", async (request, reply) => {
+    const { skillId } = skillParamsSchema.parse(request.params);
+    const input = createSkillVersionInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.skills.addVersion({
+        skillId,
+        value: input,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    );
+  });
+
+  app.get("/api/v1/skills/:skillId/audit", async (request, reply) => {
+    const { skillId } = skillParamsSchema.parse(request.params);
+    return reply.send({
+      items: await application.skills.listAudit({
+        skillId,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    });
+  });
+
+  app.get("/api/v1/skill-installations", async (request, reply) => {
+    return reply.send({
+      items: await application.skills.listInstallations(
+        requestActorId(request.headers),
+      ),
+    });
+  });
+
+  app.post("/api/v1/skill-installations", async (request, reply) => {
+    const input = installSkillInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.skills.install({
+        value: input,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    );
+  });
+
+  app.delete(
+    "/api/v1/skill-installations/:installationId",
+    async (request, reply) => {
+      const { installationId } = skillInstallationParamsSchema.parse(
+        request.params,
+      );
+      await application.skills.uninstall({
+        installationId,
+        actorPrincipalId: requestActorId(request.headers),
+      });
+      return reply.status(204).send();
+    },
+  );
+
   app.get("/api/v1/teammate-templates", async (request, reply) => {
     const query = teammateListQuerySchema.parse(request.query);
     return reply.send({
@@ -2207,6 +3567,296 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
+  app.get(
+    "/api/v1/teammate-templates/:templateId/skills",
+    async (request, reply) => {
+      const { templateId } = teammateTemplateParamsSchema.parse(request.params);
+      return reply.send({
+        items: await application.skills.listTemplateBindings(
+          templateId,
+          requestActorId(request.headers),
+          requestIsAdministrator(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/teammate-templates/:templateId/skills",
+    async (request, reply) => {
+      const { templateId } = teammateTemplateParamsSchema.parse(request.params);
+      const input = bindTemplateSkillInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.skills.bindTemplateSkill({
+          templateId,
+          value: input,
+          actorPrincipalId: requestActorId(request.headers),
+          administrator: requestIsAdministrator(request.headers),
+        }),
+      );
+    },
+  );
+
+  app.delete(
+    "/api/v1/teammate-templates/:templateId/skills/:bindingId",
+    async (request, reply) => {
+      const { templateId, bindingId } = templateSkillBindingParamsSchema.parse(
+        request.params,
+      );
+      await application.skills.unbindTemplateSkill({
+        templateId,
+        bindingId,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      });
+      return reply.status(204).send();
+    },
+  );
+
+  app.get("/api/v1/delegations", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    return reply.send(await application.delegations.list(actorId));
+  });
+
+  app.post("/api/v1/delegations", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    const input = createDelegationInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(await application.delegations.create(input, actorId));
+  });
+
+  app.get("/api/v1/delegations/:delegationId", async (request, reply) => {
+    const { delegationId } = delegationParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.delegations.get(delegationId, actorId),
+    );
+  });
+
+  app.patch("/api/v1/delegations/:delegationId", async (request, reply) => {
+    const { delegationId } = delegationParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    const input = updateDelegationInputSchema.parse(request.body);
+    return reply.send(
+      await application.delegations.update(delegationId, input, actorId),
+    );
+  });
+
+  for (const action of [
+    "activate",
+    "pause",
+    "resume",
+    "complete",
+    "revoke",
+  ] as const) {
+    app.post(
+      `/api/v1/delegations/:delegationId/${action}`,
+      async (request, reply) => {
+        const { delegationId } = delegationParamsSchema.parse(request.params);
+        const actorId = requestActorId(request.headers);
+        const input = delegationRevisionCommandSchema.parse(request.body);
+        return reply.send(
+          await application.delegations[action](
+            delegationId,
+            actorId,
+            input.expectedRevision,
+            input.reason,
+          ),
+        );
+      },
+    );
+  }
+
+  app.post(
+    "/api/v1/delegations/:delegationId/extend",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const input = extendDelegationInputSchema.parse(request.body);
+      return reply.send(
+        await application.delegations.extend(delegationId, actorId, input),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/delegations/:delegationId/preview",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.delegations.preview(delegationId, actorId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/delegations/:delegationId/action-check",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const input = delegationActionCheckInputSchema.parse(request.body);
+      return reply.send(
+        await application.delegations.checkAction(
+          delegationId,
+          actorId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/delegations/:delegationId/dispatch",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const trace =
+        requestTraces.get(request) ?? createRootTraceContext();
+      return reply.status(201).send(
+        await application.dispatchDelegationRun(
+          delegationId,
+          actorId,
+          trace,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/delegations/:delegationId/context",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.delegations.context(delegationId, actorId),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/delegations/:delegationId/events",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.delegations.events(delegationId, actorId),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/delegations/:delegationId/runs",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.delegations.runs(delegationId, actorId),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/delegations/:delegationId/reports",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const report = await application.delegations.report(
+        delegationId,
+        actorId,
+      );
+      return reply.send({ items: report === undefined ? [] : [report] });
+    },
+  );
+
+  app.post(
+    "/api/v1/delegations/:delegationId/reports/generate",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      await application.delegations.get(delegationId, actorId);
+      return reply.status(201).send(
+        await application.delegations.generateReport(delegationId),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/delegations/:delegationId/reports/retry",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.delegations.retryReport(delegationId, actorId),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/delegations/:delegationId/notifications",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.delegations.notifications(
+          delegationId,
+          actorId,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/delegations/:delegationId/confirmations",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send({
+        items: await application.delegations.confirmations(
+          delegationId,
+          actorId,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/delegations/:delegationId/confirmations",
+    async (request, reply) => {
+      const { delegationId } = delegationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const input = createDelegationConfirmationInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await application.delegations.createConfirmation(
+            delegationId,
+            actorId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/delegations/:delegationId/confirmations/:requestId/decision",
+    async (request, reply) => {
+      const { delegationId, requestId } =
+        delegationConfirmationParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const input = decideDelegationConfirmationInputSchema.parse(request.body);
+      return reply.send(
+        await application.delegations.decideConfirmation(
+          delegationId,
+          requestId,
+          actorId,
+          input,
+        ),
+      );
+    },
+  );
+
   app.get("/api/v1/teammates", async (request, reply) => {
     const query = teammateListQuerySchema.parse(request.query);
     return reply.send({
@@ -2237,6 +3887,44 @@ export function buildApi(options: BuildApiOptions): {
       ),
     );
   });
+
+  app.get("/api/v1/teammates/:teammateId/skills", async (request, reply) => {
+    const { teammateId } = teammateParamsSchema.parse(request.params);
+    return reply.send(
+      await application.skills.getEffectiveSkills({
+        teammateId,
+        actorPrincipalId: requestActorId(request.headers),
+      }),
+    );
+  });
+
+  app.post("/api/v1/teammates/:teammateId/skills", async (request, reply) => {
+    const { teammateId } = teammateParamsSchema.parse(request.params);
+    const input = addInstanceSkillExtensionInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.skills.addInstanceExtension({
+        teammateId,
+        value: input,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      }),
+    );
+  });
+
+  app.delete(
+    "/api/v1/teammates/:teammateId/skills/:extensionId",
+    async (request, reply) => {
+      const { teammateId, extensionId } =
+        teammateSkillExtensionParamsSchema.parse(request.params);
+      await application.skills.removeInstanceExtension({
+        teammateId,
+        extensionId,
+        actorPrincipalId: requestActorId(request.headers),
+        administrator: requestIsAdministrator(request.headers),
+      });
+      return reply.status(204).send();
+    },
+  );
 
   app.post("/api/v1/teammates/:teammateId/status", async (request, reply) => {
     const { teammateId } = teammateParamsSchema.parse(request.params);
@@ -2644,6 +4332,490 @@ export function buildApi(options: BuildApiOptions): {
     });
   });
 
+  app.get("/api/v1/tasks/:id/acceptance-evidence", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    return reply.send(await application.getTaskAcceptanceEvidence(id));
+  });
+
+  app.post(
+    "/api/v1/tasks/:id/acceptance-evidence/confirmations",
+    async (request, reply) => {
+      const { id } = idParamsSchema.parse(request.params);
+      const input = submitTaskAcceptanceEvidenceInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.confirmTaskAcceptanceEvidence(id, input, actorId),
+      );
+    },
+  );
+
+  app.get("/api/v1/tasks/:id/execution-health", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    return reply.send(await application.getTaskExecutionHealth(id));
+  });
+
+  app.post("/api/v1/task-capture/sessions", async (request, reply) => {
+    const input = createTaskCaptureSessionInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.createTaskCaptureSession(
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.get(
+    "/api/v1/task-capture/sessions/:sessionId",
+    async (request, reply) => {
+      const { sessionId } = z
+        .object({ sessionId: z.string().uuid() })
+        .parse(request.params);
+      return reply.send(
+        await application.getTaskCaptureSession(
+          sessionId,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/task-capture/sessions/:sessionId/candidates",
+    async (request, reply) => {
+      const { sessionId } = z
+        .object({ sessionId: z.string().uuid() })
+        .parse(request.params);
+      return reply.send({
+        items: await application.listTaskCaptureCandidates(
+          sessionId,
+          requestActorId(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/task-capture/sessions/:sessionId/candidates",
+    async (request, reply) => {
+      const { sessionId } = z
+        .object({ sessionId: z.string().uuid() })
+        .parse(request.params);
+      const input = createTaskCaptureCandidateInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.addTaskCaptureCandidate(
+          sessionId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/task-capture/candidates/:candidateId/invalidate",
+    async (request, reply) => {
+      const { candidateId } = z
+        .object({ candidateId: z.string().uuid() })
+        .parse(request.params);
+      const input = invalidateTaskCaptureCandidateInputSchema.parse(request.body);
+      return reply.send(
+        await application.invalidateTaskCaptureCandidate(
+          candidateId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/task-capture/sessions/:sessionId/batches",
+    async (request, reply) => {
+      const { sessionId } = z
+        .object({ sessionId: z.string().uuid() })
+        .parse(request.params);
+      const input = createTaskDraftBatchInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.createTaskDraftBatch(
+          sessionId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.patch("/api/v1/task-capture/drafts/:draftId", async (request, reply) => {
+    const { draftId } = z
+      .object({ draftId: z.string().uuid() })
+      .parse(request.params);
+    const input = updateTaskDraftInputSchema.parse(request.body);
+    return reply.send(
+      await application.updateTaskDraft(
+        draftId,
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.get(
+    "/api/v1/task-capture/batches/:batchId",
+    async (request, reply) => {
+      const { batchId } = z
+        .object({ batchId: z.string().uuid() })
+        .parse(request.params);
+      return reply.send(
+        await application.getTaskDraftBatch(
+          batchId,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/task-capture/batches/:batchId/commit",
+    async (request, reply) => {
+      const { batchId } = z
+        .object({ batchId: z.string().uuid() })
+        .parse(request.params);
+      const input = commitTaskDraftBatchInputSchema.parse(request.body);
+      const actorId = requestActorId(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `task-capture-batch:${batchId}`,
+        operation: "task.capture.commit",
+        actorId,
+        payload: input,
+        statusCode: 200,
+        execute: () =>
+          application.commitTaskDraftBatch(batchId, input, actorId),
+      });
+    },
+  );
+
+  app.get("/api/v1/context-policy", async (request, reply) => {
+    const query = z
+      .object({
+        projectId: z.string().uuid().optional(),
+        sceneType: z
+          .enum(["default", "direct-chat", "group", "meeting"])
+          .default("default"),
+      })
+      .parse(request.query);
+    return reply.send(
+      await application.getContextPolicy(
+        query.projectId ?? null,
+        query.sceneType,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.put("/api/v1/context-policy", async (request, reply) => {
+    const input = updateContextPolicyInputSchema.parse(request.body);
+    return reply.send(
+      await application.updateContextPolicy(
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post("/api/v1/context-policy/reset", async (request, reply) => {
+    const input = resetContextPolicyInputSchema.parse(request.body);
+    return reply.send(
+      await application.resetContextPolicy(
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/group-scenes/:sceneId/participants",
+    async (request, reply) => {
+      const { sceneId } = z
+        .object({ sceneId: z.string().trim().min(1).max(240) })
+        .parse(request.params);
+      const input = createGroupSceneParticipantInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.createGroupSceneParticipant(
+          sceneId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/group-scenes/:sceneId/participants",
+    async (request, reply) => {
+      const { sceneId } = z
+        .object({ sceneId: z.string().trim().min(1).max(240) })
+        .parse(request.params);
+      const { projectId } = z
+        .object({ projectId: z.string().uuid() })
+        .parse(request.query);
+      return reply.send({
+        items: await application.listGroupSceneParticipants(
+          sceneId,
+          projectId,
+          requestActorId(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.patch(
+    "/api/v1/group-scenes/:sceneId/participants/:participantBindingId",
+    async (request, reply) => {
+      const { participantBindingId } = z
+        .object({ participantBindingId: z.string().uuid() })
+        .parse(request.params);
+      const input = updateGroupSceneParticipantInputSchema.parse(request.body);
+      return reply.send(
+        await application.updateGroupSceneParticipant(
+          participantBindingId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/group-scenes/:sceneId/sessions",
+    async (request, reply) => {
+      const { sceneId } = z
+        .object({ sceneId: z.string().trim().min(1).max(240) })
+        .parse(request.params);
+      const input = createGroupSceneSessionInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.createGroupSceneSession(
+          sceneId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post("/api/v1/tasks/:id/plans", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = createWorkflowPlanInputSchema.parse(request.body);
+    return reply.status(201).send(
+      await application.createWorkflowPlan(
+        id,
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.get("/api/v1/task-plans/:planId", async (request, reply) => {
+    const { planId } = taskPlanParamsSchema.parse(request.params);
+    return reply.send(
+      await application.getWorkflowPlan(
+        planId,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.get(
+    "/api/v1/projects/:projectId/task-plans",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      return reply.send({
+        items: await application.listWorkflowPlans(
+          projectId,
+          requestActorId(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/task-plans/:planId/versions",
+    async (request, reply) => {
+      const { planId } = taskPlanParamsSchema.parse(request.params);
+      const input = createWorkflowPlanVersionInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.addWorkflowPlanVersion(
+          planId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/task-plans/:planId/versions/:version/diff",
+    async (request, reply) => {
+      const { planId, version } = taskPlanVersionParamsSchema.parse(
+        request.params,
+      );
+      const query = z
+        .object({
+          from: z.coerce.number().int().positive(),
+          to: z.coerce.number().int().positive().optional(),
+        })
+        .parse(request.query);
+      return reply.send(
+        await application.diffWorkflowPlanVersions(
+          planId,
+          query.from,
+          query.to ?? version,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post("/api/v1/task-plans/:planId/approve", async (request, reply) => {
+    const { planId } = taskPlanParamsSchema.parse(request.params);
+    const input = approveWorkflowPlanInputSchema.parse(request.body);
+    return reply.send(
+      await application.approveWorkflowPlan(
+        planId,
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/task-plans/:planId/materialize",
+    async (request, reply) => {
+      const { planId } = taskPlanParamsSchema.parse(request.params);
+      const input = materializeWorkflowPlanInputSchema.parse(request.body);
+      return reply.send(
+        await application.materializeWorkflowPlan(
+          planId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post("/api/v1/task-plans/:planId/finalize", async (request, reply) => {
+    const { planId } = taskPlanParamsSchema.parse(request.params);
+    const input = finalizeWorkflowPlanInputSchema.parse(request.body);
+    return reply.send(
+      await application.finalizeWorkflowPlan(
+        planId,
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post("/api/v1/task-plans/:planId/resume", async (request, reply) => {
+    const { planId } = taskPlanParamsSchema.parse(request.params);
+    const input = resumeWorkflowPlanInputSchema.parse(request.body);
+    return reply.send(
+      await application.resumeWorkflowPlan(
+        planId,
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/projects/:projectId/router-template",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = provisionRouterTemplateInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.provisionRouterTemplate(
+          projectId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/router-agents",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      return reply.send({
+        items: await application.listRouterAgents(
+          projectId,
+          requestActorId(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/router-agents",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = registerRouterAgentInputSchema.parse(request.body);
+      return reply.status(201).send(
+        await application.registerRouterAgent(
+          projectId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/router-gate",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      return reply.send(
+        await application.getRouterFeatureGate(
+          projectId,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.put(
+    "/api/v1/projects/:projectId/router-gate",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = setRouterFeatureGateInputSchema.parse(request.body);
+      return reply.send(
+        await application.setRouterFeatureGate(
+          projectId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/operations/workflow-plans/sweep",
+    async (request, reply) => {
+      if (!requestIsAdministrator(request.headers)) {
+        throw new ApplicationError(
+          "forbidden",
+          "Platform administration is required",
+          403,
+        );
+      }
+      const input = sweepWorkflowPlansInputSchema.parse(request.body ?? {});
+      return reply.send(
+        await application.sweepWorkflowPlans("api:workflow-plan-sweep", input),
+      );
+    },
+  );
+
   app.post("/api/v1/tasks/:id/session-reset", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const input = resetTaskSessionInputSchema.parse(request.body);
@@ -2903,6 +5075,15 @@ export function buildApi(options: BuildApiOptions): {
     });
   });
 
+  app.get("/api/v1/runs/:runId/tool-invocations", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    await application.getRunDetail(runId, actorId);
+    return reply.send({
+      items: await repositories.agentTools.listByRun(runId),
+    });
+  });
+
   app.post(
     "/api/v1/execution-gates/:gateId/decisions",
     async (request, reply) => {
@@ -3154,6 +5335,395 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
+  app.get("/api/v1/workbenches", async (request, reply) => {
+    return reply.send(
+      await workbenchConfiguration.bootstrap(
+        requestWorkbenchMarketActor(request),
+      ),
+    );
+  });
+
+  app.post("/api/v1/workbenches", async (request, reply) => {
+    const input = createWorkbenchInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await workbenchConfiguration.createWorkbench(
+          requestWorkbenchMarketActor(request),
+          input,
+        ),
+      );
+  });
+
+  app.get(
+    "/api/v1/workbenches/:workbenchId",
+    async (request, reply) => {
+      const { workbenchId } = workbenchParamsSchema.parse(request.params);
+      return reply.send(
+        await workbenchConfiguration.getWorkbench(
+          requestWorkbenchMarketActor(request),
+          workbenchId,
+        ),
+      );
+    },
+  );
+
+  app.patch(
+    "/api/v1/workbenches/:workbenchId",
+    async (request, reply) => {
+      const { workbenchId } = workbenchParamsSchema.parse(request.params);
+      const input = updateWorkbenchInputSchema.parse(request.body);
+      return reply.send(
+        await workbenchConfiguration.updateWorkbench(
+          requestWorkbenchMarketActor(request),
+          workbenchId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workbenches/:workbenchId/layouts",
+    async (request, reply) => {
+      const { workbenchId } = workbenchParamsSchema.parse(request.params);
+      const input = createWorkbenchLayoutInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await workbenchConfiguration.createLayout(
+            requestWorkbenchMarketActor(request),
+            workbenchId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.put(
+    "/api/v1/workbenches/:workbenchId/layouts/:layoutId",
+    async (request, reply) => {
+      const { workbenchId, layoutId } = workbenchLayoutParamsSchema.parse(
+        request.params,
+      );
+      const input = saveWorkbenchLayoutInputSchema.parse(request.body);
+      return reply.send(
+        await workbenchConfiguration.saveLayout(
+          requestWorkbenchMarketActor(request),
+          workbenchId,
+          layoutId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workbenches/:workbenchId/layouts/:layoutId/default",
+    async (request, reply) => {
+      const { workbenchId, layoutId } = workbenchLayoutParamsSchema.parse(
+        request.params,
+      );
+      const input = setDefaultWorkbenchLayoutInputSchema.parse(request.body);
+      return reply.send(
+        await workbenchConfiguration.setDefaultLayout(
+          requestWorkbenchMarketActor(request),
+          workbenchId,
+          layoutId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/workbenches/:workbenchId/versions",
+    async (request, reply) => {
+      const { workbenchId } = workbenchParamsSchema.parse(request.params);
+      return reply.send({
+        items: await workbenchConfiguration.listVersions(
+          requestWorkbenchMarketActor(request),
+          workbenchId,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/workbenches/:workbenchId/layouts/:layoutId/versions",
+    async (request, reply) => {
+      const { workbenchId, layoutId } = workbenchLayoutParamsSchema.parse(
+        request.params,
+      );
+      return reply.send({
+        items: await workbenchConfiguration.listLayoutVersions(
+          requestWorkbenchMarketActor(request),
+          workbenchId,
+          layoutId,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/workbenches/:workbenchId/panels/:panelInstanceId/data",
+    async (request, reply) => {
+      const { workbenchId, panelInstanceId } = workbenchPanelParamsSchema.parse(
+        request.params,
+      );
+      const { projectId } = workbenchPanelDataQuerySchema.parse(request.query);
+      return reply.send(
+        await workbenchConfiguration.getPanelData(
+          requestWorkbenchMarketActor(request),
+          workbenchId,
+          panelInstanceId,
+          projectId,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/market/assets", async (request, reply) => {
+    const { kind } = marketAssetListQuerySchema.parse(request.query);
+    return reply.send({
+      items: await market.listAssets(
+        requestWorkbenchMarketActor(request),
+        kind,
+      ),
+    });
+  });
+
+  app.post("/api/v1/market/assets", async (request, reply) => {
+    const input = createMarketAssetInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await market.createAsset(
+          requestWorkbenchMarketActor(request),
+          input,
+        ),
+      );
+  });
+
+  app.get("/api/v1/market/assets/:assetId", async (request, reply) => {
+    const { assetId } = marketAssetParamsSchema.parse(request.params);
+    return reply.send(
+      await market.getAsset(
+        requestWorkbenchMarketActor(request),
+        assetId,
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/market/assets/:assetId/versions",
+    async (request, reply) => {
+      const { assetId } = marketAssetParamsSchema.parse(request.params);
+      const input = publishMarketAssetVersionInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await market.publishVersion(
+            requestWorkbenchMarketActor(request),
+            assetId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/market/assets/:assetId/versions/:version/status",
+    async (request, reply) => {
+      const { assetId, version } = marketAssetVersionParamsSchema.parse(
+        request.params,
+      );
+      const input = setMarketAssetVersionStatusInputSchema.parse(request.body);
+      return reply.send(
+        await market.setVersionStatus(
+          requestWorkbenchMarketActor(request),
+          assetId,
+          version,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/market/assets/:assetId/status",
+    async (request, reply) => {
+      const { assetId } = marketAssetParamsSchema.parse(request.params);
+      const input = setMarketAssetStatusInputSchema.parse(request.body);
+      return reply.send(
+        await market.setAssetStatus(
+          requestWorkbenchMarketActor(request),
+          assetId,
+          input,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/market/entitlements", async (request, reply) => {
+    const { all } = z
+      .object({ all: z.enum(["1", "true"]).optional() })
+      .parse(request.query);
+    return reply.send({
+      items: await market.listEntitlements(
+        requestWorkbenchMarketActor(request),
+        all !== undefined,
+      ),
+    });
+  });
+
+  app.post("/api/v1/market/entitlements", async (request, reply) => {
+    const input = grantMarketEntitlementInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await market.grantEntitlement(
+          requestWorkbenchMarketActor(request),
+          input,
+        ),
+      );
+  });
+
+  app.delete(
+    "/api/v1/market/entitlements/:entitlementId",
+    async (request, reply) => {
+      const { entitlementId } = marketEntitlementParamsSchema.parse(
+        request.params,
+      );
+      return reply.send(
+        await market.revokeEntitlement(
+          requestWorkbenchMarketActor(request),
+          entitlementId,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/market/installations", async (request, reply) => {
+    return reply.send({
+      items: await market.listInstallations(
+        requestWorkbenchMarketActor(request),
+      ),
+    });
+  });
+
+  app.post("/api/v1/market/installations", async (request, reply) => {
+    const actor = requestWorkbenchMarketActor(request);
+    const input = installMarketAssetInputSchema.parse(request.body);
+    const key = requireIdempotencyKey(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `market:${actor.principalId}:install`,
+      operation: "market.asset.install",
+      actorId: actor.principalId,
+      payload: input,
+      statusCode: 201,
+      execute: () => market.install(actor, input, key),
+    });
+  });
+
+  app.post("/api/v1/market/installations/rollback", async (request, reply) => {
+    const actor = requestWorkbenchMarketActor(request);
+    const input = rollbackMarketAssetInputSchema.parse(request.body);
+    const key = requireIdempotencyKey(request.headers);
+    return idempotentRoute({
+      request,
+      reply,
+      scope: `market:${actor.principalId}:rollback`,
+      operation: "market.asset.rollback",
+      actorId: actor.principalId,
+      payload: input,
+      statusCode: 200,
+      execute: () =>
+        market.rollback(
+          actor,
+          {
+            assetId: input.assetId,
+            version: input.version,
+            config: {},
+          },
+          key,
+        ),
+    });
+  });
+
+  app.delete(
+    "/api/v1/market/installations/:assetId",
+    async (request, reply) => {
+      const { assetId } = marketInstallationParamsSchema.parse(request.params);
+      return reply.send(
+        await market.uninstall(
+          requestWorkbenchMarketActor(request),
+          assetId,
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/market/templates", async (request, reply) => {
+    return reply.send({
+      items: await market.listTemplates(
+        requestWorkbenchMarketActor(request),
+      ),
+    });
+  });
+
+  app.get(
+    "/api/v1/market/templates/:templateId",
+    async (request, reply) => {
+      const { templateId } = marketTemplateParamsSchema.parse(request.params);
+      return reply.send(
+        await market.getTemplate(
+          requestWorkbenchMarketActor(request),
+          templateId,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/market/templates/:templateId/copy",
+    async (request, reply) => {
+      const actor = requestWorkbenchMarketActor(request);
+      const { templateId } = marketTemplateParamsSchema.parse(request.params);
+      const input = copyMarketTemplateInputSchema.parse({
+        ...(request.body as Record<string, unknown>),
+        templateId,
+      });
+      const key = requireIdempotencyKey(request.headers);
+      return idempotentRoute({
+        request,
+        reply,
+        scope: `market:${actor.principalId}:template-copy`,
+        operation: "market.template.copy",
+        actorId: actor.principalId,
+        payload: input,
+        statusCode: 201,
+        execute: () =>
+          market.copyTemplate(actor, input, key),
+      });
+    },
+  );
+
+  app.delete(
+    "/api/v1/market/templates/:templateId/copy",
+    async (request, reply) => {
+      const { templateId } = marketTemplateParamsSchema.parse(request.params);
+      return reply.send(
+        await market.uninstallTemplateCopy(
+          requestWorkbenchMarketActor(request),
+          templateId,
+        ),
+      );
+    },
+  );
+
   app.get("/api/v1/workbench/dashboard", async (request, reply) => {
     const actorId = requestActorId(request.headers);
     return reply.send(await application.getWorkbenchDashboard(actorId));
@@ -3275,6 +5845,13 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.getWorkbench());
   });
 
+  app.get("/api/v1/workflows/platform-templates", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    return reply.send({
+      items: await application.listPlatformWorkflowTemplates(actorId),
+    });
+  });
+
   app.get("/api/v1/workflows", async (request, reply) => {
     const { projectId } = listTasksQuerySchema.parse(request.query);
     if (projectId === undefined) {
@@ -3299,6 +5876,74 @@ export function buildApi(options: BuildApiOptions): {
     const input = createWorkflowInputSchema.parse(request.body);
     return reply.status(201).send(await application.createWorkflow(input));
   });
+
+  app.get("/api/v1/workflows/:workflowId", async (request, reply) => {
+    const { workflowId } = workflowParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    return reply.send(
+      await application.getWorkflowDefinition(workflowId, actorId),
+    );
+  });
+
+  app.patch("/api/v1/workflows/:workflowId", async (request, reply) => {
+    const { workflowId } = workflowParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    const input = updateWorkflowDefinitionInputSchema.parse(request.body);
+    return reply.send(
+      await application.updateWorkflowDefinition(
+        workflowId,
+        input,
+        actorId,
+        requestIsAdministrator(request.headers),
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/workflows/:workflowId/publish",
+    async (request, reply) => {
+      const { workflowId } = workflowParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.publishWorkflowDefinition(
+          workflowId,
+          actorId,
+          requestIsAdministrator(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflows/:workflowId/unpublish",
+    async (request, reply) => {
+      const { workflowId } = workflowParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      return reply.send(
+        await application.unpublishWorkflowDefinition(
+          workflowId,
+          actorId,
+          requestIsAdministrator(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/workflows/:workflowId/instances/preflight",
+    async (request, reply) => {
+      const { workflowId } = workflowParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const input = workflowInstancePreflightInputSchema.parse(request.body);
+      return reply.send(
+        await application.preflightWorkflowInstance(
+          workflowId,
+          actorId,
+          input,
+        ),
+      );
+    },
+  );
 
   app.post("/api/v1/workflows/:workflowId/start", async (request, reply) => {
     const { workflowId } = workflowParamsSchema.parse(request.params);
@@ -3341,6 +5986,34 @@ export function buildApi(options: BuildApiOptions): {
     const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
     return reply.send(await application.getWorkflowInstance(instanceId));
   });
+
+  app.get(
+    "/api/v1/workflow-instances/:instanceId/bindings",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      return reply.send(
+        await application.getWorkflowInstanceBindings(instanceId),
+      );
+    },
+  );
+
+  app.put(
+    "/api/v1/workflow-instances/:instanceId/bindings",
+    async (request, reply) => {
+      const { instanceId } = workflowInstanceParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const input = replaceWorkflowInstanceBindingsInputSchema.parse(
+        request.body,
+      );
+      return reply.send(
+        await application.replaceWorkflowInstanceBindings(
+          instanceId,
+          input,
+          actorId,
+        ),
+      );
+    },
+  );
 
   app.get(
     "/api/v1/workflow-instances/:instanceId/detail",
@@ -4102,6 +6775,40 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.getMeetingAiPolicy(meetingId, actorId));
   });
 
+  app.get(
+    "/api/v1/meetings/:meetingId/ai-participants",
+    async (request, reply) => {
+      const { meetingId } = meetingParamsSchema.parse(request.params);
+      return reply.send({
+        items: await application.listMeetingAiParticipants(
+          meetingId,
+          requestActorId(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.put(
+    "/api/v1/meetings/:meetingId/ai-participants/:agentId",
+    async (request, reply) => {
+      const { meetingId, agentId } = z
+        .object({
+          meetingId: z.string().uuid(),
+          agentId: z.string().uuid(),
+        })
+        .parse(request.params);
+      const input = updateMeetingAiParticipantInputSchema.parse(request.body);
+      return reply.send(
+        await application.updateMeetingAiParticipant(
+          meetingId,
+          agentId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
   app.put("/api/v1/meetings/:meetingId/ai-policy", async (request, reply) => {
     const { meetingId } = meetingParamsSchema.parse(request.params);
     const input = updateMeetingAiPolicyInputSchema.parse(request.body);
@@ -4369,5 +7076,12 @@ export function buildApi(options: BuildApiOptions): {
     if (options.database === undefined) await database.close();
   });
 
-  return { app, database };
+  return {
+    app,
+    database,
+    sharedSpace,
+    dataFabric,
+    workbenchConfiguration,
+    market,
+  };
 }
