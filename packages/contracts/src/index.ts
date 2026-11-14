@@ -20,3 +20,5 @@ export * from "./task-execution-depth.js";
 export * from "./runtime-economics.js";
 export * from "./teammate.js";
 export * from "./delegation.js";
+export * from "./execution-decision.js";
+export * from "./task-execution-evidence.js";

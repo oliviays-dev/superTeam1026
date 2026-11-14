@@ -27,6 +27,8 @@ import {
   ACTION_TICKET_SCHEMA_SQL,
   SCENE_CONTEXT_SCHEMA_SQL,
   SHARED_SPACE_SCHEMA_SQL,
+  TASK_EXECUTION_EVIDENCE_BACKFILL_SQL,
+  TASK_EXECUTION_EVIDENCE_SCHEMA_SQL,
   TASK_EXECUTION_POLICY_SCHEMA_SQL,
   TASK_EXECUTION_DEPTH_SCHEMA_SQL,
   WORKFLOW_GOVERNANCE_SCHEMA_SQL,
@@ -71,7 +73,12 @@ const migrations = [
   { version: 32, sql: IDENTITY_ADMINISTRATION_SCHEMA_SQL },
   { version: 33, sql: SHARED_SPACE_SCHEMA_SQL },
   { version: 34, sql: HUMAN_AVATAR_DELEGATION_SCHEMA_SQL },
+  { version: 35, sql: TASK_EXECUTION_EVIDENCE_SCHEMA_SQL },
+  { version: 36, sql: TASK_EXECUTION_EVIDENCE_BACKFILL_SQL },
 ] as const;
+
+export const LATEST_MIGRATION_VERSION =
+  migrations[migrations.length - 1]!.version;
 
 export async function migrate(
   database: Database,

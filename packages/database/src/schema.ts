@@ -5566,3 +5566,287 @@ CREATE INDEX IF NOT EXISTS scene_context_receipts_delegation_idx
   ON scene_context_receipts(delegation_id, created_at DESC)
   WHERE delegation_id IS NOT NULL;
 `;
+
+export const TASK_EXECUTION_EVIDENCE_SCHEMA_SQL = `
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
+CREATE TABLE IF NOT EXISTS feature_flag_settings (
+  flag_key TEXT NOT NULL CHECK (length(btrim(flag_key)) BETWEEN 1 AND 160),
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('platform', 'project')),
+  scope_id TEXT NOT NULL CHECK (length(btrim(scope_id)) BETWEEN 1 AND 180),
+  mode TEXT NOT NULL CHECK (mode IN ('off', 'observe', 'enforce', 'on')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  updated_by TEXT NOT NULL
+    CHECK (length(btrim(updated_by)) BETWEEN 1 AND 180),
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (flag_key, scope_type, scope_id)
+);
+
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('task.evidence_review', 'platform', 'platform', 'observe', 1,
+   'system:migration', NOW()),
+  ('task.anomaly', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS task_acceptance_items (
+  id UUID PRIMARY KEY,
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  requirement TEXT NOT NULL
+    CHECK (length(btrim(requirement)) BETWEEN 1 AND 1000),
+  required BOOLEAN NOT NULL DEFAULT TRUE,
+  current_revision INTEGER NOT NULL DEFAULT 1
+    CHECK (current_revision > 0),
+  content_digest TEXT NOT NULL
+    CHECK (content_digest ~ '^[a-f0-9]{64}$'),
+  deprecated_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS task_acceptance_items_current_position_idx
+  ON task_acceptance_items(task_id, position)
+  WHERE deprecated_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS task_acceptance_items_task_idx
+  ON task_acceptance_items(task_id, deprecated_at, position);
+
+CREATE TABLE IF NOT EXISTS task_acceptance_item_revisions (
+  id UUID PRIMARY KEY,
+  acceptance_item_id UUID NOT NULL
+    REFERENCES task_acceptance_items(id) ON DELETE RESTRICT,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  requirement TEXT NOT NULL
+    CHECK (length(btrim(requirement)) BETWEEN 1 AND 1000),
+  required BOOLEAN NOT NULL,
+  content_digest TEXT NOT NULL
+    CHECK (content_digest ~ '^[a-f0-9]{64}$'),
+  superseded_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (acceptance_item_id, revision)
+);
+
+CREATE INDEX IF NOT EXISTS task_acceptance_revisions_item_idx
+  ON task_acceptance_item_revisions(acceptance_item_id, revision DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_acceptance_revision_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.superseded_at IS NOT NULL
+     AND OLD.superseded_at IS NULL
+     AND NEW.id = OLD.id
+     AND NEW.acceptance_item_id = OLD.acceptance_item_id
+     AND NEW.revision = OLD.revision
+     AND NEW.requirement = OLD.requirement
+     AND NEW.required = OLD.required
+     AND NEW.content_digest = OLD.content_digest
+     AND NEW.created_at = OLD.created_at THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'task acceptance revisions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS task_acceptance_revisions_immutable
+  ON task_acceptance_item_revisions;
+CREATE TRIGGER task_acceptance_revisions_immutable
+BEFORE UPDATE OR DELETE ON task_acceptance_item_revisions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_acceptance_revision_mutation();
+
+CREATE TABLE IF NOT EXISTS task_acceptance_confirmations (
+  id UUID PRIMARY KEY,
+  acceptance_item_id UUID NOT NULL
+    REFERENCES task_acceptance_items(id) ON DELETE RESTRICT,
+  acceptance_item_revision INTEGER NOT NULL
+    CHECK (acceptance_item_revision > 0),
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  run_attempt INTEGER NOT NULL CHECK (run_attempt > 0),
+  confirmed_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(confirmed_by_principal_id)) BETWEEN 1 AND 180),
+  confirmation_tool TEXT NOT NULL
+    CHECK (confirmation_tool = 'task_submit_deliverable'),
+  evidence_refs JSONB NOT NULL
+    CHECK (
+      jsonb_typeof(evidence_refs) = 'array'
+      AND jsonb_array_length(evidence_refs) > 0
+    ),
+  confirmed_at TIMESTAMPTZ NOT NULL,
+  superseded_at TIMESTAMPTZ,
+  superseded_reason TEXT
+    CHECK (superseded_reason IS NULL OR length(superseded_reason) <= 2000),
+  CHECK (
+    (superseded_at IS NULL AND superseded_reason IS NULL)
+    OR (superseded_at IS NOT NULL AND superseded_reason IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS task_acceptance_confirmations_current_idx
+  ON task_acceptance_confirmations(acceptance_item_id, run_id)
+  WHERE superseded_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS task_acceptance_confirmations_task_idx
+  ON task_acceptance_confirmations(task_id, run_id, superseded_at);
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_acceptance_confirmation_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'task acceptance confirmations cannot be deleted';
+  END IF;
+  IF NEW.id <> OLD.id
+     OR NEW.acceptance_item_id <> OLD.acceptance_item_id
+     OR NEW.acceptance_item_revision <> OLD.acceptance_item_revision
+     OR NEW.task_id <> OLD.task_id
+     OR NEW.run_id <> OLD.run_id
+     OR NEW.run_attempt <> OLD.run_attempt
+     OR NEW.confirmed_by_principal_id <> OLD.confirmed_by_principal_id
+     OR NEW.confirmation_tool <> OLD.confirmation_tool
+     OR NEW.evidence_refs <> OLD.evidence_refs
+     OR NEW.confirmed_at <> OLD.confirmed_at THEN
+    RAISE EXCEPTION 'task acceptance confirmation facts are immutable';
+  END IF;
+  IF OLD.superseded_at IS NOT NULL
+     AND (
+       NEW.superseded_at IS DISTINCT FROM OLD.superseded_at
+       OR NEW.superseded_reason IS DISTINCT FROM OLD.superseded_reason
+     ) THEN
+    RAISE EXCEPTION 'superseded acceptance confirmations are immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS task_acceptance_confirmations_guard
+  ON task_acceptance_confirmations;
+CREATE TRIGGER task_acceptance_confirmations_guard
+BEFORE UPDATE OR DELETE ON task_acceptance_confirmations
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_acceptance_confirmation_mutation();
+
+CREATE TABLE IF NOT EXISTS task_execution_anomalies (
+  id UUID PRIMARY KEY,
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  run_id UUID REFERENCES runs(id) ON DELETE RESTRICT,
+  run_attempt INTEGER CHECK (run_attempt IS NULL OR run_attempt > 0),
+  code TEXT NOT NULL CHECK (code IN (
+    'run_failed',
+    'run_timeout',
+    'run_interrupted',
+    'tool_failed',
+    'plan_failed',
+    'dependency_unmet',
+    'runtime_unavailable',
+    'missing_acceptance',
+    'missing_execution_evidence'
+  )),
+  message TEXT NOT NULL CHECK (length(btrim(message)) BETWEEN 1 AND 4000),
+  event_id UUID REFERENCES run_events(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'cleared')),
+  occurrence INTEGER NOT NULL DEFAULT 1 CHECK (occurrence > 0),
+  detected_at TIMESTAMPTZ NOT NULL,
+  cleared_at TIMESTAMPTZ,
+  cleared_reason TEXT
+    CHECK (cleared_reason IS NULL OR length(cleared_reason) <= 4000),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  CHECK (
+    (status = 'active' AND cleared_at IS NULL AND cleared_reason IS NULL)
+    OR (
+      status = 'cleared'
+      AND cleared_at IS NOT NULL
+      AND cleared_reason IS NOT NULL
+    )
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS task_execution_anomalies_active_idx
+  ON task_execution_anomalies(
+    task_id,
+    COALESCE(run_id, '00000000-0000-0000-0000-000000000000'::uuid),
+    code
+  )
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS task_execution_anomalies_task_idx
+  ON task_execution_anomalies(task_id, status, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS task_execution_anomalies_run_idx
+  ON task_execution_anomalies(run_id, run_attempt, code)
+  WHERE run_id IS NOT NULL;
+`;
+
+export const TASK_EXECUTION_EVIDENCE_BACKFILL_SQL = `
+INSERT INTO task_acceptance_items (
+  id, task_id, position, requirement, required, current_revision,
+  content_digest, deprecated_at, created_at, updated_at
+)
+SELECT
+  gen_random_uuid(),
+  task.id,
+  item.position - 1,
+  item.requirement,
+  TRUE,
+  1,
+  encode(public.digest(item.requirement, 'sha256'), 'hex'),
+  NULL,
+  NOW(),
+  NOW()
+FROM tasks AS task
+CROSS JOIN LATERAL jsonb_array_elements_text(task.acceptance)
+  WITH ORDINALITY AS item(requirement, position)
+WHERE jsonb_typeof(task.acceptance) = 'array'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM task_acceptance_items AS existing
+    WHERE existing.task_id = task.id
+      AND existing.deprecated_at IS NULL
+  );
+
+INSERT INTO task_acceptance_item_revisions (
+  id, acceptance_item_id, revision, requirement, required,
+  content_digest, superseded_at, created_at
+)
+SELECT
+  gen_random_uuid(),
+  item.id,
+  item.current_revision,
+  item.requirement,
+  item.required,
+  item.content_digest,
+  NULL,
+  item.created_at
+FROM task_acceptance_items AS item
+ON CONFLICT (acceptance_item_id, revision) DO NOTHING;
+
+DO $$
+DECLARE
+  mismatch_count INTEGER;
+BEGIN
+  SELECT COUNT(*)
+  INTO mismatch_count
+  FROM tasks AS task
+  WHERE jsonb_typeof(task.acceptance) = 'array'
+    AND jsonb_array_length(task.acceptance) <> (
+      SELECT COUNT(*)
+      FROM task_acceptance_items AS item
+      WHERE item.task_id = task.id
+        AND item.deprecated_at IS NULL
+    );
+
+  IF mismatch_count > 0 THEN
+    RAISE EXCEPTION
+      'task acceptance backfill validation failed for % tasks',
+      mismatch_count;
+  END IF;
+END;
+$$;

@@ -93,6 +93,11 @@ import { TeammateRepository } from "./teammate-repository.js";
 import { MeetingCollaborationRepository } from "./meeting-collaboration-repository.js";
 import { SharedSpaceRepository } from "./shared-space-repository.js";
 import { DelegationRepository } from "./delegation-repository.js";
+import {
+  FeatureFlagRepository,
+  TaskAcceptanceRepository,
+  TaskExecutionAnomalyRepository,
+} from "./task-execution-evidence-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2216,6 +2221,9 @@ export class PlatformRepositories {
   readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
   readonly sharedSpace: SharedSpaceRepository;
   readonly delegations: DelegationRepository;
+  readonly featureFlags: FeatureFlagRepository;
+  readonly taskAcceptance: TaskAcceptanceRepository;
+  readonly taskAnomalies: TaskExecutionAnomalyRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2269,5 +2277,8 @@ export class PlatformRepositories {
       this.actionTickets,
     );
     this.delegations = new DelegationRepository(database);
+    this.featureFlags = new FeatureFlagRepository(database);
+    this.taskAcceptance = new TaskAcceptanceRepository(database);
+    this.taskAnomalies = new TaskExecutionAnomalyRepository(database);
   }
 }

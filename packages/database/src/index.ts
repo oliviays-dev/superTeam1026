@@ -39,7 +39,7 @@ export {
   WorkbenchRepository,
   WorkflowRepository,
 } from "./collaboration-repositories.js";
-export { migrate } from "./migrate.js";
+export { LATEST_MIGRATION_VERSION, migrate } from "./migrate.js";
 export {
   MeetingDecisionsRepository,
   type CreateMeetingActionItemRepositoryInput,
@@ -190,3 +190,10 @@ export {
   delegationContextHash,
   type DelegationTransitionResult,
 } from "./delegation-repository.js";
+export {
+  FeatureFlagRepository,
+  FeatureFlagRepositoryError,
+  TaskAcceptanceRepository,
+  TaskAcceptanceRepositoryError,
+  TaskExecutionAnomalyRepository,
+} from "./task-execution-evidence-repository.js";
