@@ -4699,3 +4699,870 @@ WHERE length(btrim(workspace_ref.workspace_id)) BETWEEN 1 AND 180
   AND workspace_ref.workspace_id ~ '^[a-zA-Z0-9][a-zA-Z0-9_.:-]*$'
 ON CONFLICT (id) DO NOTHING;
 `;
+
+export const SHARED_SPACE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS shared_space_roots (
+  workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE RESTRICT,
+  storage_prefix TEXT NOT NULL UNIQUE
+    CHECK (storage_prefix ~ '^shared/[a-f0-9]{32}$'),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  default_read BOOLEAN NOT NULL DEFAULT TRUE,
+  default_write BOOLEAN NOT NULL DEFAULT FALSE CHECK (default_write = FALSE),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE TABLE IF NOT EXISTS shared_space_policies (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES shared_space_roots(workspace_id)
+    ON DELETE RESTRICT,
+  subject_kind TEXT NOT NULL
+    CHECK (subject_kind IN ('principal', 'workspace-role')),
+  subject_id TEXT NOT NULL CHECK (length(btrim(subject_id)) BETWEEN 1 AND 180),
+  path_pattern TEXT NOT NULL
+    CHECK (
+      length(path_pattern) BETWEEN 1 AND 500
+      AND path_pattern !~ '[\\\\\\x00-\\x1f\\x7f]'
+      AND left(path_pattern, 1) <> '/'
+      AND path_pattern !~ '(^|/)\\.\\.?(/|$)'
+    ),
+  permissions TEXT[] NOT NULL
+    CHECK (
+      cardinality(permissions) > 0
+      AND permissions <@ ARRAY['list', 'read', 'write', 'delete']::text[]
+    ),
+  effect TEXT NOT NULL CHECK (effect IN ('allow', 'deny')),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'revoked')),
+  expires_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL REFERENCES principals(id),
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (expires_at IS NULL OR expires_at > created_at),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS shared_space_policies_workspace_idx
+  ON shared_space_policies(workspace_id, status, subject_kind, subject_id);
+
+CREATE TABLE IF NOT EXISTS shared_space_entries (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES shared_space_roots(workspace_id)
+    ON DELETE RESTRICT,
+  path TEXT NOT NULL
+    CHECK (
+      length(path) BETWEEN 1 AND 500
+      AND path !~ '[\\\\\\x00-\\x1f\\x7f]'
+      AND left(path, 1) <> '/'
+      AND path !~ '(^|/)\\.\\.?(/|$)'
+    ),
+  kind TEXT NOT NULL CHECK (kind IN ('file', 'directory')),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  current_version INTEGER NOT NULL DEFAULT 0 CHECK (current_version >= 0),
+  sha256 TEXT CHECK (sha256 IS NULL OR sha256 ~ '^[a-f0-9]{64}$'),
+  size BIGINT NOT NULL DEFAULT 0 CHECK (size >= 0),
+  mime_type TEXT CHECK (
+    mime_type IS NULL OR length(mime_type) BETWEEN 1 AND 180
+  ),
+  storage_key TEXT CHECK (
+    storage_key IS NULL
+    OR (
+      length(storage_key) BETWEEN 1 AND 800
+      AND storage_key !~ '[\\\\\\x00-\\x1f\\x7f]'
+      AND left(storage_key, 1) <> '/'
+    )
+  ),
+  created_by TEXT NOT NULL REFERENCES principals(id),
+  updated_by TEXT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    (kind = 'directory' AND current_version = 0 AND sha256 IS NULL
+      AND storage_key IS NULL AND mime_type IS NULL AND size = 0)
+    OR
+    (kind = 'file' AND current_version > 0 AND sha256 IS NOT NULL
+      AND storage_key IS NOT NULL AND mime_type IS NOT NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS shared_space_entries_workspace_path_idx
+  ON shared_space_entries(workspace_id, lower(path));
+
+CREATE INDEX IF NOT EXISTS shared_space_entries_directory_idx
+  ON shared_space_entries(workspace_id, status, kind, path);
+
+CREATE TABLE IF NOT EXISTS shared_space_versions (
+  id UUID PRIMARY KEY,
+  entry_id UUID NOT NULL REFERENCES shared_space_entries(id)
+    ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL REFERENCES shared_space_roots(workspace_id)
+    ON DELETE RESTRICT,
+  path TEXT NOT NULL CHECK (length(path) BETWEEN 1 AND 500),
+  version INTEGER NOT NULL CHECK (version > 0),
+  sha256 TEXT NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),
+  size BIGINT NOT NULL CHECK (size >= 0),
+  mime_type TEXT NOT NULL CHECK (length(mime_type) BETWEEN 1 AND 180),
+  storage_key TEXT NOT NULL CHECK (
+    length(storage_key) BETWEEN 1 AND 800
+    AND storage_key !~ '[\\\\\\x00-\\x1f\\x7f]'
+    AND left(storage_key, 1) <> '/'
+  ),
+  created_by TEXT NOT NULL REFERENCES principals(id),
+  source_run_id UUID REFERENCES runs(id) ON DELETE SET NULL,
+  ticket_id UUID REFERENCES action_tickets(id) ON DELETE SET NULL,
+  gate_id UUID REFERENCES execution_gate_requests(gate_id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (entry_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS shared_space_versions_workspace_idx
+  ON shared_space_versions(workspace_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_shared_space_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'shared space versions are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS shared_space_versions_append_only
+  ON shared_space_versions;
+CREATE TRIGGER shared_space_versions_append_only
+BEFORE UPDATE OR DELETE ON shared_space_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_shared_space_version_mutation();
+
+CREATE TABLE IF NOT EXISTS shared_space_locks (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES shared_space_roots(workspace_id)
+    ON DELETE RESTRICT,
+  path TEXT NOT NULL CHECK (length(path) BETWEEN 1 AND 500),
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id),
+  owner_session_id TEXT CHECK (
+    owner_session_id IS NULL OR length(owner_session_id) BETWEEN 1 AND 240
+  ),
+  run_id UUID REFERENCES runs(id) ON DELETE SET NULL,
+  mode TEXT NOT NULL CHECK (mode IN ('exclusive', 'shared')),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'released', 'expired')),
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  acquired_at TIMESTAMPTZ NOT NULL,
+  released_at TIMESTAMPTZ,
+  CHECK (lease_expires_at > acquired_at),
+  CHECK (
+    (status IN ('released', 'expired') AND released_at IS NOT NULL)
+    OR (status = 'active' AND released_at IS NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS shared_space_locks_active_path_idx
+  ON shared_space_locks(workspace_id, lower(path))
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS shared_space_locks_lease_idx
+  ON shared_space_locks(status, lease_expires_at);
+
+CREATE TABLE IF NOT EXISTS shared_space_claims (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES shared_space_roots(workspace_id)
+    ON DELETE RESTRICT,
+  path TEXT NOT NULL CHECK (length(path) BETWEEN 1 AND 500),
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id),
+  owner_session_id TEXT NOT NULL CHECK (
+    length(owner_session_id) BETWEEN 1 AND 240
+  ),
+  run_id UUID REFERENCES runs(id) ON DELETE SET NULL,
+  note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 500),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'released', 'expired')),
+  lease_expires_at TIMESTAMPTZ NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+  claimed_at TIMESTAMPTZ NOT NULL,
+  released_at TIMESTAMPTZ,
+  CHECK (lease_expires_at > claimed_at),
+  CHECK (
+    (status IN ('released', 'expired') AND released_at IS NOT NULL)
+    OR (status = 'active' AND released_at IS NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS shared_space_claims_active_path_idx
+  ON shared_space_claims(workspace_id, lower(path))
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS shared_space_claims_lease_idx
+  ON shared_space_claims(status, lease_expires_at);
+
+CREATE TABLE IF NOT EXISTS shared_space_write_requests (
+  id UUID PRIMARY KEY,
+  scope TEXT NOT NULL CHECK (scope IN ('workspace', 'global')),
+  operation TEXT NOT NULL DEFAULT 'write'
+    CHECK (operation IN ('write', 'move', 'delete')),
+  source_workspace_id TEXT NOT NULL REFERENCES workspaces(id)
+    ON DELETE RESTRICT,
+  actor_principal_id TEXT NOT NULL REFERENCES principals(id),
+  target_path TEXT NOT NULL CHECK (length(target_path) BETWEEN 1 AND 500),
+  source_entry_id UUID REFERENCES shared_space_entries(id) ON DELETE SET NULL,
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 240),
+  mime_type TEXT NOT NULL CHECK (length(mime_type) BETWEEN 1 AND 180),
+  size BIGINT NOT NULL CHECK (size >= 0),
+  sha256 TEXT NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),
+  storage_key TEXT NOT NULL CHECK (
+    length(storage_key) BETWEEN 1 AND 800
+    AND left(storage_key, 1) <> '/'
+  ),
+  purpose TEXT NOT NULL CHECK (length(btrim(purpose)) BETWEEN 3 AND 1000),
+  expected_version INTEGER NOT NULL CHECK (expected_version >= 0),
+  policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'consumed')),
+  run_id UUID REFERENCES runs(id) ON DELETE RESTRICT,
+  scene_session_id UUID REFERENCES scene_sessions(id) ON DELETE RESTRICT,
+  ticket_id UUID REFERENCES action_tickets(id) ON DELETE RESTRICT,
+  gate_id UUID REFERENCES execution_gate_requests(gate_id) ON DELETE RESTRICT,
+  idempotency_key TEXT NOT NULL CHECK (
+    length(btrim(idempotency_key)) BETWEEN 1 AND 240
+  ),
+  requested_at TIMESTAMPTZ NOT NULL,
+  expires_at TIMESTAMPTZ NOT NULL,
+  decided_by_principal_id TEXT REFERENCES principals(id) ON DELETE SET NULL,
+  decision_reason TEXT CHECK (
+    decision_reason IS NULL OR length(decision_reason) <= 2000
+  ),
+  decided_at TIMESTAMPTZ,
+  consumed_at TIMESTAMPTZ,
+  result_entry_id UUID REFERENCES shared_space_entries(id) ON DELETE SET NULL,
+  result_version INTEGER CHECK (result_version IS NULL OR result_version > 0),
+  UNIQUE (source_workspace_id, actor_principal_id, idempotency_key),
+  CHECK (expires_at > requested_at),
+  CHECK (
+    (scope = 'workspace' AND run_id IS NOT NULL AND scene_session_id IS NOT NULL
+      AND ticket_id IS NOT NULL AND gate_id IS NOT NULL)
+    OR scope = 'global'
+  ),
+  CHECK (
+    (status = 'pending' AND decided_at IS NULL AND consumed_at IS NULL)
+    OR (status = 'approved' AND decided_at IS NOT NULL AND consumed_at IS NULL)
+    OR (status = 'rejected' AND decided_at IS NOT NULL AND consumed_at IS NULL)
+    OR (status = 'expired' AND consumed_at IS NULL)
+    OR (status = 'consumed' AND decided_at IS NOT NULL
+      AND consumed_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS shared_space_write_requests_status_idx
+  ON shared_space_write_requests(scope, status, expires_at);
+
+CREATE INDEX IF NOT EXISTS shared_space_write_requests_workspace_idx
+  ON shared_space_write_requests(source_workspace_id, requested_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_shared_space_write_request()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.id IS DISTINCT FROM NEW.id
+    OR OLD.scope IS DISTINCT FROM NEW.scope
+    OR OLD.operation IS DISTINCT FROM NEW.operation
+    OR OLD.source_workspace_id IS DISTINCT FROM NEW.source_workspace_id
+    OR OLD.actor_principal_id IS DISTINCT FROM NEW.actor_principal_id
+    OR OLD.target_path IS DISTINCT FROM NEW.target_path
+    OR OLD.source_entry_id IS DISTINCT FROM NEW.source_entry_id
+    OR OLD.storage_key IS DISTINCT FROM NEW.storage_key
+    OR OLD.sha256 IS DISTINCT FROM NEW.sha256
+    OR OLD.idempotency_key IS DISTINCT FROM NEW.idempotency_key
+    OR OLD.requested_at IS DISTINCT FROM NEW.requested_at
+    OR OLD.expires_at IS DISTINCT FROM NEW.expires_at
+  THEN
+    RAISE EXCEPTION 'shared space write request identity is immutable';
+  END IF;
+  IF OLD.status = 'consumed' THEN
+    RAISE EXCEPTION 'consumed shared space write requests are immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS shared_space_write_requests_guard
+  ON shared_space_write_requests;
+CREATE TRIGGER shared_space_write_requests_guard
+BEFORE UPDATE OR DELETE ON shared_space_write_requests
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_shared_space_write_request();
+
+CREATE TABLE IF NOT EXISTS shared_space_global_files (
+  id UUID PRIMARY KEY,
+  request_id UUID NOT NULL UNIQUE REFERENCES shared_space_write_requests(id)
+    ON DELETE RESTRICT,
+  path TEXT NOT NULL CHECK (length(path) BETWEEN 1 AND 500),
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 240),
+  mime_type TEXT NOT NULL CHECK (length(mime_type) BETWEEN 1 AND 180),
+  size BIGINT NOT NULL CHECK (size >= 0),
+  sha256 TEXT NOT NULL CHECK (sha256 ~ '^[a-f0-9]{64}$'),
+  storage_key TEXT NOT NULL CHECK (
+    length(storage_key) BETWEEN 1 AND 800
+    AND left(storage_key, 1) <> '/'
+  ),
+  created_by TEXT NOT NULL REFERENCES principals(id),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS shared_space_global_files_path_idx
+  ON shared_space_global_files(lower(path));
+
+CREATE TABLE IF NOT EXISTS shared_space_events (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+  actor_principal_id TEXT REFERENCES principals(id) ON DELETE SET NULL,
+  action TEXT NOT NULL CHECK (length(action) BETWEEN 1 AND 80),
+  path TEXT CHECK (path IS NULL OR length(path) BETWEEN 1 AND 500),
+  entry_id UUID REFERENCES shared_space_entries(id) ON DELETE SET NULL,
+  version INTEGER CHECK (version IS NULL OR version >= 0),
+  decision TEXT NOT NULL CHECK (decision IN ('allowed', 'denied')),
+  reason TEXT NOT NULL DEFAULT '' CHECK (length(reason) <= 1000),
+  run_id UUID REFERENCES runs(id) ON DELETE SET NULL,
+  scene_session_id UUID REFERENCES scene_sessions(id) ON DELETE SET NULL,
+  ticket_id UUID REFERENCES action_tickets(id) ON DELETE SET NULL,
+  gate_id UUID REFERENCES execution_gate_requests(gate_id) ON DELETE SET NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(metadata) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS shared_space_events_workspace_idx
+  ON shared_space_events(workspace_id, created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS shared_space_events_action_idx
+  ON shared_space_events(workspace_id, action, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_shared_space_event_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'shared space events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS shared_space_events_append_only
+  ON shared_space_events;
+CREATE TRIGGER shared_space_events_append_only
+BEFORE UPDATE OR DELETE ON shared_space_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_shared_space_event_mutation();
+
+CREATE TABLE IF NOT EXISTS shared_space_digests (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+  scene_session_id UUID REFERENCES scene_sessions(id) ON DELETE RESTRICT,
+  digest_date DATE NOT NULL,
+  content TEXT NOT NULL CHECK (length(btrim(content)) BETWEEN 1 AND 40000),
+  event_from UUID REFERENCES shared_space_events(id) ON DELETE SET NULL,
+  event_to UUID REFERENCES shared_space_events(id) ON DELETE SET NULL,
+  generated_by TEXT NOT NULL REFERENCES principals(id),
+  generated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS shared_space_digests_workspace_idx
+  ON shared_space_digests(workspace_id, generated_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_shared_space_digest_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'shared space digests are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS shared_space_digests_append_only
+  ON shared_space_digests;
+CREATE TRIGGER shared_space_digests_append_only
+BEFORE UPDATE OR DELETE ON shared_space_digests
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_shared_space_digest_mutation();
+
+INSERT INTO shared_space_roots (
+  workspace_id, storage_prefix, status, default_read, default_write,
+  version, created_at, updated_at
+)
+SELECT
+  workspace.id,
+  'shared/' || md5(workspace.id),
+  'active',
+  TRUE,
+  FALSE,
+  1,
+  NOW(),
+  NOW()
+FROM workspaces AS workspace
+ON CONFLICT (workspace_id) DO NOTHING;
+`;
+
+export const HUMAN_AVATAR_DELEGATION_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS delegations (
+  id UUID PRIMARY KEY,
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  representative_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  representative_kind TEXT NOT NULL
+    CHECK (representative_kind IN ('human', 'ai')),
+  representative_agent_id UUID REFERENCES agents(id) ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL
+    CHECK (length(btrim(workspace_id)) BETWEEN 1 AND 180),
+  project_id UUID REFERENCES projects(id) ON DELETE RESTRICT,
+  context_type TEXT NOT NULL
+    CHECK (context_type IN (
+      'meeting',
+      'task',
+      'workflow_instance',
+      'workflow_node'
+    )),
+  context_id TEXT NOT NULL
+    CHECK (length(btrim(context_id)) BETWEEN 1 AND 180),
+  display_name TEXT NOT NULL
+    CHECK (length(btrim(display_name)) BETWEEN 1 AND 240),
+  objective TEXT NOT NULL
+    CHECK (length(btrim(objective)) BETWEEN 1 AND 4000),
+  stance TEXT NOT NULL DEFAULT ''
+    CHECK (length(stance) <= 4000),
+  watch_items JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(watch_items) = 'array'),
+  material_scopes JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(material_scopes) = 'array'),
+  allowed_actions TEXT[] NOT NULL
+    CHECK (
+      cardinality(allowed_actions) > 0
+      AND allowed_actions <@ ARRAY[
+        'read_context',
+        'read_materials',
+        'comment',
+        'ask_question',
+        'record_risk',
+        'summarize',
+        'submit_draft',
+        'submit_deliverable',
+        'update_status',
+        'reassign',
+        'approve',
+        'reject',
+        'archive',
+        'delete'
+      ]::text[]
+    ),
+  denied_actions TEXT[] NOT NULL DEFAULT '{}'
+    CHECK (
+      denied_actions <@ ARRAY[
+        'read_context',
+        'read_materials',
+        'comment',
+        'ask_question',
+        'record_risk',
+        'summarize',
+        'submit_draft',
+        'submit_deliverable',
+        'update_status',
+        'reassign',
+        'approve',
+        'reject',
+        'archive',
+        'delete'
+      ]::text[]
+    ),
+  approval_policy TEXT NOT NULL DEFAULT 'suggest-only'
+    CHECK (approval_policy IN (
+      'suggest-only',
+      'require-confirmation',
+      'auto-within-rules'
+    )),
+  auto_participation TEXT NOT NULL DEFAULT 'mentions'
+    CHECK (auto_participation IN ('manual', 'mentions', 'all')),
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN (
+      'draft',
+      'active',
+      'paused',
+      'completed',
+      'revoked',
+      'expired'
+    )),
+  expires_at TIMESTAMPTZ NOT NULL,
+  report_required BOOLEAN NOT NULL DEFAULT TRUE,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  last_failure TEXT CHECK (last_failure IS NULL OR length(last_failure) <= 4000),
+  created_by TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  activated_at TIMESTAMPTZ,
+  paused_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  revoked_by TEXT REFERENCES principals(id) ON DELETE RESTRICT,
+  CHECK (
+    (representative_kind = 'human' AND representative_agent_id IS NULL)
+    OR (representative_kind = 'ai' AND representative_agent_id IS NOT NULL)
+  ),
+  CHECK (
+    (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by IS NOT NULL)
+    OR (status <> 'revoked' AND revoked_at IS NULL AND revoked_by IS NULL)
+  ),
+  CHECK (
+    (status = 'completed' AND completed_at IS NOT NULL)
+    OR (status <> 'completed' AND completed_at IS NULL)
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS delegations_active_scope_idx
+  ON delegations(owner_principal_id, context_type, context_id,
+                 representative_principal_id)
+  WHERE status IN ('draft', 'active', 'paused');
+
+CREATE INDEX IF NOT EXISTS delegations_owner_idx
+  ON delegations(owner_principal_id, status, expires_at, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS delegations_representative_idx
+  ON delegations(representative_principal_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS delegations_expiry_idx
+  ON delegations(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS delegation_events (
+  id UUID PRIMARY KEY,
+  delegation_id UUID NOT NULL REFERENCES delegations(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'created',
+    'updated',
+    'activated',
+    'paused',
+    'resumed',
+    'extended',
+    'completed',
+    'revoked',
+    'expired',
+    'run_started',
+    'run_finished',
+    'confirmation_requested',
+    'confirmation_decided',
+    'report_ready',
+    'report_failed',
+    'expiry_notice'
+  )),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  before_revision INTEGER NOT NULL CHECK (before_revision >= 0),
+  after_revision INTEGER NOT NULL CHECK (after_revision > 0),
+  reason TEXT CHECK (reason IS NULL OR length(reason) <= 2000),
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (delegation_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS delegation_events_timeline_idx
+  ON delegation_events(delegation_id, seq DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_delegation_event_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'delegation events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS delegation_events_append_only ON delegation_events;
+CREATE TRIGGER delegation_events_append_only
+BEFORE UPDATE OR DELETE ON delegation_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_delegation_event_mutation();
+
+CREATE TABLE IF NOT EXISTS delegation_runs (
+  delegation_id UUID NOT NULL REFERENCES delegations(id) ON DELETE RESTRICT,
+  run_id UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE RESTRICT,
+  scene_session_id UUID REFERENCES scene_sessions(id) ON DELETE SET NULL,
+  ticket_id UUID REFERENCES action_tickets(id) ON DELETE SET NULL,
+  status TEXT NOT NULL CHECK (status IN (
+    'queued',
+    'running',
+    'waiting_approval',
+    'completed',
+    'failed',
+    'cancelled',
+    'timeout',
+    'interrupted'
+  )),
+  started_at TIMESTAMPTZ,
+  ended_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (delegation_id, run_id)
+);
+
+CREATE INDEX IF NOT EXISTS delegation_runs_timeline_idx
+  ON delegation_runs(delegation_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS delegation_reports (
+  delegation_id UUID PRIMARY KEY REFERENCES delegations(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'generating', 'ready', 'failed')),
+  summary TEXT NOT NULL DEFAULT '' CHECK (length(summary) <= 20000),
+  key_process JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(key_process) = 'array'),
+  positions JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(positions) = 'array'),
+  risks JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(risks) = 'array'),
+  open_questions JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(open_questions) = 'array'),
+  next_steps JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(next_steps) = 'array'),
+  information_gaps JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(information_gaps) = 'array'),
+  source_event_cursor BIGINT NOT NULL DEFAULT 0
+    CHECK (source_event_cursor >= 0),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  error_code TEXT,
+  error_message TEXT,
+  generated_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS delegation_notifications (
+  id UUID PRIMARY KEY,
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  delegation_id UUID NOT NULL REFERENCES delegations(id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'expiry_soon',
+    'confirmation_required',
+    'report_ready',
+    'anomaly'
+  )),
+  dedupe_key TEXT NOT NULL UNIQUE
+    CHECK (length(btrim(dedupe_key)) BETWEEN 1 AND 300),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'acknowledged')),
+  due_at TIMESTAMPTZ NOT NULL,
+  acknowledged_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS delegation_notifications_owner_idx
+  ON delegation_notifications(owner_principal_id, status, due_at);
+
+CREATE TABLE IF NOT EXISTS delegation_confirmation_requests (
+  id UUID PRIMARY KEY,
+  delegation_id UUID NOT NULL REFERENCES delegations(id) ON DELETE RESTRICT,
+  owner_principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  representative_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  action TEXT NOT NULL CHECK (action IN (
+    'read_context',
+    'read_materials',
+    'comment',
+    'ask_question',
+    'record_risk',
+    'summarize',
+    'submit_draft',
+    'submit_deliverable',
+    'update_status',
+    'reassign',
+    'approve',
+    'reject',
+    'archive',
+    'delete'
+  )),
+  target_type TEXT NOT NULL
+    CHECK (length(btrim(target_type)) BETWEEN 1 AND 120),
+  target_id TEXT NOT NULL
+    CHECK (length(btrim(target_id)) BETWEEN 1 AND 240),
+  proposed_payload_hash TEXT NOT NULL
+    CHECK (proposed_payload_hash ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
+  decided_by_principal_id TEXT REFERENCES principals(id) ON DELETE RESTRICT,
+  decision_reason TEXT CHECK (
+    decision_reason IS NULL OR length(decision_reason) <= 2000
+  ),
+  expires_at TIMESTAMPTZ NOT NULL,
+  decided_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    (status = 'pending' AND decided_by_principal_id IS NULL
+      AND decision_reason IS NULL AND decided_at IS NULL)
+    OR (status IN ('approved', 'rejected')
+      AND decided_by_principal_id IS NOT NULL
+      AND decision_reason IS NOT NULL AND decided_at IS NOT NULL)
+    OR (status = 'expired' AND decided_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS delegation_confirmations_pending_idx
+  ON delegation_confirmation_requests(
+    delegation_id,
+    status,
+    expires_at
+  );
+
+ALTER TABLE meeting_delegates
+  ADD COLUMN IF NOT EXISTS delegation_id UUID
+    REFERENCES delegations(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS meeting_delegates_delegation_idx
+  ON meeting_delegates(delegation_id)
+  WHERE delegation_id IS NOT NULL;
+
+ALTER TABLE action_tickets
+  ADD COLUMN IF NOT EXISTS delegation_id UUID
+    REFERENCES delegations(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS delegation_revision INTEGER,
+  ADD COLUMN IF NOT EXISTS delegation_context_hash TEXT,
+  ADD COLUMN IF NOT EXISTS owner_principal_id TEXT,
+  ADD COLUMN IF NOT EXISTS representative_principal_id TEXT;
+
+ALTER TABLE action_tickets
+  DROP CONSTRAINT IF EXISTS action_tickets_delegation_binding_check;
+
+ALTER TABLE action_tickets
+  ADD CONSTRAINT action_tickets_delegation_binding_check
+  CHECK (
+    (
+      delegation_id IS NULL
+      AND delegation_revision IS NULL
+      AND delegation_context_hash IS NULL
+      AND owner_principal_id IS NULL
+      AND representative_principal_id IS NULL
+    )
+    OR (
+      delegation_id IS NOT NULL
+      AND delegation_revision IS NOT NULL
+      AND delegation_revision > 0
+      AND delegation_context_hash ~ '^[a-f0-9]{64}$'
+      AND owner_principal_id IS NOT NULL
+      AND representative_principal_id IS NOT NULL
+    )
+  ),
+  ADD CONSTRAINT action_tickets_delegation_revision_check
+  CHECK (delegation_revision IS NULL OR delegation_revision > 0);
+
+CREATE INDEX IF NOT EXISTS action_tickets_delegation_idx
+  ON action_tickets(delegation_id, issued_at DESC)
+  WHERE delegation_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS delegation_ticket_revocations (
+  ticket_id UUID PRIMARY KEY REFERENCES action_tickets(id) ON DELETE RESTRICT,
+  delegation_id UUID NOT NULL REFERENCES delegations(id) ON DELETE RESTRICT,
+  revoked_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(revoked_by_principal_id)) BETWEEN 1 AND 180),
+  reason TEXT NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 2000),
+  revoked_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_delegation_ticket_revocation_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'delegation ticket revocations are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS delegation_ticket_revocations_append_only
+  ON delegation_ticket_revocations;
+CREATE TRIGGER delegation_ticket_revocations_append_only
+BEFORE UPDATE OR DELETE ON delegation_ticket_revocations
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_delegation_ticket_revocation_mutation();
+
+ALTER TABLE scene_sessions
+  ADD COLUMN IF NOT EXISTS delegation_id UUID
+    REFERENCES delegations(id) ON DELETE RESTRICT;
+
+ALTER TABLE scene_sessions
+  DROP CONSTRAINT IF EXISTS scene_sessions_scene_type_check,
+  ADD CONSTRAINT scene_sessions_scene_type_check
+    CHECK (scene_type IN (
+      'task',
+      'workflow-node',
+      'meeting',
+      'direct-chat',
+      'delegation'
+    ));
+
+CREATE INDEX IF NOT EXISTS scene_sessions_delegation_idx
+  ON scene_sessions(delegation_id, updated_at DESC)
+  WHERE delegation_id IS NOT NULL;
+
+ALTER TABLE scene_context_contributions
+  ADD COLUMN IF NOT EXISTS delegation_id UUID
+    REFERENCES delegations(id) ON DELETE RESTRICT;
+
+ALTER TABLE scene_context_contributions
+  DROP CONSTRAINT IF EXISTS scene_context_contributions_scene_type_check,
+  DROP CONSTRAINT IF EXISTS scene_context_contributions_kind_check,
+  ADD CONSTRAINT scene_context_contributions_scene_type_check
+    CHECK (scene_type IN (
+      'task',
+      'workflow-node',
+      'meeting',
+      'direct-chat',
+      'delegation'
+    )),
+  ADD CONSTRAINT scene_context_contributions_kind_check
+    CHECK (kind IN (
+      'task-comment-consensus',
+      'task-dependency',
+      'task-attachment',
+      'workflow-node',
+      'meeting-minutes',
+      'meeting-private-note',
+      'delegation-brief',
+      'direct-chat-message',
+      'agent-memory',
+      'project-memory',
+      'manual'
+    ));
+
+ALTER TABLE scene_context_receipts
+  ADD COLUMN IF NOT EXISTS delegation_id UUID
+    REFERENCES delegations(id) ON DELETE RESTRICT;
+
+ALTER TABLE scene_context_receipts
+  DROP CONSTRAINT IF EXISTS scene_context_receipts_scene_type_check,
+  ADD CONSTRAINT scene_context_receipts_scene_type_check
+    CHECK (scene_type IN (
+      'task',
+      'workflow-node',
+      'meeting',
+      'direct-chat',
+      'delegation'
+    ));
+
+ALTER TABLE context_packs
+  DROP CONSTRAINT IF EXISTS context_packs_scene_type_check,
+  ADD CONSTRAINT context_packs_scene_type_check
+    CHECK (
+      scene_type IS NULL
+      OR scene_type IN (
+        'task',
+        'workflow-node',
+        'meeting',
+        'direct-chat',
+        'delegation'
+      )
+    );
+
+CREATE INDEX IF NOT EXISTS scene_context_receipts_delegation_idx
+  ON scene_context_receipts(delegation_id, created_at DESC)
+  WHERE delegation_id IS NOT NULL;
+`;
