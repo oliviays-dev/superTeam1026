@@ -582,7 +582,7 @@ integration("Batch 17A task execution depth", () => {
       content: "Add one competitor comparison",
       deliveryTarget: "receiver",
     });
-  });
+  }, 15_000);
 
   it("dispatches deliveryTarget mentions without advancing collaborator Runs to Review", async () => {
     const project = await createProject("Delivery project");

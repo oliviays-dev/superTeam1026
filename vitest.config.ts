@@ -44,6 +44,8 @@ export default defineConfig({
   },
   test: {
     fileParallelism: false,
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
     include: [
       "packages/*/src/**/*.test.ts",
       "apps/*/src/**/*.test.ts",

@@ -73,6 +73,13 @@ integration("project templates", () => {
   beforeAll(async () => {
     database = new Database(databaseUrl!);
     await migrate(database);
+    await database.query(
+      `UPDATE feature_flag_settings
+       SET mode = 'off', revision = revision + 1, updated_at = NOW()
+       WHERE flag_key = 'project.ai_pm'
+         AND scope_type = 'platform'
+         AND scope_id = 'platform'`,
+    );
     const fileStoreRoot = await mkdtemp(
       join(tmpdir(), "pluginmax-project-templates-test-"),
     );

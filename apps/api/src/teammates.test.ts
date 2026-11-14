@@ -433,16 +433,29 @@ integration("AI Teammate API", () => {
       code: "teammate_execution_history_cursor_conflict",
     });
 
+    const reportWeekStart = new Date();
+    reportWeekStart.setUTCHours(0, 0, 0, 0);
+    const reportWeekDay = reportWeekStart.getUTCDay();
+    reportWeekStart.setUTCDate(
+      reportWeekStart.getUTCDate() +
+        (reportWeekDay === 0 ? -6 : 1 - reportWeekDay),
+    );
+    const reportWeekEnd = new Date(reportWeekStart);
+    reportWeekEnd.setUTCDate(reportWeekEnd.getUTCDate() + 6);
+    const dateText = (value: Date) =>
+      `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`;
+    const reportWeekStartText = dateText(reportWeekStart);
+    const reportWeekEndText = dateText(reportWeekEnd);
     const report = await request<TeammateWeeklyReport>(
       "POST",
       `/api/v1/teammates/${teammate.id}/weekly-reports/generate`,
-      { weekStart: "2026-10-26" },
+      { weekStart: reportWeekStartText },
     );
     expect(report.statusCode, JSON.stringify(report.body)).toBe(200);
     expect(report.body).toMatchObject({
       teammateId: teammate.id,
-      weekStart: "2026-10-26",
-      weekEnd: "2026-11-01",
+      weekStart: reportWeekStartText,
+      weekEnd: reportWeekEndText,
       statistics: { runCount: 1 },
     });
 

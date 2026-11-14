@@ -12,6 +12,7 @@ import {
   type DirectChatThread,
   type Meeting,
   type Project,
+  type ProjectMember,
   type Task,
   type TaskExecutionPolicyRecord,
   type WorkflowDefinition,
@@ -30,6 +31,14 @@ integration("task execution policy and run execution envelope", () => {
   beforeAll(async () => {
     database = new Database(databaseUrl!);
     await migrate(database);
+    await database.query(
+      `UPDATE feature_flag_settings
+       SET mode = 'on', revision = revision + 1, updated_at = NOW()
+       WHERE flag_key IN (
+         'workflow.assignment_bindings',
+         'workflow.platform_templates'
+       ) AND scope_type = 'platform' AND scope_id = 'platform'`,
+    );
     const fileStoreRoot = await mkdtemp(
       join(tmpdir(), "pluginmax-task-policy-files-"),
     );
@@ -129,8 +138,8 @@ integration("task execution policy and run execution envelope", () => {
     projectId: string,
     agentId: string,
     roleIds: string[] = [],
-  ): Promise<void> {
-    const result = await request(
+  ): Promise<ProjectMember> {
+    const result = await request<ProjectMember>(
       "POST",
       `/api/v1/projects/${projectId}/members`,
       {
@@ -141,6 +150,7 @@ integration("task execution policy and run execution envelope", () => {
       },
     );
     expect(result.statusCode).toBe(201);
+    return result.body;
   }
 
   async function envelopeFor(runId: string): Promise<{
@@ -382,7 +392,11 @@ integration("task execution policy and run execution envelope", () => {
       { name: `Workflow executor ${randomUUID().slice(0, 6)}` },
     );
     const workflowAgent = await createAgent("Workflow policy agent");
-    await addAgent(project.id, workflowAgent.id, [role.body.id]);
+    const workflowMember = await addAgent(project.id, workflowAgent.id, [
+      role.body.id,
+    ]);
+    const workflowPrincipalId =
+      workflowMember.principalId ?? workflowMember.actorId;
     const workflow = await request<WorkflowDefinition>(
       "POST",
       "/api/v1/workflows/import",
@@ -413,7 +427,19 @@ integration("task execution policy and run execution envelope", () => {
     const workflowRun = await request<WorkflowInstance>(
       "POST",
       `/api/v1/workflows/${workflow.body.id}/start`,
-      { title: "Workflow policy run" },
+      {
+        title: "Workflow policy run",
+        bindingOverrides: [
+          {
+            nodeId: "execute",
+            dispatchMode: "assigned",
+            primaryPrincipalId: workflowPrincipalId,
+            candidatePrincipalIds: [workflowPrincipalId],
+            approverPrincipalIds: [],
+            sourceChangeReason: "execution policy fixture",
+          },
+        ],
+      },
     );
     expect(workflowRun.statusCode).toBe(201);
     const workflowRunId = workflowRun.body.steps[0]?.runId;

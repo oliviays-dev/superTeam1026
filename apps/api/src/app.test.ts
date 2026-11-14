@@ -3,7 +3,12 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Database, PlatformRepositories, migrate } from "@pluginmax/database";
+import {
+  Database,
+  LATEST_MIGRATION_VERSION,
+  PlatformRepositories,
+  migrate,
+} from "@pluginmax/database";
 import { buildApi } from "./app.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -37,7 +42,7 @@ integration("runtime operations API contract", () => {
       fileStoreRoot,
       logger: false,
       localActorId: "local-admin",
-      expectedMigrationVersion: 32,
+      expectedMigrationVersion: LATEST_MIGRATION_VERSION,
       workerHeartbeatStaleAfterSeconds: 30,
     });
     app = built.app;
@@ -240,8 +245,8 @@ integration("runtime operations API contract", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       metrics: {
-        expectedMigrationVersion: 32,
-        migrationVersion: 32,
+        expectedMigrationVersion: LATEST_MIGRATION_VERSION,
+        migrationVersion: LATEST_MIGRATION_VERSION,
         activeWorkers: 1,
         deadLetterCount: expect.any(Number),
       },
