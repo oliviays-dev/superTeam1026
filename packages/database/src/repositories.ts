@@ -100,6 +100,7 @@ import {
 } from "./task-execution-evidence-repository.js";
 import { AgentToolRepository } from "./agent-tool-repository.js";
 import { WorkflowAssignmentRepository } from "./workflow-assignment-repository.js";
+import { WorkflowPlanRepository } from "./workflow-plan-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2228,6 +2229,7 @@ export class PlatformRepositories {
   readonly taskAnomalies: TaskExecutionAnomalyRepository;
   readonly agentTools: AgentToolRepository;
   readonly workflowAssignments: WorkflowAssignmentRepository;
+  readonly workflowPlans: WorkflowPlanRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2286,5 +2288,6 @@ export class PlatformRepositories {
     this.taskAnomalies = new TaskExecutionAnomalyRepository(database);
     this.agentTools = new AgentToolRepository(database);
     this.workflowAssignments = new WorkflowAssignmentRepository(database);
+    this.workflowPlans = new WorkflowPlanRepository(database);
   }
 }

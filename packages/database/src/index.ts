@@ -214,3 +214,11 @@ export {
   type WorkflowBindingSeed,
   type WorkflowBindingWriteInput,
 } from "./workflow-assignment-repository.js";
+export {
+  WorkflowPlanRepository,
+  WorkflowPlanRepositoryError,
+  type CreateWorkflowPlanRecordInput,
+  type CreateWorkflowPlanVersionRecordInput,
+  type PlanOutboxMessageRow,
+  type RouterAgentSnapshot,
+} from "./workflow-plan-repository.js";

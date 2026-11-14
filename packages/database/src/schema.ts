@@ -6128,3 +6128,338 @@ CREATE TABLE IF NOT EXISTS project_role_mapping_presets (
   updated_at TIMESTAMPTZ NOT NULL,
   PRIMARY KEY (project_id, role_id)
 );
+
+CREATE INDEX IF NOT EXISTS project_role_mapping_presets_project_idx
+  ON project_role_mapping_presets(project_id, updated_at DESC);
+`;
+
+export const M3_WORKFLOW_PLAN_SCHEMA_SQL = `
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('workflow.router_worker', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+ALTER TABLE teammate_templates
+  ADD COLUMN IF NOT EXISTS protected BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS workflow_feature_gate_epochs (
+  flag_key TEXT NOT NULL,
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('platform', 'project')),
+  scope_id TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  updated_by TEXT NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (flag_key, scope_type, scope_id)
+);
+
+CREATE TABLE IF NOT EXISTS router_agents (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  teammate_id UUID NOT NULL UNIQUE
+    REFERENCES teammates(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL UNIQUE REFERENCES agents(id) ON DELETE RESTRICT,
+  ai_principal_id TEXT NOT NULL REFERENCES principals(id) ON DELETE RESTRICT,
+  template_id UUID NOT NULL
+    REFERENCES teammate_templates(id) ON DELETE RESTRICT,
+  template_version_id UUID NOT NULL
+    REFERENCES teammate_template_versions(id) ON DELETE RESTRICT,
+  template_version INTEGER NOT NULL CHECK (template_version > 0),
+  contract_tools JSONB NOT NULL
+    CHECK (
+      jsonb_typeof(contract_tools) = 'array'
+      AND jsonb_array_length(contract_tools) = 2
+    ),
+  contract_digest TEXT NOT NULL
+    CHECK (contract_digest ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled')),
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS router_agents_project_idx
+  ON router_agents(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_plans (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  root_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  source TEXT NOT NULL CHECK (source IN ('template', 'router', 'manual')),
+  current_version INTEGER NOT NULL CHECK (current_version > 0),
+  status TEXT NOT NULL CHECK (status IN (
+    'draft',
+    'proposed',
+    'approved',
+    'active',
+    'finalizing',
+    'completed',
+    'cancelled',
+    'failed',
+    'paused',
+    'resume_required'
+  )),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  confirmed_by_principal_id TEXT,
+  confirmed_by_role TEXT,
+  confirmed_at TIMESTAMPTZ,
+  router_agent_id UUID REFERENCES router_agents(id) ON DELETE RESTRICT,
+  workflow_definition_id UUID
+    REFERENCES workflow_definitions(id) ON DELETE RESTRICT,
+  workflow_instance_id UUID REFERENCES workflow_instances(id)
+    ON DELETE RESTRICT,
+  gate_epoch INTEGER CHECK (gate_epoch IS NULL OR gate_epoch > 0),
+  lease_owner TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    (status IN ('approved', 'active', 'finalizing', 'completed')
+      AND confirmed_by_principal_id IS NOT NULL
+      AND confirmed_at IS NOT NULL)
+    OR status NOT IN ('approved', 'active', 'finalizing', 'completed')
+  ),
+  CHECK (
+    (lease_owner IS NULL AND lease_expires_at IS NULL)
+    OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+  ),
+  CHECK (source <> 'router' OR router_agent_id IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS workflow_plans_project_idx
+  ON workflow_plans(project_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS workflow_plans_reconcile_idx
+  ON workflow_plans(
+    status,
+    lease_expires_at,
+    updated_at
+  )
+  WHERE status IN ('approved', 'active', 'finalizing', 'resume_required');
+
+ALTER TABLE workflow_definitions
+  ADD COLUMN IF NOT EXISTS plan_id UUID
+    REFERENCES workflow_plans(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS plan_version INTEGER
+    CHECK (plan_version IS NULL OR plan_version > 0);
+
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_definitions_plan_version_idx
+  ON workflow_definitions(plan_id, plan_version)
+  WHERE plan_id IS NOT NULL;
+
+ALTER TABLE workflow_instances
+  ADD COLUMN IF NOT EXISTS plan_id UUID
+    REFERENCES workflow_plans(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS plan_version INTEGER
+    CHECK (plan_version IS NULL OR plan_version > 0);
+
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_instances_plan_version_idx
+  ON workflow_instances(plan_id, plan_version)
+  WHERE plan_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS workflow_plan_versions (
+  id UUID PRIMARY KEY,
+  plan_id UUID NOT NULL REFERENCES workflow_plans(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  graph JSONB NOT NULL CHECK (jsonb_typeof(graph) = 'object'),
+  settings JSONB NOT NULL CHECK (jsonb_typeof(settings) = 'object'),
+  source TEXT NOT NULL CHECK (source IN ('template', 'router', 'manual')),
+  reason TEXT NOT NULL DEFAULT '',
+  router_agent_id UUID REFERENCES router_agents(id) ON DELETE RESTRICT,
+  router_project_id UUID,
+  router_teammate_id UUID,
+  router_agent_agent_id UUID,
+  router_agent_name TEXT,
+  router_ai_principal_id TEXT,
+  router_template_id UUID,
+  router_template_version_id UUID,
+  router_template_version INTEGER,
+  router_contract_tools JSONB
+    CHECK (
+      router_contract_tools IS NULL
+      OR (
+        jsonb_typeof(router_contract_tools) = 'array'
+        AND jsonb_array_length(router_contract_tools) = 2
+      )
+    ),
+  router_contract_digest TEXT
+    CHECK (
+      router_contract_digest IS NULL
+      OR router_contract_digest ~ '^[a-f0-9]{64}$'
+    ),
+  content_digest TEXT NOT NULL
+    CHECK (content_digest ~ '^[a-f0-9]{64}$'),
+  created_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (plan_id, version),
+  CHECK (source <> 'router' OR router_agent_id IS NOT NULL)
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_plan_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'workflow plan versions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS workflow_plan_versions_immutable
+  ON workflow_plan_versions;
+CREATE TRIGGER workflow_plan_versions_immutable
+BEFORE UPDATE OR DELETE ON workflow_plan_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_plan_version_mutation();
+
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS creation_key TEXT;
+
+ALTER TABLE tasks
+  DROP CONSTRAINT IF EXISTS tasks_creation_key_check;
+
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_creation_key_check
+  CHECK (
+    creation_key IS NULL
+    OR length(btrim(creation_key)) BETWEEN 8 AND 300
+  );
+
+CREATE UNIQUE INDEX IF NOT EXISTS tasks_creation_key_idx
+  ON tasks(creation_key)
+  WHERE creation_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS task_origins (
+  task_id UUID PRIMARY KEY REFERENCES tasks(id) ON DELETE RESTRICT,
+  source_kind TEXT NOT NULL CHECK (source_kind IN (
+    'manual',
+    'workflow',
+    'router',
+    'meeting',
+    'capture'
+  )),
+  source_id TEXT NOT NULL,
+  parent_task_id UUID REFERENCES tasks(id) ON DELETE RESTRICT,
+  root_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  created_by_principal_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL UNIQUE,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(metadata) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS task_origins_root_idx
+  ON task_origins(root_task_id, created_at);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_task_origin_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'task origins are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS task_origins_immutable ON task_origins;
+CREATE TRIGGER task_origins_immutable
+BEFORE UPDATE OR DELETE ON task_origins
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_task_origin_mutation();
+
+CREATE TABLE IF NOT EXISTS plan_materializations (
+  id UUID PRIMARY KEY,
+  plan_id UUID NOT NULL REFERENCES workflow_plans(id) ON DELETE RESTRICT,
+  plan_version INTEGER NOT NULL CHECK (plan_version > 0),
+  node_id TEXT NOT NULL,
+  creation_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+    'pending',
+    'materializing',
+    'materialized',
+    'failed'
+  )),
+  task_id UUID REFERENCES tasks(id) ON DELETE RESTRICT,
+  last_error TEXT,
+  lease_owner TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (plan_id, plan_version, node_id),
+  CHECK (updated_at >= created_at),
+  CHECK (
+    (lease_owner IS NULL AND lease_expires_at IS NULL)
+    OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+  ),
+  CHECK (status <> 'materialized' OR task_id IS NOT NULL)
+);
+
+CREATE INDEX IF NOT EXISTS plan_materializations_recovery_idx
+  ON plan_materializations(status, lease_expires_at, updated_at)
+  WHERE status <> 'materialized';
+
+CREATE TABLE IF NOT EXISTS workflow_plan_outbox_messages (
+  message_id TEXT PRIMARY KEY,
+  plan_id UUID NOT NULL REFERENCES workflow_plans(id) ON DELETE RESTRICT,
+  plan_version INTEGER NOT NULL CHECK (plan_version > 0),
+  node_id TEXT,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'materialize_node',
+    'dispatch_node',
+    'final_draft'
+  )),
+  payload JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(payload) = 'object'),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+    'pending',
+    'processing',
+    'processed',
+    'failed',
+    'cancelled'
+  )),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  lease_owner TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  processed_at TIMESTAMPTZ,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    (lease_owner IS NULL AND lease_expires_at IS NULL)
+    OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS workflow_plan_outbox_claim_idx
+  ON workflow_plan_outbox_messages(status, lease_expires_at, created_at)
+  WHERE status IN ('pending', 'processing');
+
+CREATE TABLE IF NOT EXISTS workflow_plan_audit_events (
+  id UUID PRIMARY KEY,
+  plan_id UUID NOT NULL REFERENCES workflow_plans(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'plan.created',
+    'plan.updated',
+    'plan.approved',
+    'plan.materialized',
+    'plan.reconciled',
+    'plan.finalized',
+    'plan.failed',
+    'plan.resume_required',
+    'router_agent.registered',
+    'feature_gate.updated'
+  )),
+  actor_id TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  data JSONB CHECK (data IS NULL OR jsonb_typeof(data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (plan_id, seq)
+);

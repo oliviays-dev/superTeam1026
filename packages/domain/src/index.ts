@@ -169,3 +169,4 @@ export function unresolvedTaskDependencies(
 
 export * from "./workflow-markdown.js";
 export * from "./workflow-runtime.js";
+export * from "./workflow-plan.js";
