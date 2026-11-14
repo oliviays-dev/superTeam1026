@@ -31,6 +31,7 @@ function binding(
     sceneType: "task",
     sceneId: taskId,
     projectId,
+    participantBindingId: null,
     agentId,
     agentPrincipalId: agentId,
     ownerPrincipalId: null,
@@ -38,6 +39,10 @@ function binding(
     sessionHandle: `de-task-${taskId}-test`,
     generation: 0,
     status: "active",
+    revision: 1,
+    lastContextSeq: 0,
+    contextUsageRatio: 0,
+    compactionCount: 0,
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
@@ -117,6 +122,9 @@ function receiptFor(
     contentHash: result.pack.contentHash,
     rendererVersion: result.receipt.rendererVersion!,
     runtimeStateful: true,
+    contextBoundarySeq: result.receipt.cursorAfter!,
+    contextPolicyVersion: 1,
+    contextUsageRatio: 0,
     cursorBefore: 0,
     cursorAfter: result.receipt.cursorAfter!,
     delivered: result.receipt.deliveredContributions,
@@ -346,7 +354,7 @@ describe("buildTaskContext", () => {
     );
   });
 
-  it("replays all active contributions for stateless runtimes", () => {
+  it("reads only the uncommitted contribution increment", () => {
     const firstContribution = contribution(
       1,
       "00000000-0000-4000-8000-000000000051",
@@ -452,8 +460,13 @@ describe("buildTaskContext", () => {
       }),
     });
 
-    expect(result.receipt.deliveredContributions).toHaveLength(2);
-    expect(result.pack.renderedPrompt).toContain("Stable decision.");
+    expect(
+      result.receipt.deliveredContributions.map((item) => item.id),
+    ).toEqual([secondContribution.id]);
+    expect(result.receipt.reusedContributions.map((item) => item.id)).toEqual([
+      firstContribution.id,
+    ]);
+    expect(result.pack.renderedPrompt).not.toContain("Stable decision.");
     expect(result.pack.renderedPrompt).toContain("New decision.");
   });
 });

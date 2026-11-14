@@ -38,6 +38,7 @@ import type {
   DecideWorkflowApprovalInput,
   DecideExecutionGateInput,
   CancelExecutionGateInput,
+  Delegation,
   ImportWorkflowMarkdownInput,
   IdempotencyCleanupInput,
   Job,
@@ -48,6 +49,7 @@ import type {
   MeetingActionItem,
   MeetingActionItemConversion,
   MeetingAiPolicy,
+  MeetingAiParticipant,
   MeetingAiPolicyLifecycleInput,
   MeetingDetail,
   MeetingDelegate,
@@ -79,6 +81,10 @@ import type {
   ProjectReportGenerationResult,
   ProjectReportQuery,
   ProjectReportSummary,
+  GenerateProjectReportInput,
+  ProjectAiPm,
+  ProjectAiPmProvisionResult,
+  ProvisionProjectAiPmInput,
   PublishMemoryTruthInput,
   PublishMeetingMinutesInput,
   RestoreMeetingInput,
@@ -138,6 +144,7 @@ import type {
   UpdateMemoryClaimInput,
   UpdateMeetingActionItemInput,
   UpdateMeetingAiPolicyInput,
+  UpdateMeetingAiParticipantInput,
   UpdateMeetingMinutesDraftInput,
   UpdateMeetingPrivateBriefingInput,
   UploadMeetingFileInput,
@@ -191,6 +198,49 @@ import type {
   TaskExecutionPolicyContextType,
   ResolvedTaskExecutionPolicy,
   UpdateTaskExecutionPolicyInput,
+  SubmitTaskAcceptanceEvidenceInput,
+  TaskAcceptanceEvidenceProjection,
+  TaskExecutionHealthProjection,
+  ProjectRoleMappingPreset,
+  ReplaceWorkflowInstanceBindingsInput,
+  UpdateWorkflowDefinitionInput,
+  UpsertProjectRoleMappingPresetInput,
+  WorkflowInstanceBindings,
+  WorkflowInstancePreflight,
+  WorkflowInstancePreflightInput,
+  ApproveWorkflowPlanInput,
+  CreateWorkflowPlanInput,
+  CreateWorkflowPlanVersionInput,
+  FinalizeWorkflowPlanInput,
+  MaterializeWorkflowPlanInput,
+  ProvisionRouterTemplateInput,
+  RegisterRouterAgentInput,
+  ResumeWorkflowPlanInput,
+  RouterAgent,
+  RouterFeatureGate,
+  SetRouterFeatureGateInput,
+  TeammateTemplate,
+  WorkflowPlanDiff,
+  WorkflowPlanDetail,
+  ContextPolicy,
+  CreateTaskCaptureCandidateInput,
+  CreateTaskCaptureSessionInput,
+  CreateTaskDraftBatchInput,
+  CreateGroupSceneParticipantInput,
+  CreateGroupSceneSessionInput,
+  InvalidateTaskCaptureCandidateInput,
+  ResetContextPolicyInput,
+  SceneParticipantBinding,
+  SceneSessionBinding,
+  TaskCaptureCandidate,
+  TaskCaptureSession,
+  TaskDraft,
+  TaskDraftBatch,
+  TaskDraftCommitResult,
+  UpdateContextPolicyInput,
+  UpdateGroupSceneParticipantInput,
+  UpdateTaskDraftInput,
+  CommitTaskDraftBatchInput,
 } from "@pluginmax/contracts";
 import {
   inferDeliveryTarget,
@@ -217,8 +267,11 @@ import {
   DirectChatPreconditionError,
   MeetingAiPreconditionError,
   MemoryReviewConflictError,
+  ProjectAiPmRepositoryError,
   ProjectTemplateRepositoryError,
   SceneContextRepositoryError,
+  TaskCaptureRepositoryError,
+  WorkflowPlanRepositoryError,
   type PlatformRepositories,
   type ScopedAuthorizationPermission,
   type TaskAttachment,
@@ -248,12 +301,44 @@ import {
 import { ApplicationError } from "./errors.js";
 import { TeammateApplicationService } from "./teammates.js";
 import { IdentityAdministrationService } from "./identity-administration.js";
+import {
+  ExecutionDecisionError,
+  ExecutionDecisionService,
+} from "./execution-decision.js";
+import { TaskAcceptanceService } from "./task-acceptance.js";
+import {
+  WorkflowAssignmentError,
+  WorkflowAssignmentService,
+  type WorkflowPreflightResolution,
+} from "./workflow-assignment.js";
+import {
+  WorkflowPlanApplicationError,
+  WorkflowPlanApplicationService,
+  type WorkflowPlanSweepResult,
+} from "./workflow-plan.js";
+import { SkillApplicationService } from "./skills.js";
 
 export {
   TaskExecutionPreflightError,
   executionEnvelopeDigest,
 } from "./task-execution-preflight.js";
 export { ExecutionGateError, ExecutionGateService } from "./execution-gate.js";
+export {
+  ExecutionDecisionError,
+  ExecutionDecisionService,
+} from "./execution-decision.js";
+export { TaskAcceptanceService } from "./task-acceptance.js";
+export {
+  WorkflowAssignmentError,
+  WorkflowAssignmentService,
+  type WorkflowPreflightResolution,
+} from "./workflow-assignment.js";
+export {
+  WorkflowPlanApplicationError,
+  WorkflowPlanApplicationService,
+  type WorkflowPlanSweepResult,
+} from "./workflow-plan.js";
+export { SkillApplicationService } from "./skills.js";
 export {
   buildRunTimeline,
   decodeExecutionHistoryCursor,
@@ -276,8 +361,14 @@ export {
   type RouteAuthorizationInput,
   type RouteAuthorizationResult,
 } from "./authorization.js";
+import { DelegationApplicationService } from "./delegation.js";
 
 export { ApplicationError } from "./errors.js";
+export {
+  SharedSpaceApplication,
+  SharedSpaceApplicationError,
+  type SharedSpaceActor,
+} from "./shared-space.js";
 export {
   TeammateApplicationService,
   parseTeammateWorkPlan,
@@ -340,10 +431,16 @@ function scopedPermissions(
 export class PlatformApplication {
   readonly teammates: TeammateApplicationService;
   readonly identityAdministration: IdentityAdministrationService;
+  readonly delegations: DelegationApplicationService;
   private readonly agentRuntimePreflight: AgentRuntimePreflightService;
   private readonly taskExecutionPreflight: TaskExecutionPreflightService;
   private readonly executionGates: ExecutionGateService;
   private readonly sceneContext: SceneContextService;
+  private readonly executionDecisions: ExecutionDecisionService;
+  private readonly acceptance: TaskAcceptanceService;
+  private readonly workflowAssignments: WorkflowAssignmentService;
+  readonly workflowPlans: WorkflowPlanApplicationService;
+  readonly skills: SkillApplicationService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
@@ -355,9 +452,24 @@ export class PlatformApplication {
     );
     this.executionGates = new ExecutionGateService(repositories);
     this.sceneContext = new SceneContextService(repositories);
+    this.executionDecisions = new ExecutionDecisionService(repositories);
+    this.acceptance = new TaskAcceptanceService(repositories);
+    this.workflowAssignments = new WorkflowAssignmentService(repositories);
+    this.workflowPlans = new WorkflowPlanApplicationService(
+      repositories,
+      (taskId, actorId) =>
+        this.dispatchTask(
+          taskId,
+          createRootTraceContext(),
+          actorId,
+          false,
+        ),
+    );
+    this.skills = new SkillApplicationService(repositories);
     this.identityAdministration = new IdentityAdministrationService(
       repositories.identityAdministration,
     );
+    this.delegations = new DelegationApplicationService(repositories);
     this.teammates = new TeammateApplicationService(
       repositories,
       (taskId, aiPrincipalId) =>
@@ -382,12 +494,18 @@ export class PlatformApplication {
     return project;
   }
 
-  createProject(
+  async createProject(
     input: CreateProjectInput,
     actorId = "local-admin",
     actorName = "Local Admin",
   ): Promise<Project> {
-    return this.repositories.projects.create(input, actorId, actorName);
+    const project = await this.repositories.projects.create(
+      input,
+      actorId,
+      actorName,
+    );
+    await this.maybeProvisionProjectAiPm(project.id, actorId);
+    return project;
   }
 
   async createProjectFromTemplate(input: {
@@ -411,6 +529,12 @@ export class PlatformApplication {
           idempotencyKey: input.idempotencyKey,
           requestHash: input.requestHash,
         });
+      if (materialized.created) {
+        await this.maybeProvisionProjectAiPm(
+          materialized.project.id,
+          input.actorId,
+        );
+      }
       return materialized.project;
     } catch (error) {
       throw translateProjectTemplateError(error);
@@ -682,7 +806,11 @@ export class PlatformApplication {
     }
   }
 
-  async deleteProjectRole(projectId: string, roleId: string): Promise<void> {
+  async deleteProjectRole(
+    projectId: string,
+    roleId: string,
+    actorId = "local-admin",
+  ): Promise<void> {
     await this.requireProject(projectId);
     const result = await this.repositories.projectMemberships.deleteRole(
       projectId,
@@ -702,6 +830,13 @@ export class PlatformApplication {
         404,
       );
     }
+    await this.repositories.identityAdministration.appendAuditEvent({
+      action: "workflow.role_mapping_preset.deleted",
+      decision: "allowed",
+      actorPrincipalId: actorId,
+      subjectPrincipalId: actorId,
+      metadata: { projectId, roleId, cascade: true },
+    });
   }
 
   async listProjectMembers(projectId: string): Promise<ProjectMember[]> {
@@ -1707,9 +1842,19 @@ export class PlatformApplication {
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
     readonly deadlineAt?: string;
+    readonly delegation?: Delegation;
   }): Promise<TaskExecutionPreparation> {
     try {
-      return await this.taskExecutionPreflight.prepare(input);
+      const { delegation, ...executionInput } = input;
+      return await this.taskExecutionPreflight.prepare({
+        ...executionInput,
+        ...(delegation === undefined
+          ? {}
+          : {
+              delegation: this.delegations.ticketBinding(delegation),
+              delegationExpiresAt: delegation.expiresAt,
+            }),
+      });
     } catch (error) {
       if (error instanceof TaskExecutionPreflightError) {
         throw new ApplicationError(
@@ -1865,7 +2010,11 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<TaskClaim | undefined> {
     await this.requireActiveProjectPermission(projectId, "write", actorId);
-    return this.repositories.tasks.claimNext(projectId, input);
+    const claim = await this.repositories.tasks.claimNext(projectId, input);
+    if (claim !== undefined) {
+      await this.workflowAssignments.recordTaskClaim(claim.task, claim.ownerId);
+    }
+    return claim;
   }
 
   async releaseTaskClaim(
@@ -2060,6 +2209,7 @@ export class PlatformApplication {
         409,
       );
     }
+    await this.acceptance.assertReadyForReview(taskId);
     const updated = await this.repositories.tasks.transitionControl({
       id: taskId,
       from: ["in_progress"],
@@ -2267,6 +2417,7 @@ export class PlatformApplication {
       assignee.agentId,
       assignee.roleId,
     );
+    await this.acceptance.syncAcceptance(task.id, task.acceptance);
     await this.repositories.taskCollaboration.appendEvent({
       taskId: task.id,
       kind: "created",
@@ -2277,9 +2428,722 @@ export class PlatformApplication {
     return task;
   }
 
+  async createTaskCaptureSession(
+    input: CreateTaskCaptureSessionInput,
+    actorId = "local-admin",
+  ): Promise<TaskCaptureSession> {
+    await this.requireActiveProjectPermission(input.projectId, "write", actorId);
+    await this.requireFeatureEnabled("task.capture", input.projectId);
+    try {
+      return await this.repositories.taskCapture.createSession({
+        value: input,
+        actorId,
+      });
+    } catch (error) {
+      throw this.mapTaskCaptureError(error);
+    }
+  }
+
+  async getTaskCaptureSession(
+    sessionId: string,
+    actorId = "local-admin",
+  ): Promise<TaskCaptureSession> {
+    const session = await this.repositories.taskCapture.getSession(sessionId);
+    if (session === undefined) {
+      throw new ApplicationError(
+        "task_capture_session_not_found",
+        "Task Capture session not found",
+        404,
+      );
+    }
+    await this.requireActiveProjectPermission(session.projectId, "write", actorId);
+    await this.requireFeatureEnabled("task.capture", session.projectId);
+    return session;
+  }
+
+  async listTaskCaptureCandidates(
+    sessionId: string,
+    actorId = "local-admin",
+  ): Promise<TaskCaptureCandidate[]> {
+    const session = await this.getTaskCaptureSession(sessionId, actorId);
+    return this.repositories.taskCapture.listCandidates(session.id);
+  }
+
+  async addTaskCaptureCandidate(
+    sessionId: string,
+    input: CreateTaskCaptureCandidateInput,
+    actorId = "local-admin",
+  ): Promise<TaskCaptureCandidate> {
+    const session = await this.getTaskCaptureSession(sessionId, actorId);
+    try {
+      return await this.repositories.taskCapture.addCandidate({
+        sessionId: session.id,
+        value: input,
+        actorId,
+      });
+    } catch (error) {
+      throw this.mapTaskCaptureError(error);
+    }
+  }
+
+  async invalidateTaskCaptureCandidate(
+    candidateId: string,
+    input: InvalidateTaskCaptureCandidateInput,
+    actorId = "local-admin",
+  ): Promise<TaskCaptureCandidate> {
+    const candidate =
+      await this.repositories.taskCapture.getCandidate(candidateId);
+    if (candidate === undefined) {
+      throw new ApplicationError(
+        "task_capture_candidate_not_found",
+        "Task Capture candidate not found",
+        404,
+      );
+    }
+    await this.requireActiveProjectPermission(
+      candidate.projectId,
+      "write",
+      actorId,
+    );
+    await this.requireFeatureEnabled("task.capture", candidate.projectId);
+    const updated =
+      await this.repositories.taskCapture.invalidateCandidate({
+        candidateId,
+        expectedRevision: input.expectedRevision,
+        reason: input.reason,
+        actorId,
+      });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "task_capture_revision_conflict",
+        "Task Capture candidate changed before invalidation",
+        409,
+      );
+    }
+    return updated;
+  }
+
+  async createTaskDraftBatch(
+    sessionId: string,
+    input: CreateTaskDraftBatchInput,
+    actorId = "local-admin",
+  ): Promise<TaskDraftBatch> {
+    const session = await this.getTaskCaptureSession(sessionId, actorId);
+    try {
+      return await this.repositories.taskCapture.createBatch({
+        sessionId: session.id,
+        value: input,
+        actorId,
+      });
+    } catch (error) {
+      throw this.mapTaskCaptureError(error);
+    }
+  }
+
+  async updateTaskDraft(
+    draftId: string,
+    input: UpdateTaskDraftInput,
+    actorId = "local-admin",
+  ): Promise<TaskDraft> {
+    const draft = await this.repositories.taskCapture.getDraft(draftId);
+    if (draft === undefined) {
+      throw new ApplicationError(
+        "task_capture_draft_not_found",
+        "Task Capture draft not found",
+        404,
+      );
+    }
+    await this.requireActiveProjectPermission(draft.projectId, "write", actorId);
+    await this.requireFeatureEnabled("task.capture", draft.projectId);
+    try {
+      const updated = await this.repositories.taskCapture.updateDraft(
+        draftId,
+        input,
+      );
+      if (updated === undefined) {
+        throw new ApplicationError(
+          "task_capture_revision_conflict",
+          "Task Capture draft changed before update",
+          409,
+        );
+      }
+      return updated;
+    } catch (error) {
+      throw this.mapTaskCaptureError(error);
+    }
+  }
+
+  async getTaskDraftBatch(
+    batchId: string,
+    actorId = "local-admin",
+  ): Promise<TaskDraftBatch> {
+    const batch = await this.repositories.taskCapture.getBatch(batchId);
+    if (batch === undefined) {
+      throw new ApplicationError(
+        "task_capture_batch_not_found",
+        "Task Capture batch not found",
+        404,
+      );
+    }
+    await this.requireActiveProjectPermission(batch.projectId, "write", actorId);
+    await this.requireFeatureEnabled("task.capture", batch.projectId);
+    return batch;
+  }
+
+  async commitTaskDraftBatch(
+    batchId: string,
+    input: CommitTaskDraftBatchInput,
+    actorId = "local-admin",
+  ): Promise<TaskDraftCommitResult> {
+    const batch = await this.getTaskDraftBatch(batchId, actorId);
+    await this.requireActiveProjectPermission(batch.projectId, "write", actorId);
+    await this.requireFeatureEnabled("task.capture", batch.projectId);
+    const session = await this.repositories.taskCapture.getSession(
+      batch.sessionId,
+    );
+    if (session === undefined || session.projectId !== batch.projectId) {
+      throw new ApplicationError(
+        "task_capture_session_not_found",
+        "Task Capture session is unavailable",
+        409,
+      );
+    }
+    const candidates =
+      await this.repositories.taskCapture.listCandidates(session.id);
+    const candidateById = new Map(
+      candidates.map((candidate) => [candidate.id, candidate]),
+    );
+    const members = await this.repositories.projectMemberships.listMembers(
+      batch.projectId,
+    );
+    const assignees: Record<
+      string,
+      { readonly agentId: string; readonly roleId?: string }
+    > = {};
+    const assigneeErrors: Record<string, string> = {};
+    for (const draft of batch.drafts) {
+      const candidate = candidateById.get(draft.candidateId);
+      if (
+        candidate === undefined ||
+        candidate.status === "invalidated" ||
+        candidate.sourceVersion !== draft.sourceVersion ||
+        candidate.excerptHash !== draft.excerptHash
+      ) {
+        assigneeErrors[draft.id] =
+          "Task Capture source was invalidated before commit";
+        continue;
+      }
+      try {
+        const assignee = await this.resolveTaskAssignee({
+          projectId: batch.projectId,
+          title: draft.title,
+          description: draft.description,
+          acceptance: draft.acceptance,
+          dependsOn: [],
+          priority: draft.priority,
+          ...(draft.agentId === null ? {} : { agentId: draft.agentId }),
+          ...(draft.roleId === null ? {} : { roleId: draft.roleId }),
+        });
+        const activeMember = members.some(
+          (member) =>
+            member.kind === "agent" &&
+            member.status === "active" &&
+            member.actorId === assignee.agentId,
+        );
+        if (!activeMember) {
+          assigneeErrors[draft.id] =
+            "The draft assignee is not an active AI project member";
+          continue;
+        }
+        assignees[draft.id] = assignee;
+      } catch (error) {
+        assigneeErrors[draft.id] =
+          error instanceof Error
+            ? error.message
+            : "The draft assignee could not be resolved";
+      }
+    }
+    try {
+      return await this.repositories.taskCapture.commitBatch({
+        batchId,
+        expectedRevision: input.expectedRevision,
+        actorId,
+        assignees,
+        assigneeErrors,
+      });
+    } catch (error) {
+      throw this.mapTaskCaptureError(error);
+    }
+  }
+
+  async getContextPolicy(
+    projectId: string | null,
+    sceneType: ContextPolicy["sceneType"],
+    actorId = "local-admin",
+  ): Promise<ContextPolicy> {
+    if (projectId === null) {
+      this.assertPlatformAdministrator(actorId);
+    } else {
+      await this.requireProjectReadAccess(projectId, actorId);
+    }
+    return this.repositories.contextPolicies.effective(projectId, sceneType);
+  }
+
+  async updateContextPolicy(
+    input: UpdateContextPolicyInput,
+    actorId = "local-admin",
+  ): Promise<ContextPolicy> {
+    this.assertContextPolicyAdministrator(input.scopeType, input.projectId, actorId);
+    await this.requireContextPolicyEnabled(input.projectId, actorId);
+    try {
+      return await this.repositories.contextPolicies.update({
+        ...input,
+        actorId,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "context_policy_revision_conflict"
+      ) {
+        throw new ApplicationError(
+          "context_policy_revision_conflict",
+          error.message,
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async resetContextPolicy(
+    input: ResetContextPolicyInput,
+    actorId = "local-admin",
+  ): Promise<ContextPolicy> {
+    this.assertContextPolicyAdministrator(input.scopeType, input.projectId, actorId);
+    await this.requireContextPolicyEnabled(input.projectId, actorId);
+    try {
+      return await this.repositories.contextPolicies.reset({
+        ...input,
+        actorId,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "context_policy_revision_conflict"
+      ) {
+        throw new ApplicationError(
+          "context_policy_revision_conflict",
+          error.message,
+          409,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async createGroupSceneParticipant(
+    sceneId: string,
+    input: CreateGroupSceneParticipantInput,
+    actorId = "local-admin",
+  ): Promise<SceneParticipantBinding> {
+    await this.requireActiveProjectPermission(input.projectId, "write", actorId);
+    await this.requireFeatureEnabled("context.group_policy", input.projectId);
+    const members = await this.repositories.projectMemberships.listMembers(
+      input.projectId,
+    );
+    if (
+      !members.some(
+        (member) =>
+          member.kind === "agent" &&
+          member.status === "active" &&
+          member.actorId === input.agentId,
+      )
+    ) {
+      throw new ApplicationError(
+        "group_scene_agent_not_member",
+        "The Group Scene AI participant must be an active project member",
+        409,
+      );
+    }
+    return this.repositories.sceneContext.ensureParticipantBinding({
+      sceneId,
+      projectId: input.projectId,
+      agentId: input.agentId,
+      agentPrincipalId: input.agentPrincipalId,
+      principalId: input.principalId,
+    });
+  }
+
+  async listGroupSceneParticipants(
+    sceneId: string,
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<SceneParticipantBinding[]> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    return this.repositories.sceneContext.listParticipantBindings(
+      sceneId,
+      projectId,
+    );
+  }
+
+  async updateGroupSceneParticipant(
+    participantBindingId: string,
+    input: UpdateGroupSceneParticipantInput,
+    actorId = "local-admin",
+  ): Promise<SceneParticipantBinding> {
+    const binding =
+      await this.repositories.sceneContext.participantBinding(
+        participantBindingId,
+      );
+    if (binding === undefined) {
+      throw new ApplicationError(
+        "group_scene_participant_not_found",
+        "Group Scene participant not found",
+        404,
+      );
+    }
+    await this.requireActiveProjectPermission(binding.projectId, "write", actorId);
+    await this.requireFeatureEnabled("context.group_policy", binding.projectId);
+    const updated =
+      await this.repositories.sceneContext.updateParticipantBinding({
+        id: participantBindingId,
+        expectedRevision: input.expectedRevision,
+        status: input.status,
+        actorId,
+      });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "group_scene_participant_revision_conflict",
+        "Group Scene participant changed before update",
+        409,
+      );
+    }
+    return updated;
+  }
+
+  async createGroupSceneSession(
+    sceneId: string,
+    input: CreateGroupSceneSessionInput,
+    actorId = "local-admin",
+  ): Promise<SceneSessionBinding> {
+    await this.requireActiveProjectPermission(input.projectId, "write", actorId);
+    await this.requireFeatureEnabled("context.group_policy", input.projectId);
+    const binding =
+      await this.repositories.sceneContext.participantBinding(
+        input.participantBindingId,
+      );
+    if (
+      binding === undefined ||
+      binding.sceneType !== "group" ||
+      binding.sceneId !== sceneId ||
+      binding.projectId !== input.projectId
+    ) {
+      throw new ApplicationError(
+        "group_scene_participant_not_found",
+        "Group Scene participant binding is unavailable",
+        404,
+      );
+    }
+    if (binding.status !== "active") {
+      throw new ApplicationError(
+        "group_scene_participant_inactive",
+        "A paused, left, or removed participant cannot start a Session",
+        409,
+      );
+    }
+    const session = await this.repositories.sceneContext.ensureSession({
+      sceneType: "group",
+      sceneId,
+      projectId: input.projectId,
+      agentId: binding.agentId,
+      agentPrincipalId: binding.agentPrincipalId,
+      ownerPrincipalId: binding.principalId,
+      participantBindingId: binding.id,
+    });
+    await this.repositories.auditEvents.append({
+      action: "group.scene.session.ensured",
+      actorPrincipalId: actorId,
+      metadata: {
+        sessionId: session.id,
+        sceneId,
+        projectId: input.projectId,
+        participantBindingId: binding.id,
+        generation: session.generation,
+        status: session.status,
+      },
+    });
+    return session;
+  }
+
+  async provisionRouterTemplate(
+    projectId: string,
+    input: ProvisionRouterTemplateInput,
+    actorId = "local-admin",
+  ): Promise<TeammateTemplate> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.provisionRouterTemplate({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async listRouterAgents(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<RouterAgent[]> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.listRouterAgents(projectId),
+    );
+  }
+
+  async registerRouterAgent(
+    projectId: string,
+    input: RegisterRouterAgentInput,
+    actorId = "local-admin",
+  ): Promise<RouterAgent> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.registerRouterAgent({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async getRouterFeatureGate(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<RouterFeatureGate> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.getRouterGate(projectId),
+    );
+  }
+
+  async setRouterFeatureGate(
+    projectId: string,
+    input: SetRouterFeatureGateInput,
+    actorId = "local-admin",
+  ): Promise<RouterFeatureGate> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    const gate = await this.withWorkflowPlan(() =>
+      this.workflowPlans.setRouterGate({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+    await this.repositories.identityAdministration.appendAuditEvent({
+      action: "workflow.router_worker.gate_updated",
+      decision: input.enabled ? "allowed" : "denied",
+      actorPrincipalId: actorId,
+      subjectPrincipalId: actorId,
+      reason: input.reason,
+      metadata: {
+        projectId,
+        flagKey: gate.flagKey,
+        enabled: gate.enabled,
+        epoch: gate.epoch,
+        revision: gate.revision,
+      },
+    });
+    return gate;
+  }
+
+  async createWorkflowPlan(
+    taskId: string,
+    input: CreateWorkflowPlanInput,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.createPlan({
+        taskId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async getWorkflowPlan(
+    planId: string,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail> {
+    const detail = await this.withWorkflowPlan(() =>
+      this.workflowPlans.getPlan(planId),
+    );
+    await this.requireProjectReadAccess(detail.plan.projectId, actorId);
+    return detail;
+  }
+
+  async listWorkflowPlans(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail[]> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    const plans = await this.withWorkflowPlan(() =>
+      this.workflowPlans.listPlans(projectId),
+    );
+    return Promise.all(
+      plans.map((plan) => this.workflowPlans.getPlan(plan.id)),
+    );
+  }
+
+  async addWorkflowPlanVersion(
+    planId: string,
+    input: CreateWorkflowPlanVersionInput,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail> {
+    const current = await this.getWorkflowPlan(planId, actorId);
+    await this.requireActiveProjectPermission(
+      current.plan.projectId,
+      "write",
+      actorId,
+    );
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.addVersion({
+        planId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async diffWorkflowPlanVersions(
+    planId: string,
+    fromVersion: number,
+    toVersion: number,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDiff> {
+    const current = await this.getWorkflowPlan(planId, actorId);
+    await this.requireProjectReadAccess(current.plan.projectId, actorId);
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.diff(planId, fromVersion, toVersion),
+    );
+  }
+
+  async approveWorkflowPlan(
+    planId: string,
+    input: ApproveWorkflowPlanInput,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail> {
+    const current = await this.getWorkflowPlan(planId, actorId);
+    await this.requireActiveProjectPermission(
+      current.plan.projectId,
+      "write",
+      actorId,
+    );
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.approve({ planId, actorId, value: input }),
+    );
+  }
+
+  async materializeWorkflowPlan(
+    planId: string,
+    input: MaterializeWorkflowPlanInput,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail> {
+    const current = await this.getWorkflowPlan(planId, actorId);
+    await this.requireActiveProjectPermission(
+      current.plan.projectId,
+      "write",
+      actorId,
+    );
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.materialize({ planId, actorId, value: input }),
+    );
+  }
+
+  async finalizeWorkflowPlan(
+    planId: string,
+    input: FinalizeWorkflowPlanInput,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail> {
+    const current = await this.getWorkflowPlan(planId, actorId);
+    await this.requireActiveProjectPermission(
+      current.plan.projectId,
+      "write",
+      actorId,
+    );
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.finalize({ planId, actorId, value: input }),
+    );
+  }
+
+  async resumeWorkflowPlan(
+    planId: string,
+    input: ResumeWorkflowPlanInput,
+    actorId = "local-admin",
+  ): Promise<WorkflowPlanDetail> {
+    const current = await this.getWorkflowPlan(planId, actorId);
+    await this.requireActiveProjectPermission(
+      current.plan.projectId,
+      "write",
+      actorId,
+    );
+    return this.withWorkflowPlan(() =>
+      this.workflowPlans.resume({ planId, actorId, value: input }),
+    );
+  }
+
+  async sweepWorkflowPlans(
+    owner: string,
+    options: {
+      readonly batchSize?: number;
+      readonly leaseSeconds?: number;
+      readonly staleAfterSeconds?: number;
+    } = {},
+  ): Promise<WorkflowPlanSweepResult> {
+    return this.workflowPlans.sweep(owner, options);
+  }
+
+  private async withWorkflowPlan<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      throw translateWorkflowPlanFailure(error);
+    }
+  }
+
   async listTaskRuns(taskId: string) {
     await this.getTask(taskId);
     return this.repositories.runs.listByTask(taskId);
+  }
+
+  async getTaskAcceptanceEvidence(
+    taskId: string,
+  ): Promise<TaskAcceptanceEvidenceProjection> {
+    return this.acceptance.getAcceptanceEvidence(taskId);
+  }
+
+  async getTaskExecutionHealth(
+    taskId: string,
+  ): Promise<TaskExecutionHealthProjection> {
+    return this.acceptance.getExecutionHealth(taskId);
+  }
+
+  async confirmTaskAcceptanceEvidence(
+    taskId: string,
+    input: SubmitTaskAcceptanceEvidenceInput,
+    actorId = "local-admin",
+  ): Promise<TaskAcceptanceEvidenceProjection> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    return this.acceptance.confirmExecutionEvidence({
+      taskId,
+      actorPrincipalId: actorId,
+      evidence: input,
+    });
   }
 
   async updateTask(id: string, input: UpdateTaskInput): Promise<TaskDetail> {
@@ -2310,6 +3174,9 @@ export class PlatformApplication {
     const task = await this.repositories.tasks.update(id, input);
     if (task === undefined) {
       throw new ApplicationError("task_not_found", "Task not found", 404);
+    }
+    if (input.acceptance !== undefined) {
+      await this.acceptance.syncAcceptance(task.id, task.acceptance);
     }
     await this.repositories.taskCollaboration.appendEvent({
       taskId: id,
@@ -2722,6 +3589,107 @@ export class PlatformApplication {
     });
   }
 
+  async dispatchDelegationTask(
+    delegationId: string,
+    actorId = "local-admin",
+    trace: TraceContext = createRootTraceContext(),
+  ): Promise<{ runId: string }> {
+    const delegation = await this.delegations.get(delegationId, actorId);
+    if (delegation.contextType !== "task") {
+      throw new ApplicationError(
+        "delegation_context_mismatch",
+        "Only a task-scoped Delegation can dispatch a task run",
+        409,
+      );
+    }
+    if (
+      delegation.representativeKind !== "ai" ||
+      delegation.representativeAgentId === null
+    ) {
+      throw new ApplicationError(
+        "delegation_runtime_binding_missing",
+        "The Delegation representative has no AI Runtime",
+        409,
+      );
+    }
+    const check = await this.delegations.checkAction(
+      delegationId,
+      actorId,
+      {
+        action: "read_context",
+        expectedRevision: delegation.revision,
+      },
+    );
+    if (!check.allowed) {
+      throw new ApplicationError(
+        check.reason,
+        "Delegation cannot start this task run",
+        403,
+      );
+    }
+    return this.dispatchTaskExecution({
+      taskId: delegation.contextId,
+      agentId: delegation.representativeAgentId,
+      kind: "owner",
+      trace,
+      actorId,
+      administrator: false,
+      delegation,
+    });
+  }
+
+  async dispatchDelegationRun(
+    delegationId: string,
+    actorId = "local-admin",
+    trace: TraceContext = createRootTraceContext(),
+  ): Promise<{
+    readonly runId: string;
+    readonly taskId: string;
+    readonly contextType: Delegation["contextType"];
+  }> {
+    const delegation = await this.delegations.get(delegationId, actorId);
+    if (delegation.contextType === "task") {
+      const result = await this.dispatchDelegationTask(
+        delegationId,
+        actorId,
+        trace,
+      );
+      return {
+        runId: result.runId,
+        taskId: delegation.contextId,
+        contextType: delegation.contextType,
+      };
+    }
+    if (
+      delegation.contextType === "workflow_instance" ||
+      delegation.contextType === "workflow_node"
+    ) {
+      const instanceId =
+        delegation.contextType === "workflow_node"
+          ? delegation.contextId.slice(
+              0,
+              delegation.contextId.lastIndexOf(":"),
+            )
+          : delegation.contextId;
+      const result = await this.dispatchWorkflowStep(
+        instanceId,
+        actorId,
+        undefined,
+        delegation,
+      );
+      return {
+        runId: result.runId,
+        taskId: result.task.id,
+        contextType: delegation.contextType,
+      };
+    }
+    throw new ApplicationError(
+      "delegation_trigger_required",
+      "Meeting Delegations are dispatched through the meeting trigger endpoint",
+      409,
+    );
+  }
+
   private async dispatchTaskExecution(input: {
     readonly taskId: string;
     readonly agentId: string | undefined;
@@ -2733,6 +3701,7 @@ export class PlatformApplication {
     readonly trace: TraceContext;
     readonly actorId: string;
     readonly administrator: boolean;
+    readonly delegation?: Delegation;
   }): Promise<{ runId: string }> {
     const { taskId, trace, actorId, administrator } = input;
     const task = await this.getTask(taskId);
@@ -2788,16 +3757,89 @@ export class PlatformApplication {
       );
     }
     requireExecutableRuntime(agent);
+    if (
+      input.delegation !== undefined &&
+      (input.delegation.status !== "active" ||
+        input.delegation.contextType !== "task" ||
+        input.delegation.contextId !== task.id ||
+        input.delegation.representativeAgentId !== agent.id)
+    ) {
+      throw new ApplicationError(
+        "delegation_scope_mismatch",
+        "The Delegation does not authorize this task and representative",
+        409,
+      );
+    }
+    const executionActorId =
+      input.delegation?.representativePrincipalId ?? actorId;
+    const executionPrincipal =
+      await this.repositories.authorization.getPrincipal(executionActorId);
+    const authSource: "bearer" | "local-development" =
+      executionPrincipal?.source === "local" ? "local-development" : "bearer";
+    const assertDispatchDecision = async (
+      expected: {
+        readonly runtimeRevision?: number;
+        readonly bindingRevision?: number;
+        readonly policyRevision?: number;
+      } = {},
+      full = true,
+    ) => {
+      try {
+        const input = {
+          projectId: task.projectId,
+          principalId: executionActorId,
+          authSource,
+          permission: "write" as const,
+          taskId: task.id,
+          agentId: targetAgentId,
+          ...expected,
+        };
+        return full
+          ? await this.executionDecisions.assertDispatch(input)
+          : await this.executionDecisions.assertDispatchAuthorization(input);
+      } catch (error) {
+        if (!(error instanceof ExecutionDecisionError)) throw error;
+        await this.repositories.identityAdministration.appendAuditEvent({
+          action: "execution.dispatch.denied",
+          decision: "denied",
+          actorPrincipalId: executionActorId,
+          subjectPrincipalId: executionActorId,
+          reason: error.message,
+          metadata: {
+            projectId: task.projectId,
+            taskId: task.id,
+            agentId: targetAgentId,
+            code: error.code,
+            details: error.details ?? null,
+          },
+        });
+        throw new ApplicationError(
+          error.code,
+          error.message,
+          error.statusCode,
+          error.details,
+        );
+      }
+    };
+    await assertDispatchDecision({}, false);
     const runId = randomUUID();
     const prepared = await this.prepareExecution({
       agent,
-      actorId,
+      actorId: executionActorId,
       administrator,
       projectId: task.projectId,
       contextType: "task",
       contextId: task.id,
       taskId: task.id,
       runId,
+      ...(input.delegation === undefined
+        ? {}
+        : { delegation: input.delegation }),
+    });
+    await assertDispatchDecision({
+      runtimeRevision: prepared.executionEnvelope.runtime.revision,
+      bindingRevision: prepared.executionEnvelope.binding.revision,
+      policyRevision: prepared.executionEnvelope.policy.revision,
     });
     const executionSnapshot = prepared.executionSnapshot;
 
@@ -2851,11 +3893,24 @@ export class PlatformApplication {
       "已保存本次运行的输入快照",
       { inputSnapshot },
     );
+    if (input.delegation !== undefined) {
+      await this.repositories.delegations.attachRun({
+        delegationId: input.delegation.id,
+        runId,
+        ticketId: prepared.actionTicket.ticketId,
+        status: prepared.executionGates.some(
+          (gate) => gate.enforcement === "blocking",
+        )
+          ? "waiting_approval"
+          : "queued",
+      });
+    }
     await this.repositories.taskCollaboration.appendEvent({
       taskId,
       kind: "dispatch",
-      actorId: "local-admin",
-      actorName: "Local Admin",
+      actorId: executionActorId,
+      actorName:
+        input.delegation?.representativeDisplayName ?? executionActorId,
       summary: "派发任务执行",
       data: {
         runId,
@@ -2932,7 +3987,8 @@ export class PlatformApplication {
   }
 
   async getRunContext(runId: string, actorId = "local-admin") {
-    await this.getRunDetail(runId, actorId);
+    const detail = await this.getRunDetail(runId, actorId);
+    await this.assertRunContextReadable(detail.run, actorId);
     const context = await this.repositories.contexts.getByRun(runId);
     if (context === undefined) {
       throw new ApplicationError(
@@ -2953,7 +4009,8 @@ export class PlatformApplication {
       Awaited<ReturnType<PlatformRepositories["contexts"]["getByRun"]>>
     >["pack"];
   }> {
-    await this.getRunDetail(runId, actorId);
+    const detail = await this.getRunDetail(runId, actorId);
+    await this.assertRunContextReadable(detail.run, actorId);
     const [scene, context] = await Promise.all([
       this.sceneContext.getRunSnapshot(runId, actorId),
       this.repositories.contexts.getByRun(runId),
@@ -3044,6 +4101,25 @@ export class PlatformApplication {
       );
     }
     return detail.run.executionEnvelope;
+  }
+
+  private async assertRunContextReadable(
+    run: RunDetail["run"],
+    actorId: string,
+  ): Promise<void> {
+    if (run.projectId !== null) {
+      await this.requireProjectReadAccess(run.projectId, actorId);
+      return;
+    }
+    if (run.directChatTurnId !== null) {
+      if (!(await this.repositories.directChats.canAccessRun(run.id, actorId))) {
+        throw new ApplicationError(
+          "direct_chat_forbidden",
+          "The AI direct chat belongs to another account",
+          403,
+        );
+      }
+    }
   }
 
   async getRunActionTicket(
@@ -3255,6 +4331,10 @@ export class PlatformApplication {
         "A return decision requires a note",
         400,
       );
+    }
+    if (input.decision === "approve") {
+      await this.acceptance.assertIndependentReviewer(task, actorId);
+      await this.acceptance.assertReadyForReview(taskId);
     }
     const runs = await this.repositories.runs.listByTask(taskId);
     const latestRun = runs.find((run) => run.status === "completed");
@@ -3687,16 +4767,86 @@ export class PlatformApplication {
     });
   }
 
+  async getProjectAiPm(
+    projectId: string,
+    actorId: string,
+  ): Promise<ProjectAiPm> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    const manager = await this.repositories.projectAiPms.get(projectId);
+    if (manager === undefined) {
+      throw new ApplicationError(
+        "project_ai_pm_not_found",
+        "Project AI PM has not been provisioned",
+        404,
+      );
+    }
+    return manager;
+  }
+
+  async provisionProjectAiPm(
+    projectId: string,
+    input: ProvisionProjectAiPmInput,
+    actorId: string,
+  ): Promise<ProjectAiPmProvisionResult> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    if (
+      !(await this.repositories.featureFlags.isEnabled(
+        "project.ai_pm",
+        projectId,
+      ))
+    ) {
+      throw new ApplicationError(
+        "project_ai_pm_disabled",
+        "Project AI PM is disabled",
+        409,
+        { flagKey: "project.ai_pm" },
+      );
+    }
+    try {
+      return await this.repositories.projectAiPms.provision({
+        projectId,
+        actorPrincipalId: actorId,
+        value: input,
+      });
+    } catch (error) {
+      throw this.projectAiPmError(error);
+    }
+  }
+
   async generateProjectReport(
     projectId: string,
-    reportDate: string | undefined,
+    input: GenerateProjectReportInput,
     actorId: string,
   ): Promise<ProjectReportGenerationResult> {
     await this.requireActiveProjectPermission(projectId, "approve", actorId);
+    if (
+      await this.repositories.featureFlags.isEnabled("project.ai_pm", projectId)
+    ) {
+      try {
+        await this.repositories.projectAiPms.provision({
+          projectId,
+          actorPrincipalId: actorId,
+        });
+      } catch (error) {
+        throw this.projectAiPmError(error);
+      }
+    }
     const result =
       await this.repositories.workbenchReports.generateProjectReport({
         projectId,
-        reportDate: reportDate ?? todayInShanghai(),
+        reportDate: input.reportDate ?? todayInShanghai(),
+        ...(input.reportKind === undefined
+          ? {}
+          : { reportKind: input.reportKind }),
+        ...(input.periodStart === undefined
+          ? {}
+          : { periodStart: input.periodStart }),
+        ...(input.periodEnd === undefined
+          ? {}
+          : { periodEnd: input.periodEnd }),
+        ...(input.triggerSource === undefined
+          ? {}
+          : { triggerSource: input.triggerSource }),
         actorId,
       });
     return {
@@ -4428,8 +5578,284 @@ export class PlatformApplication {
     return project;
   }
 
+  private async maybeProvisionProjectAiPm(
+    projectId: string,
+    actorId: string,
+  ): Promise<void> {
+    if (
+      !(await this.repositories.featureFlags.isEnabled(
+        "project.ai_pm",
+        projectId,
+      ))
+    ) {
+      return;
+    }
+    try {
+      await this.repositories.projectAiPms.provision({
+        projectId,
+        actorPrincipalId: actorId,
+      });
+    } catch {
+      // Project creation is the primary transaction. Provisioning state and
+      // audit are persisted separately and can be retried.
+    }
+  }
+
+  private projectAiPmError(error: unknown): unknown {
+    if (!(error instanceof ProjectAiPmRepositoryError)) return error;
+    const statusCode =
+      error.code === "project_ai_pm_actor_invalid"
+        ? 403
+        : error.code === "project_ai_pm_disabled" ||
+            error.code === "project_ai_pm_dependency_disabled" ||
+            error.code === "project_ai_pm_project_invalid"
+          ? 409
+          : error.code === "project_ai_pm_runtime_invalid"
+            ? 400
+            : 409;
+    return new ApplicationError(
+      error.code,
+      error.message,
+      statusCode,
+      { retryable: error.code !== "project_ai_pm_disabled" },
+    );
+  }
+
+  private async requireFeatureEnabled(
+    flagKey: "task.capture" | "context.group_policy",
+    projectId: string | null,
+  ): Promise<void> {
+    if (
+      !(await this.repositories.featureFlags.isEnabled(flagKey, projectId))
+    ) {
+      throw new ApplicationError(
+        "feature_disabled",
+        `Feature Flag ${flagKey} is disabled`,
+        409,
+        { flagKey },
+      );
+    }
+  }
+
+  private assertPlatformAdministrator(actorId: string): void {
+    if (actorId !== "local-admin") {
+      throw new ApplicationError(
+        "platform_admin_required",
+        "Platform administrator permission is required",
+        403,
+      );
+    }
+  }
+
+  private assertContextPolicyAdministrator(
+    scopeType: "platform" | "project",
+    projectId: string | undefined,
+    actorId: string,
+  ): void {
+    if (scopeType === "platform") {
+      this.assertPlatformAdministrator(actorId);
+      return;
+    }
+    if (projectId === undefined) {
+      throw new ApplicationError(
+        "context_policy_project_required",
+        "Project Context Policy requires projectId",
+        400,
+      );
+    }
+  }
+
+  private async requireContextPolicyEnabled(
+    projectId: string | undefined,
+    actorId: string,
+  ): Promise<void> {
+    if (projectId !== undefined) {
+      await this.requireFeatureEnabled("context.group_policy", projectId);
+      await this.requireActiveProjectPermission(
+        projectId,
+        "manage_roles",
+        actorId,
+      );
+    }
+  }
+
+  private mapTaskCaptureError(error: unknown): unknown {
+    if (!(error instanceof TaskCaptureRepositoryError)) return error;
+    const status =
+      error.code === "task_capture_session_not_found" ||
+      error.code === "task_capture_candidate_not_found" ||
+      error.code === "task_capture_batch_not_found" ||
+      error.code === "task_capture_draft_not_found"
+        ? 404
+        : 409;
+    return new ApplicationError(error.code, error.message, status, error.details);
+  }
+
   async listWorkflows(projectId: string): Promise<WorkflowDefinition[]> {
     return this.repositories.workflows.list(projectId);
+  }
+
+  async listPlatformWorkflowTemplates(
+    actorId: string,
+  ): Promise<WorkflowDefinition[]> {
+    try {
+      return await this.workflowAssignments.listPlatformTemplates(actorId);
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async getWorkflowDefinition(
+    workflowId: string,
+    actorId: string,
+  ): Promise<WorkflowDefinition> {
+    try {
+      return await this.workflowAssignments.getReadableDefinition(
+        workflowId,
+        actorId,
+      );
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async updateWorkflowDefinition(
+    workflowId: string,
+    input: UpdateWorkflowDefinitionInput,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<WorkflowDefinition> {
+    try {
+      return await this.workflowAssignments.updateDefinition(
+        workflowId,
+        input,
+        actorId,
+        administrator,
+      );
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async publishWorkflowDefinition(
+    workflowId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<WorkflowDefinition> {
+    try {
+      return await this.workflowAssignments.publishDefinition(
+        workflowId,
+        actorId,
+        administrator,
+      );
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async unpublishWorkflowDefinition(
+    workflowId: string,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<WorkflowDefinition> {
+    try {
+      return await this.workflowAssignments.unpublishDefinition(
+        workflowId,
+        actorId,
+        administrator,
+      );
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async preflightWorkflowInstance(
+    workflowId: string,
+    actorId: string,
+    input: WorkflowInstancePreflightInput,
+  ): Promise<WorkflowInstancePreflight> {
+    try {
+      const resolved = await this.workflowAssignments.preflight({
+        workflowId,
+        actorId,
+        input,
+      });
+      return resolved.preflight;
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async getWorkflowInstanceBindings(
+    instanceId: string,
+  ): Promise<WorkflowInstanceBindings> {
+    try {
+      return await this.workflowAssignments.getBindings(instanceId);
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async replaceWorkflowInstanceBindings(
+    instanceId: string,
+    input: ReplaceWorkflowInstanceBindingsInput,
+    actorId: string,
+  ): Promise<WorkflowInstanceBindings> {
+    try {
+      const instance = await this.getWorkflowInstance(instanceId);
+      return await this.workflowAssignments.replaceInstanceBindings({
+        instance,
+        actorId,
+        expectedBindingRevision: input.expectedBindingRevision,
+        overrides: input.bindingOverrides,
+        sourceChangeReason: input.sourceChangeReason,
+      });
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async listProjectRoleMappingPresets(
+    projectId: string,
+  ): Promise<ProjectRoleMappingPreset[]> {
+    await this.requireProject(projectId);
+    return this.workflowAssignments.listPresets(projectId);
+  }
+
+  async upsertProjectRoleMappingPreset(
+    projectId: string,
+    input: UpsertProjectRoleMappingPresetInput,
+    actorId: string,
+  ): Promise<ProjectRoleMappingPreset> {
+    try {
+      return await this.workflowAssignments.upsertPreset({
+        projectId,
+        roleId: input.roleId,
+        assignees: input.assignees,
+        actorId,
+        ...(input.expectedRevision === undefined
+          ? {}
+          : { expectedRevision: input.expectedRevision }),
+      });
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
+  }
+
+  async deleteProjectRoleMappingPreset(
+    projectId: string,
+    roleId: string,
+    actorId: string,
+  ): Promise<void> {
+    try {
+      await this.workflowAssignments.deletePreset({
+        projectId,
+        roleId,
+        actorId,
+      });
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
+    }
   }
 
   validateWorkflowMarkdown(
@@ -4454,16 +5880,37 @@ export class PlatformApplication {
     const roles = await this.repositories.projectMemberships.listRoles(
       input.projectId,
     );
-    const roleIds = new Set(roles.map((role) => role.id));
-    const steps: WorkflowStepDefinition[] = [];
-    for (const node of validation.graph.nodes) {
-      if (node.executor.kind === "role" && !roleIds.has(node.executor.id)) {
+    const rolesById = new Map(roles.map((role) => [role.id, role]));
+    const rolesByCode = new Map(roles.map((role) => [role.code, role]));
+    const normalizeExecutor = (
+      executor: WorkflowGraphNode["executor"],
+    ): WorkflowGraphNode["executor"] => {
+      if (executor.kind !== "role") return executor;
+      const role =
+        rolesById.get(executor.id) ?? rolesByCode.get(executor.id);
+      if (role === undefined) {
         throw new ApplicationError(
           "project_role_not_found",
-          `Workflow role is not in the project: ${node.executor.id}`,
+          `Workflow role is not in the project: ${executor.id}`,
           400,
         );
       }
+      return {
+        ...executor,
+        id: role.id,
+        roleCode: role.code,
+      };
+    };
+    const normalizedGraph: WorkflowGraph = {
+      ...validation.graph,
+      nodes: validation.graph.nodes.map((node) => ({
+        ...node,
+        executor: normalizeExecutor(node.executor),
+        approvers: node.approvers.map(normalizeExecutor),
+      })),
+    };
+    const steps: WorkflowStepDefinition[] = [];
+    for (const node of normalizedGraph.nodes) {
       const agent =
         node.executor.kind === "agent" && isUuid(node.executor.id)
           ? await this.repositories.agents.get(node.executor.id)
@@ -4475,7 +5922,12 @@ export class PlatformApplication {
           node.executor.kind === "agent" || node.executor.kind === "role"
             ? "agent"
             : "human",
-        ...(node.executor.kind === "role" ? { roleId: node.executor.id } : {}),
+        ...(node.executor.kind === "role"
+          ? {
+              roleId: node.executor.id,
+              roleCode: node.executor.roleCode,
+            }
+          : {}),
         ...(agent === undefined ? {} : { agentId: agent.id }),
         autoDispatch: node.autoDispatch,
       });
@@ -4483,7 +5935,7 @@ export class PlatformApplication {
     if (
       await this.repositories.workflowRuntime.hasSubworkflowCycle(
         input.projectId,
-        validation.graph,
+        normalizedGraph,
         [],
       )
     ) {
@@ -4520,7 +5972,7 @@ export class PlatformApplication {
       [],
       {
         sourceMarkdown: input.markdown,
-        graph: validation.graph,
+        graph: normalizedGraph,
         steps,
       },
     );
@@ -4588,16 +6040,54 @@ export class PlatformApplication {
       );
     }
     const startInput: StartWorkflowInput =
-      typeof input === "string" ? { title: input, context: {} } : input;
+      typeof input === "string"
+        ? { title: input, context: {}, bindingOverrides: [] }
+        : input;
+    const projectId = startInput.projectId ?? workflow.projectId;
     if (workflow.graph === null) {
       await this.repositories.workflows.setGraphIfMissing(workflow.id, graph);
+    }
+    let resolution: WorkflowPreflightResolution;
+    try {
+      resolution = await this.workflowAssignments.resolve({
+        definition: workflow,
+        graph,
+        projectId,
+        actorId,
+        overrides: startInput.bindingOverrides,
+        ...(startInput.expectedDefinitionVersion === undefined
+          ? {}
+          : {
+              expectedDefinitionVersion: startInput.expectedDefinitionVersion,
+            }),
+      });
+      this.workflowAssignments.requireCanStart(resolution.preflight);
+      if (
+        startInput.expectedBindingRevision !== undefined &&
+        startInput.expectedBindingRevision !==
+          resolution.preflight.bindingRevision
+      ) {
+        throw new WorkflowAssignmentError(
+          "workflow_binding_revision_conflict",
+          "Workflow bindings changed after preflight",
+          409,
+          {
+            expectedBindingRevision: startInput.expectedBindingRevision,
+            bindingRevision: resolution.preflight.bindingRevision,
+          },
+        );
+      }
+    } catch (error) {
+      throw translateWorkflowAssignmentError(error);
     }
     return this.createWorkflowInstance({
       workflow,
       graph,
+      projectId,
       title: startInput.title,
       context: startInput.context,
       actorId,
+      resolution,
       ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
     });
   }
@@ -4605,20 +6095,38 @@ export class PlatformApplication {
   private async createWorkflowInstance(input: {
     readonly workflow: WorkflowDefinition;
     readonly graph: WorkflowGraph;
+    readonly projectId?: string;
     readonly title: string;
     readonly context: Record<string, string | number | boolean | null>;
     readonly actorId: string;
     readonly idempotencyKey?: string;
     readonly parentInstanceId?: string;
     readonly parentNodeId?: string;
+    readonly resolution?: WorkflowPreflightResolution;
   }): Promise<WorkflowInstance> {
-    await this.assertWorkflowActor(input.workflow.projectId, input.actorId);
+    const projectId = input.projectId ?? input.workflow.projectId;
+    let resolution = input.resolution;
+    if (resolution === undefined) {
+      try {
+        resolution = await this.workflowAssignments.resolve({
+          definition: input.workflow,
+          graph: input.graph,
+          projectId,
+          actorId: input.actorId,
+          overrides: [],
+        });
+        this.workflowAssignments.requireCanStart(resolution.preflight);
+      } catch (error) {
+        throw translateWorkflowAssignmentError(error);
+      }
+    }
+    await this.assertWorkflowActor(projectId, input.actorId);
     const ancestors = input.parentInstanceId
       ? await this.workflowAncestorKeys(input.parentInstanceId)
       : [];
     if (
       await this.repositories.workflowRuntime.hasSubworkflowCycle(
-        input.workflow.projectId,
+        projectId,
         input.graph,
         ancestors,
       )
@@ -4632,11 +6140,15 @@ export class PlatformApplication {
     const runtime = initializeWorkflowRuntime(input.graph, input.context);
     let instance = await this.repositories.workflowRuntime.createInstance({
       workflow: input.workflow,
+      projectId,
       graph: input.graph,
+      definitionSnapshot: input.graph,
       title: input.title,
       context: input.context,
       runtime,
       status: deriveWorkflowInstanceStatus(runtime),
+      bindingRevision: resolution.preflight.bindingRevision,
+      bindings: resolution.bindingSeed,
       ...(input.idempotencyKey === undefined
         ? {}
         : { idempotencyKey: input.idempotencyKey }),
@@ -4660,12 +6172,49 @@ export class PlatformApplication {
     instanceId: string,
     actorId = "local-admin",
     idempotencyKey?: string,
+    delegation?: Delegation,
   ): Promise<{
     readonly instance: WorkflowInstance;
     readonly task: Task;
     readonly runId: string;
   }> {
     const instance = await this.getWorkflowInstance(instanceId);
+    if (delegation !== undefined) {
+      const nodeSuffix = delegation.contextId.split(":").at(-1) ?? "";
+      const expectedContextId =
+        delegation.contextType === "workflow_node"
+          ? `${instance.id}:${nodeSuffix}`
+          : instance.id;
+      if (
+        delegation.status !== "active" ||
+        (delegation.contextType !== "workflow_instance" &&
+          delegation.contextType !== "workflow_node") ||
+        delegation.contextId !== expectedContextId ||
+        delegation.representativeKind !== "ai" ||
+        delegation.representativeAgentId === null
+      ) {
+        throw new ApplicationError(
+          "delegation_scope_mismatch",
+          "The Delegation does not authorize this workflow instance",
+          409,
+        );
+      }
+      const check = await this.delegations.checkAction(
+        delegation.id,
+        actorId,
+        {
+          action: "read_context",
+          expectedRevision: delegation.revision,
+        },
+      );
+      if (!check.allowed) {
+        throw new ApplicationError(
+          check.reason,
+          "Delegation cannot start this workflow node",
+          403,
+        );
+      }
+    }
     if (instance.status !== "active" && instance.status !== "waiting") {
       throw new ApplicationError(
         "workflow_not_active",
@@ -4706,6 +6255,8 @@ export class PlatformApplication {
       runtime,
       definition,
       actorId,
+      undefined,
+      delegation,
     );
     const status = deriveWorkflowInstanceStatus(runtime);
     const updated = await this.repositories.workflowRuntime.save(
@@ -4868,7 +6419,12 @@ export class PlatformApplication {
       );
     }
     await this.assertWorkflowActor(instance.projectId, actorId);
-    await this.assertWorkflowNodeActor(instance.projectId, definition, actorId);
+    await this.assertWorkflowNodeActor(
+      instance.projectId,
+      definition,
+      actorId,
+      instance.id,
+    );
     if (node.taskId !== null) {
       const task = await this.getTask(node.taskId);
       if (task.status !== "done") {
@@ -6093,10 +7649,32 @@ export class PlatformApplication {
       }
       if (node.type === "approval") {
         const sla = approvalSlaDeadlines(definition);
-        const approvers = await this.resolveWorkflowApprovers(
-          instance.projectId,
-          definition,
-        );
+        const boundApprovers = (
+          await this.workflowAssignments.getBindings(instance.id)
+        ).approvers.filter((approver) => approver.nodeId === node.nodeId);
+        const members =
+          boundApprovers.length === 0
+            ? []
+            : await this.repositories.projectMemberships.listMembers(
+                instance.projectId,
+              );
+        const approvers =
+          boundApprovers.length === 0
+            ? await this.resolveWorkflowApprovers(
+                instance.projectId,
+                definition,
+              )
+            : boundApprovers.flatMap((approver) => {
+                const member = members.find(
+                  (candidate) =>
+                    candidate.status === "active" &&
+                    (candidate.principalId ?? candidate.actorId) ===
+                      approver.principalId,
+                );
+                return member === undefined
+                  ? []
+                  : [{ actorId: member.actorId }];
+              });
         if (approvers.length === 0) {
           node.status = "failed";
           node.error = "审批节点没有可用的审批人";
@@ -6240,6 +7818,7 @@ export class PlatformApplication {
         const child = await this.createWorkflowInstance({
           workflow: childDefinition,
           graph: childDefinition.graph,
+          projectId: instance.projectId,
           title: `${instance.title} · ${node.name}`,
           context: { ...instance.runtime.context, parentNodeId: node.nodeId },
           actorId,
@@ -6275,9 +7854,18 @@ export class PlatformApplication {
         instance = saved;
         continue;
       }
+      const bindings = await this.workflowAssignments.getBindings(instance.id);
+      const assignment = bindings.assignments.find(
+        (candidate) => candidate.nodeId === node.nodeId,
+      );
+      const dispatchMode =
+        assignment?.dispatchMode ??
+        (definition.executor.kind === "role" ? "claim" : "assigned");
       if (
         node.type === "task" &&
         definition.autoDispatch &&
+        dispatchMode === "assigned" &&
+        node.taskId === null &&
         (definition.executor.kind === "agent" ||
           definition.executor.kind === "role")
       ) {
@@ -6315,6 +7903,57 @@ export class PlatformApplication {
         instance = saved;
         continue;
       }
+      if (
+        node.type === "task" &&
+        definition.autoDispatch &&
+        dispatchMode === "claim" &&
+        node.taskId === null
+      ) {
+        const task = await this.createWorkflowClaimTask(
+          instance,
+          definition,
+          actorId,
+        );
+        await this.repositories.workflowAssignments.attachTask(
+          instance.id,
+          node.nodeId,
+          task.id,
+        );
+        node.status = "running";
+        node.taskId = task.id;
+        node.startedAt ??= new Date().toISOString();
+        const status = deriveWorkflowInstanceStatus(runtime);
+        const saved = await this.repositories.workflowRuntime.save(
+          instance.id,
+          instance.revision,
+          {
+            runtime,
+            status,
+            actorId,
+            audits: [
+              {
+                kind: "node.ready",
+                nodeId: node.nodeId,
+                summary: `节点“${node.name}”已进入候选池等待认领`,
+                data: {
+                  taskId: task.id,
+                  dispatchMode: "claim",
+                  candidates: assignment?.candidatePool ?? [],
+                },
+              },
+            ],
+          },
+        );
+        if (saved === undefined) {
+          throw new ApplicationError(
+            "workflow_revision_conflict",
+            "Workflow instance changed concurrently",
+            409,
+          );
+        }
+        instance = saved;
+        continue;
+      }
       return instance;
     }
     throw new ApplicationError(
@@ -6324,17 +7963,58 @@ export class PlatformApplication {
     );
   }
 
+  private async createWorkflowClaimTask(
+    instance: WorkflowInstance,
+    definition: WorkflowGraphNode,
+    actorId: string,
+  ): Promise<Task> {
+    const assignee = await this.resolveWorkflowAgent(
+      instance.projectId,
+      definition,
+      instance.id,
+    );
+    const task = await this.createTask({
+      projectId: instance.projectId,
+      title: `${instance.title} · ${definition.name}`,
+      description: [
+        `工作流节点：${definition.name}`,
+        `实例：${instance.id}`,
+        `上下文：${JSON.stringify(instance.runtime.context)}`,
+        definition.description,
+        "该节点通过现有任务队列由候选成员认领。",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      acceptance: ["完成节点交付并可供人工验收"],
+      dependsOn: [],
+      ...(assignee.roleId === undefined
+        ? { agentId: assignee.agentId }
+        : { roleId: assignee.roleId }),
+    });
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: task.id,
+      kind: "dispatch",
+      actorId,
+      actorName: actorId,
+      summary: `工作流节点“${definition.name}”已加入认领池`,
+      data: { instanceId: instance.id, nodeId: definition.id },
+    });
+    return task;
+  }
+
   private async startWorkflowNodeTask(
     instance: WorkflowInstance,
     runtime: WorkflowRuntimeState,
     definition: WorkflowGraphNode,
     actorId: string,
     existingTask?: Task,
+    delegation?: Delegation,
   ): Promise<{ readonly task: Task; readonly runId: string }> {
     const node = requireRuntimeNode(runtime, definition.id);
     const assignee = await this.resolveWorkflowAgent(
       instance.projectId,
       definition,
+      instance.id,
     );
     const task =
       existingTask ??
@@ -6375,6 +8055,18 @@ export class PlatformApplication {
         409,
       );
     }
+    if (
+      delegation !== undefined &&
+      (delegation.representativeAgentId !== agent.id ||
+        (delegation.contextType === "workflow_node" &&
+          delegation.contextId !== `${instance.id}:${node.nodeId}`))
+    ) {
+      throw new ApplicationError(
+        "delegation_scope_mismatch",
+        "The workflow node assignee does not match the Delegation representative",
+        409,
+      );
+    }
     requireExecutableRuntime(agent);
     node.attempt += 1;
     if (node.attempt > definition.maxAttempts) {
@@ -6402,16 +8094,19 @@ export class PlatformApplication {
       },
     };
     const deadline = timeoutAt(definition.timeoutSeconds);
+    const executionActorId =
+      delegation?.representativePrincipalId ?? actorId;
     const prepared = await this.prepareExecution({
       agent,
-      actorId,
-      administrator: actorId === "local-admin",
+      actorId: executionActorId,
+      administrator: delegation === undefined && actorId === "local-admin",
       projectId: instance.projectId,
       contextType: "workflow-task",
       contextId: task.id,
       taskId: task.id,
       runId,
       deadlineAt: deadline,
+      ...(delegation === undefined ? {} : { delegation }),
     });
     const executionSnapshot = prepared.executionSnapshot;
     await this.repositories.runs.enqueue({
@@ -6442,11 +8137,23 @@ export class PlatformApplication {
       "已保存工作流节点的运行输入快照",
       { inputSnapshot, workflowInstanceId: instance.id, nodeId: node.nodeId },
     );
+    if (delegation !== undefined) {
+      await this.repositories.delegations.attachRun({
+        delegationId: delegation.id,
+        runId,
+        ticketId: prepared.actionTicket.ticketId,
+        status: prepared.executionGates.some(
+          (gate) => gate.enforcement === "blocking",
+        )
+          ? "waiting_approval"
+          : "queued",
+      });
+    }
     await this.repositories.taskCollaboration.appendEvent({
       taskId: task.id,
       kind: "dispatch",
-      actorId,
-      actorName: actorId,
+      actorId: executionActorId,
+      actorName: delegation?.representativeDisplayName ?? executionActorId,
       summary: `派发工作流节点“${definition.name}”第 ${node.attempt} 次执行`,
       data: { runId, instanceId: instance.id, nodeId: node.nodeId },
     });
@@ -6463,9 +8170,45 @@ export class PlatformApplication {
   private async resolveWorkflowAgent(
     projectId: string,
     node: WorkflowGraphNode,
+    instanceId?: string,
   ): Promise<{ readonly agentId: string; readonly roleId?: string }> {
     const members =
       await this.repositories.projectMemberships.listMembers(projectId);
+    if (instanceId !== undefined) {
+      const bindings = await this.workflowAssignments.getBindings(instanceId);
+      const assignment = bindings.assignments.find(
+        (candidate) => candidate.nodeId === node.id,
+      );
+      const preferred = [
+        ...(assignment?.primaryPrincipalId === null ||
+        assignment?.primaryPrincipalId === undefined
+          ? []
+          : [assignment.primaryPrincipalId]),
+        ...(assignment?.candidatePool.map((candidate) => candidate.principalId) ??
+          []),
+      ];
+      for (const principalId of preferred) {
+        const member = members.find(
+          (candidate) =>
+            candidate.status === "active" &&
+            (candidate.principalId ?? candidate.actorId) === principalId,
+        );
+        if (member?.kind === "agent") {
+          const roleId =
+            member.roles.find(
+              (role) =>
+                node.executor.roleCode !== undefined &&
+                role.code === node.executor.roleCode,
+            )?.id ?? member.roles[0]?.id;
+          return {
+            agentId: member.actorId,
+            ...(node.executor.kind === "role" && roleId !== undefined
+              ? { roleId }
+              : {}),
+          };
+        }
+      }
+    }
     if (node.executor.kind === "role") {
       const member = members.find(
         (candidate) =>
@@ -6594,6 +8337,7 @@ export class PlatformApplication {
     projectId: string,
     node: WorkflowGraphNode,
     actorId: string,
+    instanceId?: string,
   ): Promise<void> {
     const members =
       await this.repositories.projectMemberships.listMembers(projectId);
@@ -6611,6 +8355,29 @@ export class PlatformApplication {
     if (node.executor.kind === "system") {
       await this.requireActiveProjectPermission(projectId, "write", actorId);
       return;
+    }
+    if (instanceId !== undefined) {
+      const bindings = await this.workflowAssignments.getBindings(instanceId);
+      const assignment = bindings.assignments.find(
+        (candidate) => candidate.nodeId === node.id,
+      );
+      if (assignment !== undefined) {
+        const principalId = member.principalId ?? member.actorId;
+        const allowed =
+          assignment.dispatchMode === "claim"
+            ? assignment.candidatePool.some(
+                (candidate) => candidate.principalId === principalId,
+              )
+            : assignment.primaryPrincipalId === principalId;
+        if (!allowed) {
+          throw new ApplicationError(
+            "workflow_node_forbidden",
+            "This workflow node is assigned to another Principal",
+            403,
+          );
+        }
+        return;
+      }
     }
     if (node.executor.kind === "user" && member.actorId !== node.executor.id) {
       throw new ApplicationError(
@@ -6901,13 +8668,22 @@ export class PlatformApplication {
       throw error;
     }
     const message = posted.message;
-    if (!posted.reused && mentionedAgentIds.size > 0) {
+    if (!posted.reused) {
       const policy = await this.repositories.meetingAi.getPolicy(meetingId);
-      if (
-        policy !== undefined &&
-        policy.status === "active" &&
-        policy.triggerKinds.includes("mention")
-      ) {
+      if (policy !== undefined && policy.status === "active") {
+        const triggerAgentIds =
+          policy.autoSpeak === "all"
+            ? (
+                await this.repositories.meetingAi.listParticipants(meetingId)
+              )
+                .filter((participant) => participant.status === "active")
+                .map((participant) => participant.agentId)
+            : policy.autoSpeak === "mentions"
+              ? [...mentionedAgentIds]
+              : [];
+        if (triggerAgentIds.length === 0) {
+          return message;
+        }
         try {
           await this.repositories.meetingAi.trigger({
             meetingId,
@@ -6915,9 +8691,12 @@ export class PlatformApplication {
             actorId,
             trigger: {
               kind: "mention",
-              agentIds: [...mentionedAgentIds],
+              agentIds: triggerAgentIds,
               sourceMessageId: message.id,
-              reason: "A human participant mentioned the AI teammate",
+              reason:
+                policy.autoSpeak === "all"
+                  ? "Meeting autoSpeak=all triggered every active AI participant"
+                  : "A human participant mentioned the AI teammate",
             },
             fallbackSummaryKey: message.id,
           });
@@ -6943,6 +8722,44 @@ export class PlatformApplication {
       );
     }
     return policy;
+  }
+
+  async listMeetingAiParticipants(
+    meetingId: string,
+    actorId = "local-admin",
+  ): Promise<readonly MeetingAiParticipant[]> {
+    await this.getMeeting(meetingId, actorId);
+    return this.repositories.meetingAi.listParticipants(meetingId);
+  }
+
+  async updateMeetingAiParticipant(
+    meetingId: string,
+    agentId: string,
+    input: UpdateMeetingAiParticipantInput,
+    actorId = "local-admin",
+  ): Promise<MeetingAiParticipant> {
+    const detail = await this.getMeeting(meetingId, actorId);
+    this.assertMeetingActive(detail);
+    await this.requireActiveProjectPermission(
+      detail.meeting.projectId,
+      "write",
+      actorId,
+    );
+    const updated = await this.repositories.meetingAi.updateParticipant({
+      meetingId,
+      agentId,
+      expectedRevision: input.expectedRevision,
+      value: input,
+      actorId,
+    });
+    if (updated === undefined) {
+      throw new ApplicationError(
+        "meeting_ai_participant_revision_conflict",
+        "Meeting AI participant changed or cannot transition",
+        409,
+      );
+    }
+    return updated;
   }
 
   async updateMeetingAiPolicy(
@@ -7013,6 +8830,40 @@ export class PlatformApplication {
     actorId = "local-admin",
   ): Promise<TriggerMeetingAiResult> {
     const detail = await this.getMeeting(meetingId, actorId);
+    const delegation =
+      input.delegationId === undefined
+        ? undefined
+        : await this.delegations.get(input.delegationId, actorId);
+    if (
+      delegation !== undefined &&
+      (delegation.contextType !== "meeting" ||
+        delegation.contextId !== meetingId ||
+        delegation.representativeKind !== "ai" ||
+        delegation.representativeAgentId === null)
+    ) {
+      throw new ApplicationError(
+        "delegation_scope_mismatch",
+        "The Delegation does not authorize this meeting and AI representative",
+        409,
+      );
+    }
+    if (delegation !== undefined) {
+      const check = await this.delegations.checkAction(
+        delegation.id,
+        actorId,
+        {
+          action: "read_context",
+          expectedRevision: delegation.revision,
+        },
+      );
+      if (!check.allowed) {
+        throw new ApplicationError(
+          check.reason,
+          "Delegation cannot start meeting participation",
+          403,
+        );
+      }
+    }
     this.assertMeetingActive(detail);
     await this.requireActiveProjectPermission(
       detail.meeting.projectId,
@@ -7020,7 +8871,14 @@ export class PlatformApplication {
       actorId,
     );
     const policy = await this.getMeetingAiPolicy(meetingId, actorId);
-    let trigger = input;
+    let trigger: TriggerMeetingAiInput =
+      delegation?.representativeAgentId === null ||
+      delegation?.representativeAgentId === undefined
+        ? input
+        : {
+            ...input,
+            agentIds: [delegation.representativeAgentId],
+          };
     if (trigger.kind === "mention" && trigger.sourceMessageId === undefined) {
       const lastMessage = [...detail.messages]
         .reverse()
@@ -7035,7 +8893,7 @@ export class PlatformApplication {
       trigger = { ...trigger, sourceMessageId: lastMessage.id };
     }
     try {
-      return await this.repositories.meetingAi.trigger({
+      const result = await this.repositories.meetingAi.trigger({
         meetingId,
         projectId: detail.meeting.projectId,
         actorId,
@@ -7056,18 +8914,56 @@ export class PlatformApplication {
               409,
             );
           }
+          if (
+            delegation !== undefined &&
+            delegation.representativeAgentId !== agent.id
+          ) {
+            throw new ApplicationError(
+              "delegation_scope_mismatch",
+              "The meeting participant does not match the Delegation representative",
+              409,
+            );
+          }
+          const executionActorId =
+            delegation?.representativePrincipalId ?? actorId;
           return this.prepareExecution({
             agent,
-            actorId,
-            administrator: actorId === "local-admin",
+            actorId: executionActorId,
+            administrator:
+              delegation === undefined && actorId === "local-admin",
             projectId,
             contextType: "meeting",
             contextId: meetingId,
             taskId: turnId,
             runId,
+            ...(delegation === undefined ? {} : { delegation }),
           });
         },
       });
+      if (delegation !== undefined) {
+        for (const turn of result.turns) {
+          if (turn.runId === null) continue;
+          const ticket = await this.repositories.actionTickets.getByRun(
+            turn.runId,
+          );
+          await this.repositories.delegations.attachRun({
+            delegationId: delegation.id,
+            runId: turn.runId,
+            ticketId: ticket?.ticketId ?? null,
+            status:
+              turn.status === "running"
+                ? "running"
+                : turn.status === "completed"
+                  ? "completed"
+                  : turn.status === "failed"
+                    ? "failed"
+                    : turn.status === "cancelled"
+                      ? "cancelled"
+                      : "queued",
+          });
+        }
+      }
+      return result;
     } catch (error) {
       if (error instanceof MeetingAiPreconditionError) {
         throw new ApplicationError(
@@ -8999,6 +10895,39 @@ function translateProjectTemplateError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+function translateWorkflowAssignmentError(error: unknown): Error {
+  if (error instanceof ApplicationError) return error;
+  if (error instanceof WorkflowAssignmentError) {
+    return new ApplicationError(
+      error.code,
+      error.message,
+      error.statusCode,
+      error.details,
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function translateWorkflowPlanFailure(error: unknown): Error {
+  if (error instanceof ApplicationError) return error;
+  if (error instanceof WorkflowPlanApplicationError) {
+    return new ApplicationError(
+      error.code,
+      error.message,
+      error.statusCode,
+      error.details,
+    );
+  }
+  if (error instanceof WorkflowPlanRepositoryError) {
+    return new ApplicationError(
+      error.code,
+      error.message,
+      error.code === "workflow_plan_not_found" ? 404 : 409,
+    );
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 function assertExternalRuntimeManageable(
   runtime: ExternalRuntime,
   actorId: string,
@@ -9078,5 +11007,10 @@ function directChatApplicationError(error: unknown): Error {
 }
 
 export * from "./agent-runtime-preflight.js";
+export * from "./agent-task-tools.js";
+export * from "./delegation.js";
 export * from "./run-executor.js";
+export * from "./run-workspace.js";
+export * from "./data-fabric.js";
+export * from "./workbench-market.js";
 export * from "./runtime-metrics.js";

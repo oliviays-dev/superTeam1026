@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import type {
   Agent,
   AgentEpisode,
   ContextPack,
   ContextReceipt,
   CreateSceneContextContributionInput,
+  Delegation,
   MeetingPrivateBriefing,
   Project,
   Run,
@@ -41,6 +43,7 @@ export interface PrepareSceneContextInput {
   readonly directChatContext: DirectChatRunContext | null;
   readonly episodes: readonly AgentEpisode[];
   readonly runtimeStateful?: boolean | undefined;
+  readonly delegation?: Delegation | undefined;
 }
 
 export interface PreparedSceneContext {
@@ -58,6 +61,14 @@ function sceneIdentity(input: PrepareSceneContextInput): {
   readonly projectId: string | null;
   readonly ownerPrincipalId: string | null;
 } {
+  if (input.delegation !== undefined) {
+    return {
+      sceneType: "delegation",
+      sceneId: input.delegation.id,
+      projectId: input.delegation.projectId,
+      ownerPrincipalId: input.delegation.ownerPrincipalId,
+    };
+  }
   if (input.directChatContext !== null) {
     return {
       sceneType: "direct-chat",
@@ -112,6 +123,8 @@ function sourceClassForContribution(
     case "meeting-private-note":
       return "private-local-data";
     case "direct-chat-message":
+      return "private-local-data";
+    case "delegation-brief":
       return "private-local-data";
     default:
       return "workspace";
@@ -380,7 +393,11 @@ export class SceneContextService {
   async prepare(
     input: PrepareSceneContextInput,
   ): Promise<PreparedSceneContext> {
-    const scene = sceneIdentity(input);
+    const delegation =
+      input.delegation ??
+      (await this.repositories.delegations.getByRun(input.run.id));
+    const effectiveInput = { ...input, delegation };
+    const scene = sceneIdentity(effectiveInput);
     const principalId =
       input.run.executionEnvelope?.principalId ??
       scene.ownerPrincipalId ??
@@ -399,6 +416,20 @@ export class SceneContextService {
             agentPrincipalId,
           })
         : null;
+    const participantBinding =
+      scene.sceneType === "meeting" || scene.sceneType === "group"
+        ? await this.repositories.sceneContext.ensureParticipantBinding({
+            sceneId: scene.sceneId,
+            projectId: scene.projectId!,
+            agentId: input.agent.id,
+            agentPrincipalId:
+              agentPrincipalId ?? input.agent.principalId ?? input.agent.id,
+            principalId:
+              agentPrincipalId ??
+              input.agent.principalId ??
+              input.agent.id,
+          })
+        : undefined;
     const binding = await this.repositories.sceneContext.ensureSession({
       sceneType: scene.sceneType,
       sceneId: scene.sceneId,
@@ -407,6 +438,8 @@ export class SceneContextService {
       agentPrincipalId,
       ownerPrincipalId: scene.ownerPrincipalId,
       channelId: channel?.id ?? null,
+      delegationId: delegation?.id ?? null,
+      participantBindingId: participantBinding?.id ?? null,
     });
     const [
       projectTasks,
@@ -437,7 +470,7 @@ export class SceneContextService {
         : Promise.resolve([]),
     ]);
     for (const contribution of contributionInputs(
-      input,
+      effectiveInput,
       scene.sceneType,
       scene.sceneId,
       projectTasks,
@@ -451,6 +484,43 @@ export class SceneContextService {
         ...contribution,
       });
     }
+    if (delegation !== undefined && delegation.status === "active") {
+      await this.repositories.sceneContext.addContribution({
+        session: binding,
+        sourceKey: `delegation-brief:${delegation.revision}`,
+        kind: "delegation-brief",
+        version: String(delegation.revision),
+        authority: "instruction",
+        visibility: "scene",
+        text: [
+          `Objective: ${delegation.objective}`,
+          delegation.stance === "" ? "" : `Stance: ${delegation.stance}`,
+          delegation.watchItems.length === 0
+            ? ""
+            : `Watch items: ${delegation.watchItems.join("; ")}`,
+          `Allowed: ${delegation.allowedActions.join(", ")}`,
+          `Denied: ${delegation.deniedActions.join(", ")}`,
+        ]
+          .filter((line) => line !== "")
+          .join("\n")
+          .slice(0, 20_000),
+        sourceRefs: [
+          {
+            type: "delegation",
+            id: delegation.id,
+            label: delegation.displayName,
+            version: String(delegation.revision),
+            ...(delegation.projectId === null
+              ? {}
+              : { projectId: delegation.projectId }),
+            sceneType: "delegation",
+            sceneId: delegation.id,
+          },
+        ],
+        createdBy: "system:delegation",
+        ownerPrincipalId: delegation.ownerPrincipalId,
+      });
+    }
     const [cursor, previousReceipt, contributions] = await Promise.all([
       this.repositories.sceneContext.cursor(binding.id),
       this.repositories.sceneContext.previousReceipt(binding.id, input.run.id),
@@ -460,9 +530,20 @@ export class SceneContextService {
       }),
     ]);
     const stateful = runtimeStateful(input.run, input.runtimeStateful);
+    const contextPolicy =
+      await this.repositories.contextPolicies.effective(
+        scene.projectId,
+        scene.sceneType === "group"
+          ? "group"
+          : scene.sceneType === "meeting"
+            ? "meeting"
+            : scene.sceneType === "direct-chat"
+              ? "direct-chat"
+              : "default",
+      );
     const sourcePolicy = input.run.executionEnvelope?.envelope.sourcePolicy;
     const excluded: SceneContextExcludedSource[] = [];
-    const allowedContributions = contributions.filter((contribution) => {
+    let allowedContributions = contributions.filter((contribution) => {
       if (
         contribution.projectId !== null &&
         contribution.projectId !== scene.projectId
@@ -488,13 +569,33 @@ export class SceneContextService {
       }
       return true;
     });
+    const estimatedChars = allowedContributions.reduce(
+      (total, contribution) => total + contribution.text.length,
+      0,
+    );
+    const contextUsageRatio = Math.min(
+      99,
+      estimatedChars / contextPolicy.settings.maxContextChars,
+    );
+    let budgetExceeded = false;
+    if (contextUsageRatio >= contextPolicy.settings.rolloverRatio) {
+      budgetExceeded = true;
+      for (const contribution of allowedContributions) {
+        excluded.push({
+          sourceId: contribution.id,
+          reason: "budget",
+          safeLabel: contribution.sourceKey,
+        });
+      }
+      allowedContributions = [];
+    }
     const sceneBuild: SceneContextBuildInput = {
       binding,
       actorPrincipalId: principalId,
       contributions: allowedContributions,
       previousReceipt: stateful ? previousReceipt : undefined,
       runtimeStateful: stateful,
-      cursorBefore: cursor?.cursorSequence ?? 0,
+      cursorBefore: binding.lastContextSeq,
       excluded,
     };
     const createdAt = input.run.createdAt;
@@ -551,25 +652,65 @@ export class SceneContextService {
               scene: sceneBuild,
               now: new Date(createdAt),
             });
+    let pack = context.pack;
+    if (budgetExceeded) {
+      const index = excluded
+        .filter((source) => source.reason === "budget")
+        .map((source) => `- ${source.safeLabel ?? source.sourceId ?? "source"}`)
+        .join("\n");
+      const renderedPrompt = [
+        pack.renderedPrompt,
+        "",
+        "# Context budget exceeded",
+        "Full source text was withheld because the Scene budget rollover threshold was reached.",
+        "Only the source index and controlled tool entry points are available:",
+        index,
+        "Use entity.read, task.runs, or meeting.history to retrieve an authorized source incrementally.",
+      ].join("\n");
+      const contentHash = createHash("sha256")
+        .update(renderedPrompt)
+        .digest("hex");
+      pack = {
+        ...pack,
+        renderedPrompt,
+        contentHash,
+        logicalDigest: contentHash,
+      };
+    }
     const delivered = context.receipt.deliveredContributions;
     const reused = context.receipt.reusedContributions;
+    const boundarySeq = context.receipt.cursorAfter!;
+    pack = {
+      ...pack,
+      contextBoundarySeq: boundarySeq,
+      contextPolicyVersion: contextPolicy.revision,
+      contextUsageRatio,
+      rendererVersion:
+        contextUsageRatio >= contextPolicy.settings.rolloverRatio
+          ? "scene-context-v2-budget-index"
+          : "scene-context-v2-incremental",
+    };
     const receipt: SceneContextReceipt = {
       id: context.receipt.id!,
       runId: input.run.id,
-      contextPackId: context.pack.id,
+      contextPackId: pack.id,
       sceneSessionId: binding.id,
       sceneType: binding.sceneType,
       sceneId: binding.sceneId,
       projectId: binding.projectId,
+      delegationId: binding.delegationId ?? null,
       agentId: binding.agentId,
       principalId,
       agentPrincipalId: binding.agentPrincipalId,
       logicalDigest: context.pack.logicalDigest!,
       contentHash: context.pack.contentHash,
-      rendererVersion: context.pack.rendererVersion!,
+      rendererVersion: pack.rendererVersion!,
       runtimeStateful: stateful,
+      contextBoundarySeq: boundarySeq,
+      contextPolicyVersion: contextPolicy.revision,
+      contextUsageRatio,
       cursorBefore: sceneBuild.cursorBefore,
-      cursorAfter: context.receipt.cursorAfter!,
+      cursorAfter: boundarySeq,
       delivered,
       reused,
       sourceRefs: context.receipt.sourceRefs!,
@@ -581,12 +722,13 @@ export class SceneContextService {
       channel,
       cursor: cursor ?? null,
       receipt: null,
+      commitReceipt: null,
       contributions: allowedContributions,
     };
     return {
       binding,
       channel,
-      pack: context.pack,
+      pack,
       legacyReceipt: context.receipt,
       receipt,
       snapshot,
@@ -600,6 +742,18 @@ export class SceneContextService {
       receipt: input.receipt,
     });
     return receipt;
+  }
+
+  async stage(input: PreparedSceneContext): Promise<SceneContextReceipt> {
+    return this.repositories.sceneContext.savePreparedDelivery({
+      pack: input.pack,
+      legacyReceipt: input.legacyReceipt,
+      receipt: input.receipt,
+    });
+  }
+
+  async commitConsumed(runId: string) {
+    return this.repositories.sceneContext.commitConsumed(runId);
   }
 
   async getRunSnapshot(

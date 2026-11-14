@@ -15,6 +15,7 @@
     "@pluginmax/application": "workspace:*",
     "@pluginmax/config": "workspace:*",
     "@pluginmax/contracts": "workspace:*",
-    "@pluginmax/database": "workspace:*"
+    "@pluginmax/database": "workspace:*",
+    "@pluginmax/files": "workspace:*"
   }
 }

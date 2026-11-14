@@ -63,6 +63,7 @@ describe("meeting collaboration contracts", () => {
       meetingMessageSchema.parse({
         id: "00000000-0000-4000-8000-000000000012",
         meetingId: "00000000-0000-4000-8000-000000000010",
+        sequence: 1,
         authorType: "agent",
         authorId: "agent-principal",
         authorName: "AI Delegate",

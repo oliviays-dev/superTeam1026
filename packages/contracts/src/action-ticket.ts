@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { delegationTicketBindingSchema } from "./delegation.js";
 import { runExecutionEnvelopeSchema } from "./runtime-execution.js";
 
 export const actionTicketContextTypeSchema = z.enum([
@@ -137,6 +138,7 @@ export const actionTicketSchema = z.object({
   envelopeDigest: z.string().regex(/^[a-f0-9]{64}$/),
   authorizationSnapshot: actionTicketAuthorizationSnapshotSchema,
   executionEnvelope: runExecutionEnvelopeSchema,
+  delegation: delegationTicketBindingSchema.nullable().optional(),
   issuedAt: z.string().datetime({ offset: true }),
   expiresAt: z.string().datetime({ offset: true }),
   issuedBy: z.string().trim().min(1).max(180),

@@ -14,6 +14,11 @@ import type {
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import type { Database } from "./database.js";
+import {
+  appendWorkflowAuditWithClient,
+  insertWorkflowBindingsWithClient,
+  type WorkflowBindingSeed,
+} from "./workflow-assignment-repository.js";
 
 interface WorkflowInstanceRow {
   id: string;
@@ -32,6 +37,7 @@ interface WorkflowInstanceRow {
   paused_at: Date | null;
   last_reconciled_at: Date | null;
   revision: number;
+  binding_revision: string | null;
   current_step: number;
   steps: WorkflowStepState[];
   created_at: Date;
@@ -50,6 +56,11 @@ interface WorkflowDefinitionRow {
   status: WorkflowDefinition["status"];
   source_template_id: string | null;
   source_template_version: number | null;
+  scope: WorkflowDefinition["scope"];
+  origin: WorkflowDefinition["origin"];
+  published_by_principal_id: string | null;
+  published_at: Date | null;
+  revision: number;
   created_at: Date;
   updated_at: Date;
 }
@@ -93,7 +104,9 @@ interface WorkflowAuditRow {
 
 export interface CreateWorkflowRuntimeInstanceInput {
   readonly workflow: WorkflowDefinition;
+  readonly projectId: string;
   readonly graph: WorkflowGraph;
+  readonly definitionSnapshot: WorkflowGraph;
   readonly title: string;
   readonly context: Record<string, string | number | boolean | null>;
   readonly runtime: WorkflowRuntimeState;
@@ -101,6 +114,8 @@ export interface CreateWorkflowRuntimeInstanceInput {
   readonly idempotencyKey?: string;
   readonly parentInstanceId?: string;
   readonly parentNodeId?: string;
+  readonly bindingRevision?: string;
+  readonly bindings?: WorkflowBindingSeed;
 }
 
 export interface SaveWorkflowRuntimeInput {
@@ -177,7 +192,9 @@ export class WorkflowRuntimeRepository {
     return this.database.transaction(async (client) => {
       if (input.idempotencyKey !== undefined) {
         const existing = await client.query<WorkflowInstanceRow>(
-          `SELECT instance.*, definition.graph
+          `SELECT
+             instance.*,
+             COALESCE(instance.definition_snapshot, definition.graph) AS graph
            FROM workflow_instances AS instance
            JOIN workflow_definitions AS definition
              ON definition.id = instance.workflow_id
@@ -198,6 +215,7 @@ export class WorkflowRuntimeRepository {
              definition_key, definition_version,
              parent_instance_id, parent_node_id,
              runtime_context, runtime_nodes, runtime_edges,
+             definition_snapshot, binding_revision,
              failure_reason, paused_at, revision, start_idempotency_key,
              current_step, steps, created_at, updated_at
            ) VALUES (
@@ -205,19 +223,18 @@ export class WorkflowRuntimeRepository {
              $6, $7,
              $8, $9,
              $10::jsonb, $11::jsonb, $12::jsonb,
-             NULL, NULL, 1, $13,
-             0, $14::jsonb, NOW(), NOW()
+             $13::jsonb, $14,
+             NULL, NULL, 1, $15,
+             0, $16::jsonb, NOW(), NOW()
            )
            RETURNING *
          )
-         SELECT inserted.*, definition.graph
-         FROM inserted
-         JOIN workflow_definitions AS definition
-           ON definition.id = inserted.workflow_id`,
+         SELECT inserted.*, inserted.definition_snapshot AS graph
+         FROM inserted`,
         [
           id,
           input.workflow.id,
-          input.workflow.projectId,
+          input.projectId,
           input.title,
           input.status,
           input.graph.key,
@@ -227,10 +244,47 @@ export class WorkflowRuntimeRepository {
           JSON.stringify(input.context),
           JSON.stringify(input.runtime.nodes),
           JSON.stringify(input.runtime.edges),
+          JSON.stringify(input.definitionSnapshot),
+          input.bindingRevision ?? null,
           input.idempotencyKey ?? null,
           JSON.stringify(steps),
         ],
       );
+      if (input.bindings !== undefined) {
+        await insertWorkflowBindingsWithClient(client, {
+          assignments: input.bindings.assignments.map((assignment) => ({
+            ...assignment,
+            instanceId: id,
+          })),
+          approvers: input.bindings.approvers.map((approver) => ({
+            ...approver,
+            instanceId: id,
+          })),
+        });
+        await appendWorkflowAuditWithClient(
+          client,
+          id,
+          "system",
+          input.bindings.assignments.map((assignment) => ({
+            kind:
+              assignment.status === "unresolved"
+                ? "assignment.unresolved"
+                : "assignment.resolved",
+            nodeId: assignment.nodeId,
+            summary:
+              assignment.status === "unresolved"
+                ? `节点“${assignment.nodeId}”责任绑定未解析`
+                : `节点“${assignment.nodeId}”责任绑定已解析`,
+            data: {
+              dispatchMode: assignment.dispatchMode,
+              status: assignment.status,
+              primaryPrincipalId: assignment.primaryPrincipalId,
+              candidatePool: assignment.candidatePool,
+              source: assignment.source,
+            },
+          })),
+        );
+      }
       await appendAudits(client, id, "system", [
         {
           kind: "instance.started",
@@ -250,7 +304,9 @@ export class WorkflowRuntimeRepository {
 
   async list(projectId: string): Promise<WorkflowInstance[]> {
     const result = await this.database.query<WorkflowInstanceRow>(
-      `SELECT instance.*, definition.graph
+      `SELECT
+         instance.*,
+         COALESCE(instance.definition_snapshot, definition.graph) AS graph
        FROM workflow_instances AS instance
        JOIN workflow_definitions AS definition
          ON definition.id = instance.workflow_id
@@ -263,7 +319,9 @@ export class WorkflowRuntimeRepository {
 
   async get(id: string): Promise<WorkflowInstance | undefined> {
     const result = await this.database.query<WorkflowInstanceRow>(
-      `SELECT instance.*, definition.graph
+      `SELECT
+         instance.*,
+         COALESCE(instance.definition_snapshot, definition.graph) AS graph
        FROM workflow_instances AS instance
        JOIN workflow_definitions AS definition
          ON definition.id = instance.workflow_id
@@ -276,7 +334,9 @@ export class WorkflowRuntimeRepository {
 
   async listChildren(instanceId: string): Promise<WorkflowInstance[]> {
     const result = await this.database.query<WorkflowInstanceRow>(
-      `SELECT instance.*, definition.graph
+      `SELECT
+         instance.*,
+         COALESCE(instance.definition_snapshot, definition.graph) AS graph
        FROM workflow_instances AS instance
        JOIN workflow_definitions AS definition
          ON definition.id = instance.workflow_id
@@ -315,7 +375,9 @@ export class WorkflowRuntimeRepository {
              AND instance.revision = $2
            RETURNING instance.*
          )
-         SELECT updated.*, definition.graph
+         SELECT
+           updated.*,
+           COALESCE(updated.definition_snapshot, definition.graph) AS graph
          FROM updated
          JOIN workflow_definitions AS definition
            ON definition.id = updated.workflow_id`,
@@ -946,6 +1008,7 @@ function instanceFromRow(row: WorkflowInstanceRow): WorkflowInstance {
     failureReason: row.failure_reason,
     pausedAt: row.paused_at?.toISOString() ?? null,
     lastReconciledAt: row.last_reconciled_at?.toISOString() ?? null,
+    bindingRevision: row.binding_revision,
     revision: row.revision,
     runtime: {
       ...runtime,
@@ -1038,6 +1101,11 @@ function definitionFromRow(row: WorkflowDefinitionRow): WorkflowDefinition {
   return {
     id: row.id,
     projectId: row.project_id,
+    ownerProjectId: row.project_id,
+    scope: row.scope,
+    origin: row.origin,
+    publishedByPrincipalId: row.published_by_principal_id,
+    publishedAt: row.published_at?.toISOString() ?? null,
     name: row.name,
     description: row.description,
     steps: row.steps,
@@ -1046,6 +1114,7 @@ function definitionFromRow(row: WorkflowDefinitionRow): WorkflowDefinition {
     status: row.status,
     sourceTemplateId: row.source_template_id,
     sourceTemplateVersion: row.source_template_version,
+    revision: row.revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };

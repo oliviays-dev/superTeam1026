@@ -1,5 +1,10 @@
 export { Database } from "./database.js";
 export {
+  AuditEventRepository,
+  appendAuditEventWithClient,
+  type AuditEventInput,
+} from "./audit-event-repository.js";
+export {
   ActionTicketRepository,
   type BeginTicketUsageResult,
   type ExpiredExecutionGate,
@@ -40,6 +45,29 @@ export {
   WorkflowRepository,
 } from "./collaboration-repositories.js";
 export { LATEST_MIGRATION_VERSION, migrate } from "./migrate.js";
+export {
+  WorkflowPlanRepository,
+  WorkflowPlanRepositoryError,
+  type CreateWorkflowPlanRecordInput,
+  type CreateWorkflowPlanVersionRecordInput,
+  type PlanOutboxMessageRow,
+  type RouterAgentSnapshot,
+} from "./workflow-plan-repository.js";
+export {
+  captureRunSkillSnapshotWithClient,
+  effectiveSkillSnapshotDigest,
+  SkillRepository,
+  SkillRepositoryError,
+  skillVersionDigest,
+} from "./skill-repository.js";
+export {
+  TaskCaptureRepository,
+  TaskCaptureRepositoryError,
+} from "./task-capture-repository.js";
+export {
+  ContextPolicyRepository,
+  ContextPolicyRepositoryError,
+} from "./context-policy-repository.js";
 export {
   MeetingDecisionsRepository,
   type CreateMeetingActionItemRepositoryInput,
@@ -140,6 +168,17 @@ export {
   type SaveWorkflowRuntimeInput,
 } from "./workflow-runtime-repository.js";
 export {
+  WorkflowAssignmentRepository,
+  WorkflowAssignmentRepositoryError,
+  appendWorkflowAuditWithClient,
+  insertWorkflowBindingsWithClient,
+  type ReplaceWorkflowBindingsInput,
+  type WorkflowApproverWriteInput,
+  type WorkflowAssignmentWriteInput,
+  type WorkflowBindingSeed,
+  type WorkflowBindingWriteInput,
+} from "./workflow-assignment-repository.js";
+export {
   WorkflowIdempotencyRepository,
   type WorkflowIdempotencyBeginResult,
 } from "./workflow-idempotency-repository.js";
@@ -148,6 +187,31 @@ export {
   WorkbenchReportsRepository,
   todayInShanghai,
 } from "./workbench-reports-repository.js";
+export {
+  DataFabricRepository,
+  DataFabricRepositoryError,
+  type CreateQueryRunRecordInput,
+  type DataFabricRunContext,
+  type DataPolicyBundle,
+  type DatasetQueryBundle,
+  type ProjectReportReference,
+} from "./data-fabric-repository.js";
+export {
+  WorkbenchConfigurationRepository,
+  WorkbenchConfigurationRepositoryError,
+  factoryWorkbenchDocument,
+  workbenchDocumentDigest,
+  type TemplateCopyWorkbenchCandidate,
+  type WorkbenchConfigurationErrorCode,
+  type WorkbenchConfigurationRecord,
+  type WorkbenchPanelRecord,
+} from "./workbench-configuration-repository.js";
+export {
+  MarketRepository,
+  MarketRepositoryError,
+  type MarketRepositoryErrorCode,
+  type MarketVisibilityActor,
+} from "./market-repository.js";
 export {
   buildPrincipalDryRunReport,
   principalDryRunMarkdown,
@@ -204,65 +268,6 @@ export {
   type ToolInvocationIdentity,
 } from "./agent-tool-repository.js";
 export {
-  WorkflowAssignmentRepository,
-  WorkflowAssignmentRepositoryError,
-  appendWorkflowAuditWithClient,
-  insertWorkflowBindingsWithClient,
-  type ReplaceWorkflowBindingsInput,
-  type WorkflowApproverWriteInput,
-  type WorkflowAssignmentWriteInput,
-  type WorkflowBindingSeed,
-  type WorkflowBindingWriteInput,
-} from "./workflow-assignment-repository.js";
-export {
-  WorkflowPlanRepository,
-  WorkflowPlanRepositoryError,
-  type CreateWorkflowPlanRecordInput,
-  type CreateWorkflowPlanVersionRecordInput,
-  type PlanOutboxMessageRow,
-  type RouterAgentSnapshot,
-} from "./workflow-plan-repository.js";
-export {
-  captureRunSkillSnapshotWithClient,
-  effectiveSkillSnapshotDigest,
-  SkillRepository,
-  SkillRepositoryError,
-  skillVersionDigest,
-} from "./skill-repository.js";
-export {
-  TaskCaptureRepository,
-  TaskCaptureRepositoryError,
-} from "./task-capture-repository.js";
-export {
-  ContextPolicyRepository,
-  ContextPolicyRepositoryError,
-} from "./context-policy-repository.js";
-export {
   ProjectAiPmRepository,
   ProjectAiPmRepositoryError,
 } from "./project-ai-pm-repository.js";
-export {
-  DataFabricRepository,
-  DataFabricRepositoryError,
-  type CreateQueryRunRecordInput,
-  type DataFabricRunContext,
-  type DataPolicyBundle,
-  type DatasetQueryBundle,
-  type ProjectReportReference,
-} from "./data-fabric-repository.js";
-export {
-  WorkbenchConfigurationRepository,
-  WorkbenchConfigurationRepositoryError,
-  factoryWorkbenchDocument,
-  workbenchDocumentDigest,
-  type TemplateCopyWorkbenchCandidate,
-  type WorkbenchConfigurationErrorCode,
-  type WorkbenchConfigurationRecord,
-  type WorkbenchPanelRecord,
-} from "./workbench-configuration-repository.js";
-export {
-  MarketRepository,
-  MarketRepositoryError,
-  type MarketRepositoryErrorCode,
-  type MarketVisibilityActor,
-} from "./market-repository.js";

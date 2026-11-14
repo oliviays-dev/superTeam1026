@@ -26,6 +26,7 @@ import {
   type RunRow,
 } from "./rows.js";
 import { ActionTicketRepository } from "./action-ticket-repository.js";
+import { captureRunSkillSnapshotWithClient } from "./skill-repository.js";
 
 export interface PreparedDirectChatExecution {
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
@@ -945,6 +946,7 @@ export class DirectChatRepository {
     if (run.rowCount !== 1) {
       throw new Error("direct chat run was not created");
     }
+    await captureRunSkillSnapshotWithClient(client, runId);
     await client.query(
       `UPDATE direct_chat_turns SET run_id = $2, updated_at = NOW()
        WHERE id = $1`,

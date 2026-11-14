@@ -8,6 +8,7 @@ import type {
   Run,
 } from "@pluginmax/contracts";
 import type { PlatformRepositories } from "@pluginmax/database";
+import { delegationContextHash } from "@pluginmax/database";
 import { executionEnvelopeDigest } from "./task-execution-preflight.js";
 
 export class ExecutionGateError extends Error {
@@ -153,6 +154,9 @@ export class ExecutionGateService {
         403,
       );
     }
+    if (ticket.delegation !== null && ticket.delegation !== undefined) {
+      await this.assertDelegationTicket(ticket, input.action);
+    }
     if (ticket.executionEnvelope.projectId !== null) {
       const decision = await this.repositories.authorization.authorizeProject({
         principalId: ticket.principalId,
@@ -246,6 +250,141 @@ export class ExecutionGateService {
       }
     }
     return ticket;
+  }
+
+  private async assertDelegationTicket(
+    ticket: ActionTicket,
+    action: ActionTicketAction,
+  ): Promise<void> {
+    const binding = ticket.delegation!;
+    const delegation = await this.repositories.delegations.get(
+      binding.delegationId,
+    );
+    if (delegation === undefined) {
+      throw new ExecutionGateError(
+        "delegation_ticket_invalid",
+        "Delegation Ticket references a missing Delegation",
+        403,
+      );
+    }
+    if (await this.repositories.delegations.ticketRevoked(ticket.ticketId)) {
+      throw new ExecutionGateError(
+        "delegation_ticket_revoked",
+        "Delegation Ticket has been revoked",
+        403,
+      );
+    }
+    if (delegation.status !== "active") {
+      throw new ExecutionGateError(
+        `delegation_${delegation.status}`,
+        `Delegation is ${delegation.status}`,
+        403,
+      );
+    }
+    if (new Date(delegation.expiresAt).getTime() <= this.now().getTime()) {
+      throw new ExecutionGateError(
+        "delegation_expired",
+        "Delegation has expired",
+        403,
+      );
+    }
+    if (
+      delegation.revision !== binding.delegationRevision ||
+      delegationContextHash(delegation) !== binding.delegationContextHash
+    ) {
+      throw new ExecutionGateError(
+        "delegation_revision_conflict",
+        "Delegation revision or context no longer matches the Ticket",
+        409,
+        {
+          currentRevision: delegation.revision,
+          ticketRevision: binding.delegationRevision,
+        },
+      );
+    }
+    if (
+      delegation.ownerPrincipalId !== binding.ownerPrincipalId ||
+      delegation.representativePrincipalId !==
+        binding.representativePrincipalId ||
+      ticket.principalId !== delegation.representativePrincipalId
+    ) {
+      throw new ExecutionGateError(
+        "delegation_scope_mismatch",
+        "Delegation Ticket identity does not match its Delegation",
+        403,
+      );
+    }
+    const [owner, representative] = await Promise.all([
+      this.repositories.authorization.getPrincipal(delegation.ownerPrincipalId),
+      this.repositories.authorization.getPrincipal(
+        delegation.representativePrincipalId,
+      ),
+    ]);
+    if (
+      owner === undefined ||
+      representative === undefined ||
+      owner.status !== "active" ||
+      representative.status !== "active" ||
+      owner.accountStatus === "disabled" ||
+      representative.accountStatus === "disabled"
+    ) {
+      throw new ExecutionGateError(
+        "representative_inactive",
+        "Delegation owner or representative is inactive",
+        403,
+      );
+    }
+    if (delegation.projectId !== null) {
+      const requiredPermission = action === "agent.execute" ? "read" : "write";
+      for (const principal of [owner, representative]) {
+        const decision =
+          await this.repositories.authorization.authorizeProject({
+            principalId: principal.id,
+            authSource:
+              principal.source === "local"
+                ? "local-development"
+                : "bearer",
+            projectId: delegation.projectId,
+            permission: requiredPermission,
+          });
+        if (!decision.allowed) {
+          throw new ExecutionGateError(
+            "delegation_owner_permission_missing",
+            "Delegation owner or representative no longer has the required Project permission",
+            403,
+            {
+              principalId: principal.id,
+              permission: requiredPermission,
+              reason: decision.reason,
+            },
+          );
+        }
+      }
+    }
+    const readActions = ["read_context", "read_materials"] as const;
+    const writeActions = [
+      "comment",
+      "record_risk",
+      "submit_draft",
+      "submit_deliverable",
+      "update_status",
+      "reassign",
+      "approve",
+      "reject",
+    ] as const;
+    const requiredActions = action === "agent.execute" ? readActions : writeActions;
+    const permitted = requiredActions.some(
+      (action) =>
+        delegation.allowedActions.includes(action) &&
+        !delegation.deniedActions.includes(action),
+    );
+    if (!permitted) {
+      throw new ExecutionGateError(
+        "delegation_action_denied",
+        "Delegation does not permit the Ticket action",
+        403,
+      );
+    }
   }
 
   async beginRunAction(input: {

@@ -86,6 +86,7 @@ export const meetingDelegateSchema = z.object({
   representativePrincipalId: principalIdSchema,
   representativeName: z.string(),
   agentId: z.string().uuid().nullable(),
+  delegationId: z.string().uuid().nullable().optional(),
   allowedActions: z.array(meetingDelegateActionSchema),
   status: meetingDelegateStatusSchema,
   reason: z.string(),
@@ -102,6 +103,7 @@ export const createMeetingDelegateInputSchema = z.object({
   representativeKind: z.enum(["human", "agent"]),
   representativePrincipalId: principalIdSchema.optional(),
   agentId: z.string().uuid().optional(),
+  delegationId: z.string().uuid().optional(),
   allowedActions: z
     .array(meetingDelegateActionSchema)
     .min(1)

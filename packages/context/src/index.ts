@@ -185,22 +185,15 @@ function selectSceneContributions(input: SceneContextBuildInput | undefined): {
     (left, right) =>
       left.sequence - right.sequence || left.id.localeCompare(right.id),
   );
-  const previous = new Set(
-    (input.previousReceipt?.delivered ?? []).map(contributionSignature),
+  const selected = all.filter(
+    (contribution) => contribution.sequence > input.cursorBefore,
   );
-  const selected = input.runtimeStateful
-    ? all.filter(
-        (contribution) => !previous.has(contributionSignature(contribution)),
-      )
-    : all;
   const selectedSignatures = new Set(selected.map(contributionSignature));
-  const reused = input.runtimeStateful
-    ? all.filter(
-        (contribution) =>
-          previous.has(contributionSignature(contribution)) &&
-          !selectedSignatures.has(contributionSignature(contribution)),
-      )
-    : [];
+  const reused = all.filter(
+    (contribution) =>
+      contribution.sequence <= input.cursorBefore &&
+      !selectedSignatures.has(contributionSignature(contribution)),
+  );
   const latestSequence = all.at(-1)?.sequence ?? 0;
   return {
     selected,

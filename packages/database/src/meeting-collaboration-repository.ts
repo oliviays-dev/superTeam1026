@@ -51,6 +51,7 @@ interface DelegateRow {
   representative_principal_id: string;
   representative_name: string | null;
   agent_id: string | null;
+  delegation_id: string | null;
   allowed_actions: MeetingDelegate["allowedActions"];
   status: MeetingDelegate["status"];
   reason: string;
@@ -417,10 +418,10 @@ export class MeetingCollaborationRepository {
         `INSERT INTO meeting_delegates (
            id, meeting_id, project_id, delegator_principal_id,
            representative_kind, representative_principal_id, agent_id,
-           allowed_actions, status, reason, expires_at, created_by,
+           delegation_id, allowed_actions, status, reason, expires_at, created_by,
            created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8::text[], 'active', $9, $10, $11,
+           $1, $2, $3, $4, $5, $6, $7, $8, $9::text[], 'active', $10, $11, $12,
            NOW(), NOW()
          )`,
         [
@@ -431,6 +432,7 @@ export class MeetingCollaborationRepository {
           input.input.representativeKind,
           input.representativePrincipalId,
           input.input.agentId ?? null,
+          input.input.delegationId ?? null,
           input.input.allowedActions,
           input.input.reason,
           input.input.expiresAt ?? null,
@@ -446,6 +448,7 @@ export class MeetingCollaborationRepository {
           delegateId: id,
           delegatorPrincipalId: input.delegatorPrincipalId,
           representativePrincipalId: input.representativePrincipalId,
+          delegationId: input.input.delegationId ?? null,
           allowedActions: input.input.allowedActions,
         },
       });
@@ -1329,6 +1332,7 @@ function delegateFromRow(row: DelegateRow): MeetingDelegate {
     representativeName:
       row.representative_name ?? row.representative_principal_id,
     agentId: row.agent_id,
+    delegationId: row.delegation_id,
     allowedActions: row.allowed_actions,
     status: row.status,
     reason: row.reason,

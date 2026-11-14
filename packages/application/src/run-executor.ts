@@ -1,5 +1,4 @@
 import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
 import {
   CodexJsonlAdapter,
   DshSdkAdapter,
@@ -31,8 +30,11 @@ import { isTerminalRunStatus } from "@pluginmax/domain";
 import { LocalFileStore } from "@pluginmax/files";
 import { AgentRuntimePreflightService } from "./agent-runtime-preflight.js";
 import { ExecutionGateError, ExecutionGateService } from "./execution-gate.js";
+import { AgentTaskToolFacade } from "./agent-task-tools.js";
 import { executionEnvelopeDigest } from "./task-execution-preflight.js";
+import { runWorkspacePath } from "./run-workspace.js";
 import { SceneContextService } from "./scene-context.js";
+import { TaskAcceptanceService } from "./task-acceptance.js";
 
 export class RunCancelledError extends Error {
   constructor() {
@@ -123,10 +125,12 @@ function runtimeFor(
 }
 
 export class RunExecutor {
+  readonly tools: AgentTaskToolFacade;
   private readonly fileStore: LocalFileStore;
   private readonly preflight: AgentRuntimePreflightService;
   private readonly executionGates: ExecutionGateService;
   private readonly sceneContext: SceneContextService;
+  private readonly acceptance: TaskAcceptanceService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
@@ -136,6 +140,10 @@ export class RunExecutor {
     this.preflight = new AgentRuntimePreflightService(repositories);
     this.executionGates = new ExecutionGateService(repositories);
     this.sceneContext = new SceneContextService(repositories);
+    this.acceptance = new TaskAcceptanceService(repositories);
+    this.tools = new AgentTaskToolFacade(repositories, {
+      workspaceRoot: options.workspaceRoot,
+    });
   }
 
   async execute(
@@ -390,7 +398,7 @@ export class RunExecutor {
         directChatContext,
         episodes,
       });
-      await this.sceneContext.commit(prepared);
+      await this.sceneContext.stage(prepared);
       await this.repositories.teammates.bindRunSceneSession(
         runId,
         prepared.binding.id,
@@ -408,10 +416,7 @@ export class RunExecutor {
         );
       }
     }
-    const workspacePath = resolve(
-      this.options.workspaceRoot,
-      run.projectId ?? `direct-chat/${directChatContext!.thread.id}`,
-    );
+    const workspacePath = runWorkspacePath(this.options.workspaceRoot, run.id);
     await mkdir(workspacePath, { recursive: true });
     const writebackAction = runWritebackAction(run);
     const writebackKey = runWritebackIdempotencyKey(runId);
@@ -579,6 +584,7 @@ export class RunExecutor {
             idempotencyKey: effect.receipt.id,
             result: { effectReceiptId: completed.id },
           });
+          await this.sceneContext.commitConsumed(runId);
           await this.completeRun(
             runId,
             task,
@@ -632,6 +638,13 @@ export class RunExecutor {
         );
         await this.repositories.runs.timeout(runId, "Run exceeded its timeout");
         if (task !== null) {
+          await this.acceptance.detectRunFailure({
+            taskId: task.id,
+            runId,
+            runAttempt: run.attempt,
+            code: "run_timeout",
+            message: "Run exceeded its timeout",
+          });
           await this.repositories.tasks.setStatus(task.id, "queued");
         } else if (directChatContext !== null) {
           await this.repositories.directChats.failTurn(
@@ -661,6 +674,15 @@ export class RunExecutor {
           effectLeaseToken,
           "worker lease lost",
         );
+        if (task !== null) {
+          await this.acceptance.detectRunFailure({
+            taskId: task.id,
+            runId,
+            runAttempt: run.attempt,
+            code: "run_interrupted",
+            message: "Worker lease or execution ownership was interrupted",
+          });
+        }
         throw options.signal.reason ?? new RunLeaseLostError();
       }
       const message =
@@ -688,6 +710,15 @@ export class RunExecutor {
       await this.repositories.runs.appendEvent(runId, "error", "Run 执行失败", {
         error: message,
       });
+      if (task !== null) {
+        await this.acceptance.detectRunFailure({
+          taskId: task.id,
+          runId,
+          runAttempt: run.attempt,
+          code: "run_failed",
+          message,
+        });
+      }
       if (executionSnapshot !== null) {
         throw new RunNonRetryableError(message);
       }
@@ -932,6 +963,29 @@ export class RunExecutor {
         "协作 Agent 已完成本轮输出，任务状态保持由责任人推进",
         { output, taskExecutionKind: "collaborator" },
       );
+      await this.executionGates.completeRunAction({
+        runId,
+        action: writebackAction,
+        idempotencyKey: writebackKey,
+      });
+      return;
+    }
+    await this.acceptance.clearRunAttemptAnomalies({
+      taskId: task!.id,
+      runId,
+      runAttempt: run.attempt,
+      reason: "owner_run_completed",
+    });
+    const acceptanceDecision = await this.acceptance.handleCompletedOwnerRun(
+      task!,
+      runId,
+    );
+    if (
+      acceptanceDecision.kind === "manual" ||
+      acceptanceDecision.kind === "blocked" ||
+      acceptanceDecision.kind === "review" ||
+      acceptanceDecision.kind === "automatic_accept_disabled"
+    ) {
       await this.executionGates.completeRunAction({
         runId,
         action: writebackAction,

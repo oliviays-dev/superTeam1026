@@ -9,6 +9,12 @@ import {
   templateRolePermissionSchema,
 } from "./project-templates.js";
 import { meetingCollaborationOverviewSchema } from "./meeting-collaboration.js";
+import {
+  dispatchModeSchema,
+  templatePortabilitySchema,
+  workflowDefinitionOriginSchema,
+  workflowDefinitionScopeSchema,
+} from "./workflow-assignment.js";
 
 export const projectRoleSchema = z.object({
   id: z.string().uuid(),
@@ -484,6 +490,16 @@ export type WorkflowNodeType = z.infer<typeof workflowNodeTypeSchema>;
 export const workflowExecutorSchema = z.object({
   kind: z.enum(["system", "user", "agent", "role"]),
   id: z.string().trim().min(1).max(180),
+  roleCode: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .regex(/^[A-Z][A-Z0-9_]*$/)
+    .optional(),
+  label: z.string().trim().max(160).optional(),
+  portability: templatePortabilitySchema.optional(),
+  dispatchMode: dispatchModeSchema.optional(),
 });
 export type WorkflowExecutor = z.infer<typeof workflowExecutorSchema>;
 
@@ -493,6 +509,10 @@ export const workflowGraphNodeSchema = z.object({
   type: workflowNodeTypeSchema,
   executor: workflowExecutorSchema,
   description: z.string().max(4_000),
+  acceptance: z
+    .array(z.string().trim().min(1).max(1_000))
+    .max(50)
+    .optional(),
   approvers: z.array(workflowExecutorSchema).max(30),
   approvalPolicy: z.enum(["all", "any"]),
   autoDispatch: z.boolean(),
@@ -583,6 +603,13 @@ export const workflowStepDefinitionSchema = z.object({
   kind: z.enum(["human", "agent"]),
   agentId: z.string().uuid().optional(),
   roleId: z.string().uuid().optional(),
+  roleCode: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .regex(/^[A-Z][A-Z0-9_]*$/)
+    .optional(),
   autoDispatch: z.boolean().optional(),
 });
 export type WorkflowStepDefinition = z.infer<
@@ -592,6 +619,11 @@ export type WorkflowStepDefinition = z.infer<
 export const workflowDefinitionSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
+  ownerProjectId: z.string().uuid(),
+  scope: workflowDefinitionScopeSchema,
+  origin: workflowDefinitionOriginSchema,
+  publishedByPrincipalId: z.string().nullable(),
+  publishedAt: z.string().datetime({ offset: true }).nullable(),
   name: z.string(),
   description: z.string(),
   steps: z.array(workflowStepDefinitionSchema),
@@ -600,10 +632,21 @@ export const workflowDefinitionSchema = z.object({
   status: z.enum(["active", "archived"]),
   sourceTemplateId: z.string().uuid().nullable().default(null),
   sourceTemplateVersion: z.number().int().positive().nullable().default(null),
+  revision: z.number().int().positive(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type WorkflowDefinition = z.infer<typeof workflowDefinitionSchema>;
+
+export const updateWorkflowDefinitionInputSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional(),
+  description: z.string().trim().max(2_000).optional(),
+  sourceMarkdown: z.string().max(200_000).optional(),
+  expectedRevision: z.number().int().positive(),
+});
+export type UpdateWorkflowDefinitionInput = z.infer<
+  typeof updateWorkflowDefinitionInputSchema
+>;
 
 export const createWorkflowInputSchema = z
   .object({
@@ -787,6 +830,12 @@ export const workflowAuditKindSchema = z.enum([
   "subworkflow.started",
   "subworkflow.completed",
   "subworkflow.failed",
+  "assignment.resolved",
+  "assignment.unresolved",
+  "assignment.remapped",
+  "assignment.member_added",
+  "node.claimed",
+  "node.claim_rejected",
 ]);
 export type WorkflowAuditKind = z.infer<typeof workflowAuditKindSchema>;
 
@@ -816,6 +865,7 @@ export const workflowInstanceSchema = z.object({
   failureReason: z.string().nullable(),
   pausedAt: z.string().datetime({ offset: true }).nullable(),
   lastReconciledAt: z.string().datetime({ offset: true }).nullable(),
+  bindingRevision: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
   revision: z.number().int().positive(),
   runtime: workflowRuntimeStateSchema,
   graph: workflowGraphSchema.nullable(),
@@ -837,6 +887,7 @@ export type WorkflowInstanceDetail = z.infer<
 >;
 
 export const startWorkflowInputSchema = z.object({
+  projectId: z.string().uuid().optional(),
   title: z.string().trim().min(1).max(180),
   context: z
     .record(
@@ -844,6 +895,27 @@ export const startWorkflowInputSchema = z.object({
       z.union([z.string(), z.number(), z.boolean(), z.null()]),
     )
     .default({}),
+  expectedDefinitionVersion: z.number().int().positive().optional(),
+  expectedBindingRevision: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  bindingOverrides: z
+    .array(
+      z.object({
+        nodeId: z.string().trim().min(1).max(160),
+        dispatchMode: dispatchModeSchema.optional(),
+        primaryPrincipalId: z.string().trim().min(1).max(180).optional(),
+        candidatePrincipalIds: z
+          .array(z.string().trim().min(1).max(180))
+          .max(100)
+          .default([]),
+        approverPrincipalIds: z
+          .array(z.string().trim().min(1).max(180))
+          .max(100)
+          .default([]),
+        sourceChangeReason: z.string().trim().max(2_000).default(""),
+      }),
+    )
+    .max(100)
+    .default([]),
 });
 export type StartWorkflowInput = z.infer<typeof startWorkflowInputSchema>;
 
@@ -960,6 +1032,7 @@ export type Meeting = z.infer<typeof meetingSchema>;
 export const meetingMessageSchema = z.object({
   id: z.string().uuid(),
   meetingId: z.string().uuid(),
+  sequence: z.number().int().positive(),
   authorType: z.enum(["human", "agent"]),
   authorId: z.string(),
   authorName: z.string(),
@@ -980,6 +1053,8 @@ export const meetingMessageSchema = z.object({
   clientMessageId: z.string().nullable().default(null),
   delegateId: z.string().uuid().nullable().default(null),
   senderPrincipalId: z.string().nullable().default(null),
+  participantBindingId: z.string().uuid().nullable().default(null),
+  triggerDepth: z.number().int().nonnegative().default(0),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type MeetingMessage = z.infer<typeof meetingMessageSchema>;
@@ -1006,6 +1081,9 @@ export const meetingAiPolicyStatusSchema = z.enum([
 ]);
 export type MeetingAiPolicyStatus = z.infer<typeof meetingAiPolicyStatusSchema>;
 
+export const meetingAiAutoSpeakSchema = z.enum(["all", "mentions", "manual"]);
+export type MeetingAiAutoSpeak = z.infer<typeof meetingAiAutoSpeakSchema>;
+
 export const meetingAiPolicyStatsSchema = z.object({
   roundsUsed: z.number().int().nonnegative(),
   messagesSent: z.number().int().nonnegative(),
@@ -1020,11 +1098,14 @@ export const meetingAiPolicySchema = z.object({
   meetingId: z.string().uuid(),
   projectId: z.string().uuid(),
   status: meetingAiPolicyStatusSchema,
+  autoSpeak: meetingAiAutoSpeakSchema,
   triggerKinds: z.array(meetingAiTriggerKindSchema),
   cooldownSeconds: z.number().int().nonnegative(),
   maxRounds: z.number().int().positive(),
   maxMessages: z.number().int().positive(),
   runBudgetMs: z.number().int().positive(),
+  maxTriggerDepth: z.number().int().positive(),
+  maxConcurrentAgentsPerScene: z.number().int().positive(),
   revision: z.number().int().positive(),
   lastErrorCode: z.string().nullable(),
   lastErrorMessage: z.string().nullable(),
@@ -1040,6 +1121,7 @@ export type MeetingAiPolicy = z.infer<typeof meetingAiPolicySchema>;
 export const updateMeetingAiPolicyInputSchema = z.object({
   expectedRevision: z.number().int().positive(),
   status: meetingAiPolicyStatusSchema.optional(),
+  autoSpeak: meetingAiAutoSpeakSchema.optional(),
   triggerKinds: z
     .array(meetingAiTriggerKindSchema)
     .min(1)
@@ -1050,6 +1132,8 @@ export const updateMeetingAiPolicyInputSchema = z.object({
   maxRounds: z.number().int().min(1).max(100).optional(),
   maxMessages: z.number().int().min(1).max(500).optional(),
   runBudgetMs: z.number().int().min(1_000).max(1_800_000).optional(),
+  maxTriggerDepth: z.number().int().min(1).max(20).optional(),
+  maxConcurrentAgentsPerScene: z.number().int().min(1).max(50).optional(),
 });
 export type UpdateMeetingAiPolicyInput = z.infer<
   typeof updateMeetingAiPolicyInputSchema
@@ -1065,6 +1149,7 @@ export type MeetingAiPolicyLifecycleInput = z.infer<
 
 export const triggerMeetingAiInputSchema = z.object({
   kind: meetingAiTriggerKindSchema,
+  delegationId: z.string().uuid().optional(),
   agentIds: z
     .array(z.string().uuid())
     .max(20)
@@ -1074,6 +1159,7 @@ export const triggerMeetingAiInputSchema = z.object({
   roundNumber: z.number().int().min(1).max(100).optional(),
   agendaItem: z.string().trim().min(1).max(2_000).optional(),
   reason: z.string().trim().max(2_000).default(""),
+  triggerDepth: z.number().int().min(0).max(20).optional(),
 });
 export type TriggerMeetingAiInput = z.infer<typeof triggerMeetingAiInputSchema>;
 
@@ -1083,6 +1169,8 @@ export const meetingAiTurnSummarySchema = z.object({
   roundNumber: z.number().int().positive(),
   agentId: z.string().uuid(),
   agentName: z.string(),
+  participantBindingId: z.string().uuid().nullable(),
+  agentPrincipalId: z.string().nullable(),
   triggerKind: meetingAiTriggerKindSchema,
   triggerReason: z.string(),
   status: z.enum([
@@ -1097,9 +1185,36 @@ export const meetingAiTurnSummarySchema = z.object({
   messageId: z.string().uuid().nullable(),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
+  triggerDepth: z.number().int().nonnegative(),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type MeetingAiTurnSummary = z.infer<typeof meetingAiTurnSummarySchema>;
+
+export const meetingAiParticipantSchema = z.object({
+  meetingId: z.string().uuid(),
+  projectId: z.string().uuid(),
+  agentId: z.string().uuid(),
+  agentName: z.string(),
+  participantBindingId: z.string().uuid(),
+  agentPrincipalId: z.string(),
+  principalId: z.string(),
+  status: z.enum(["active", "paused", "removed"]),
+  revision: z.number().int().positive(),
+  joinedAt: z.string().datetime({ offset: true }),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type MeetingAiParticipant = z.infer<typeof meetingAiParticipantSchema>;
+
+export const updateMeetingAiParticipantInputSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    status: z.enum(["active", "paused", "removed"]),
+    reason: z.string().trim().max(1_000).default(""),
+  })
+  .strict();
+export type UpdateMeetingAiParticipantInput = z.infer<
+  typeof updateMeetingAiParticipantInputSchema
+>;
 
 export const triggerMeetingAiResultSchema = z.object({
   policy: meetingAiPolicySchema,

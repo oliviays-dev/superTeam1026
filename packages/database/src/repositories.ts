@@ -65,6 +65,7 @@ import {
 import { TaskCollaborationRepository } from "./task-collaboration-repository.js";
 import { WorkflowIdempotencyRepository } from "./workflow-idempotency-repository.js";
 import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
+import { WorkflowPlanRepository } from "./workflow-plan-repository.js";
 import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.js";
 import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
 import {
@@ -100,13 +101,13 @@ import {
 } from "./task-execution-evidence-repository.js";
 import { AgentToolRepository } from "./agent-tool-repository.js";
 import { WorkflowAssignmentRepository } from "./workflow-assignment-repository.js";
-import { WorkflowPlanRepository } from "./workflow-plan-repository.js";
 import {
   captureRunSkillSnapshotWithClient,
   SkillRepository,
 } from "./skill-repository.js";
 import { TaskCaptureRepository } from "./task-capture-repository.js";
 import { ContextPolicyRepository } from "./context-policy-repository.js";
+import { AuditEventRepository } from "./audit-event-repository.js";
 import { ProjectAiPmRepository } from "./project-ai-pm-repository.js";
 import { DataFabricRepository } from "./data-fabric-repository.js";
 import { MarketRepository } from "./market-repository.js";
@@ -592,6 +593,25 @@ export class TaskRepository {
                  'interrupted'
                )
            )
+           AND (
+             NOT EXISTS (
+               SELECT 1
+               FROM workflow_instance_assignments AS assignment
+               WHERE assignment.task_id = task.id
+                 AND assignment.dispatch_mode = 'claim'
+             )
+             OR EXISTS (
+               SELECT 1
+               FROM workflow_instance_assignments AS assignment
+               WHERE assignment.task_id = task.id
+                 AND assignment.dispatch_mode = 'claim'
+                 AND EXISTS (
+                   SELECT 1
+                   FROM jsonb_array_elements(assignment.candidate_pool) AS candidate
+                   WHERE candidate->>'principalId' = $2::text
+                 )
+             )
+           )
          ORDER BY
            CASE task.priority
              WHEN 'urgent' THEN 4
@@ -603,7 +623,7 @@ export class TaskRepository {
            task.id
          FOR UPDATE OF task SKIP LOCKED
          LIMIT 1`,
-        [projectId],
+        [projectId, input.ownerId],
       );
       const row = candidate.rows[0];
       if (row === undefined) return undefined;
@@ -2218,6 +2238,8 @@ export class PlatformRepositories {
   readonly reviews: ReviewRepository;
   readonly workflows: WorkflowRepository;
   readonly workflowRuntime: WorkflowRuntimeRepository;
+  readonly workflowAssignments: WorkflowAssignmentRepository;
+  readonly workflowPlans: WorkflowPlanRepository;
   readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
   readonly meetingCollaboration: MeetingCollaborationRepository;
@@ -2239,11 +2261,10 @@ export class PlatformRepositories {
   readonly taskAcceptance: TaskAcceptanceRepository;
   readonly taskAnomalies: TaskExecutionAnomalyRepository;
   readonly agentTools: AgentToolRepository;
-  readonly workflowAssignments: WorkflowAssignmentRepository;
-  readonly workflowPlans: WorkflowPlanRepository;
   readonly skills: SkillRepository;
   readonly taskCapture: TaskCaptureRepository;
   readonly contextPolicies: ContextPolicyRepository;
+  readonly auditEvents: AuditEventRepository;
   readonly projectAiPms: ProjectAiPmRepository;
   readonly dataFabric: DataFabricRepository;
   readonly workbenchConfiguration: WorkbenchConfigurationRepository;
@@ -2278,6 +2299,8 @@ export class PlatformRepositories {
     this.reviews = new ReviewRepository(database);
     this.workflows = new WorkflowRepository(database);
     this.workflowRuntime = new WorkflowRuntimeRepository(database);
+    this.workflowAssignments = new WorkflowAssignmentRepository(database);
+    this.workflowPlans = new WorkflowPlanRepository(database);
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
     this.meetingCollaboration = new MeetingCollaborationRepository(database);
@@ -2305,12 +2328,14 @@ export class PlatformRepositories {
     this.taskAcceptance = new TaskAcceptanceRepository(database);
     this.taskAnomalies = new TaskExecutionAnomalyRepository(database);
     this.agentTools = new AgentToolRepository(database);
-    this.workflowAssignments = new WorkflowAssignmentRepository(database);
-    this.workflowPlans = new WorkflowPlanRepository(database);
     this.skills = new SkillRepository(database);
     this.taskCapture = new TaskCaptureRepository(database);
     this.contextPolicies = new ContextPolicyRepository(database);
-    this.projectAiPms = new ProjectAiPmRepository(database);
+    this.auditEvents = new AuditEventRepository(database);
+    this.projectAiPms = new ProjectAiPmRepository(
+      database,
+      this.authorization,
+    );
     this.dataFabric = new DataFabricRepository(database);
     this.workbenchConfiguration = new WorkbenchConfigurationRepository(
       database,

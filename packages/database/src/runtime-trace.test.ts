@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createRootTraceContext } from "@pluginmax/contracts";
 import { Database } from "./database.js";
-import { migrate } from "./migrate.js";
+import { LATEST_MIGRATION_VERSION, migrate } from "./migrate.js";
 import { PlatformRepositories } from "./repositories.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -110,6 +110,6 @@ integration("runtime trace correlation", () => {
     const migration = await database.query<{ version: number }>(
       "SELECT MAX(version) AS version FROM platform_migrations",
     );
-    expect(migration.rows[0]?.version).toBe(32);
+    expect(migration.rows[0]?.version).toBe(LATEST_MIGRATION_VERSION);
   });
 });

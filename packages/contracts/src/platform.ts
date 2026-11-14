@@ -429,6 +429,23 @@ export const runInputSnapshotSchema = z.object({
       delayMs: z.number().int().min(0).max(60_000).optional(),
     })
     .optional(),
+  projectReport: z
+    .object({
+      reportKind: z.enum(["daily", "weekly", "progress"]),
+      reportDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      periodStart: z.string().datetime({ offset: true }),
+      periodEnd: z.string().datetime({ offset: true }),
+      sourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
+      sourceCutoffAt: z.string().datetime({ offset: true }),
+      triggerSource: z.enum([
+        "manual",
+        "schedule",
+        "api",
+        "system",
+        "legacy",
+      ]),
+    })
+    .optional(),
 });
 export type RunInputSnapshot = z.infer<typeof runInputSnapshotSchema>;
 
@@ -504,6 +521,10 @@ export const platformRunEventTypeSchema = z.enum([
   "job.retry_scheduled",
   "job.dead_lettered",
   "job.manually_recovered",
+  "task.evidence_shadow_evaluated",
+  "task.acceptance_confirmed",
+  "task.anomaly.detected",
+  "task.anomaly.cleared",
 ]);
 export type PlatformRunEventType = z.infer<typeof platformRunEventTypeSchema>;
 
@@ -583,6 +604,9 @@ export const contextPackSchema = z.object({
   logicalDigest: z.string().length(64).optional(),
   rendererVersion: z.string().optional(),
   asOf: z.string().datetime({ offset: true }).optional(),
+  contextBoundarySeq: z.number().int().nonnegative().optional(),
+  contextPolicyVersion: z.number().int().nonnegative().optional(),
+  contextUsageRatio: z.number().nonnegative().optional(),
 });
 export type ContextPack = z.infer<typeof contextPackSchema>;
 
@@ -601,6 +625,9 @@ export const contextReceiptSchema = z.object({
   logicalDigest: z.string().length(64).optional(),
   rendererVersion: z.string().optional(),
   runtimeStateful: z.boolean().optional(),
+  contextBoundarySeq: z.number().int().nonnegative().optional(),
+  contextPolicyVersion: z.number().int().nonnegative().optional(),
+  contextUsageRatio: z.number().nonnegative().optional(),
   cursorBefore: z.number().int().nonnegative().optional(),
   cursorAfter: z.number().int().nonnegative().optional(),
   deliveredContributions: z

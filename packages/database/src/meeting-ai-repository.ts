@@ -5,6 +5,8 @@ import {
   type ActionTicket,
   type ExecutionGateRequest,
   type MeetingAiPolicy,
+  type MeetingAiAutoSpeak,
+  type MeetingAiParticipant,
   type MeetingAiPolicyStatus,
   type MeetingAiTriggerKind,
   type MeetingAiTurnSummary,
@@ -14,10 +16,13 @@ import {
   type TriggerMeetingAiInput,
   type TriggerMeetingAiResult,
   type UpdateMeetingAiPolicyInput,
+  type UpdateMeetingAiParticipantInput,
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import { Database } from "./database.js";
 import { ActionTicketRepository } from "./action-ticket-repository.js";
+import { captureRunSkillSnapshotWithClient } from "./skill-repository.js";
+import { appendAuditEventWithClient } from "./audit-event-repository.js";
 
 export interface PreparedMeetingAiExecution {
   readonly executionSnapshot?: ExternalRunExecutionSnapshot;
@@ -32,11 +37,14 @@ interface MeetingAiPolicyRow {
   meeting_id: string;
   project_id: string;
   status: MeetingAiPolicyStatus;
+  auto_speak: MeetingAiAutoSpeak;
   trigger_kinds: MeetingAiTriggerKind[];
   cooldown_seconds: number;
   max_rounds: number;
   max_messages: number;
   run_budget_ms: number;
+  max_trigger_depth: number;
+  max_concurrent_agents_per_scene: number;
   revision: number;
   last_error_code: string | null;
   last_error_message: string | null;
@@ -59,6 +67,8 @@ interface MeetingAiTurnRow {
   project_id: string;
   agent_id: string;
   agent_name: string;
+  participant_binding_id: string | null;
+  agent_principal_id: string | null;
   policy_id: string;
   policy_revision: number;
   trigger_kind: MeetingAiTriggerKind;
@@ -71,6 +81,7 @@ interface MeetingAiTurnRow {
   message_id: string | null;
   error_code: string | null;
   error_message: string | null;
+  trigger_depth: number;
   started_at: Date | null;
   completed_at: Date | null;
   created_at: Date;
@@ -78,9 +89,16 @@ interface MeetingAiTurnRow {
 }
 
 interface ParticipantRow {
+  project_id: string;
   agent_id: string;
   agent_name: string;
+  participant_binding_id: string;
+  agent_principal_id: string;
+  principal_id: string;
   status: "active" | "paused" | "removed";
+  revision: number;
+  joined_at: Date;
+  updated_at: Date;
 }
 
 export interface MeetingAiTurnRecord {
@@ -91,6 +109,8 @@ export interface MeetingAiTurnRecord {
   readonly projectId: string;
   readonly agentId: string;
   readonly agentName: string;
+  readonly participantBindingId: string | null;
+  readonly agentPrincipalId: string | null;
   readonly policyId: string;
   readonly policyRevision: number;
   readonly triggerKind: MeetingAiTriggerKind;
@@ -100,6 +120,7 @@ export interface MeetingAiTurnRecord {
   readonly status: MeetingAiTurnSummary["status"];
   readonly runId: string | null;
   readonly messageId: string | null;
+  readonly triggerDepth: number;
 }
 
 export interface MeetingAiRunContext {
@@ -137,11 +158,14 @@ function policyFromRow(row: MeetingAiPolicyRow): MeetingAiPolicy {
     meetingId: row.meeting_id,
     projectId: row.project_id,
     status: row.status,
+    autoSpeak: row.auto_speak,
     triggerKinds: row.trigger_kinds,
     cooldownSeconds: row.cooldown_seconds,
     maxRounds: row.max_rounds,
     maxMessages: row.max_messages,
     runBudgetMs: row.run_budget_ms,
+    maxTriggerDepth: row.max_trigger_depth,
+    maxConcurrentAgentsPerScene: row.max_concurrent_agents_per_scene,
     revision: row.revision,
     lastErrorCode: row.last_error_code,
     lastErrorMessage: row.last_error_message,
@@ -172,6 +196,8 @@ function turnFromRow(row: MeetingAiTurnRow): MeetingAiTurnRecord {
     projectId: row.project_id,
     agentId: row.agent_id,
     agentName: row.agent_name,
+    participantBindingId: row.participant_binding_id,
+    agentPrincipalId: row.agent_principal_id,
     policyId: row.policy_id,
     policyRevision: row.policy_revision,
     triggerKind: row.trigger_kind,
@@ -181,6 +207,7 @@ function turnFromRow(row: MeetingAiTurnRow): MeetingAiTurnRecord {
     status: row.status,
     runId: row.run_id,
     messageId: row.message_id,
+    triggerDepth: row.trigger_depth,
   };
 }
 
@@ -191,6 +218,8 @@ function turnSummaryFromRow(row: MeetingAiTurnRow): MeetingAiTurnSummary {
     roundNumber: Number(row.round_number),
     agentId: row.agent_id,
     agentName: row.agent_name,
+    participantBindingId: row.participant_binding_id,
+    agentPrincipalId: row.agent_principal_id,
     triggerKind: row.trigger_kind,
     triggerReason: row.trigger_reason,
     status: row.status,
@@ -198,6 +227,7 @@ function turnSummaryFromRow(row: MeetingAiTurnRow): MeetingAiTurnSummary {
     messageId: row.message_id,
     errorCode: row.error_code,
     errorMessage: row.error_message,
+    triggerDepth: row.trigger_depth,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -301,18 +331,28 @@ export class MeetingAiRepository {
       : policyFromRow(result.rows[0]);
   }
 
-  async listParticipants(meetingId: string): Promise<
-    readonly {
-      agentId: string;
-      agentName: string;
-      status: "active" | "paused" | "removed";
-    }[]
-  > {
+  async listParticipants(
+    meetingId: string,
+  ): Promise<readonly MeetingAiParticipant[]> {
     const result = await this.database.query<ParticipantRow>(
       `SELECT
          participant.agent_id,
+         participant.project_id,
          agent.name AS agent_name,
-         participant.status
+         participant.participant_binding_id,
+         COALESCE(
+           participant.agent_principal_id,
+           agent.id::text
+         ) AS agent_principal_id,
+         COALESCE(
+           participant.principal_id,
+           participant.agent_principal_id,
+           agent.id::text
+         ) AS principal_id,
+         participant.status,
+         participant.revision,
+         participant.joined_at,
+         participant.updated_at
        FROM meeting_ai_participants AS participant
        JOIN agents AS agent ON agent.id = participant.agent_id
        WHERE participant.meeting_id = $1
@@ -320,9 +360,17 @@ export class MeetingAiRepository {
       [meetingId],
     );
     return result.rows.map((row) => ({
+      meetingId,
+      projectId: row.project_id,
       agentId: row.agent_id,
       agentName: row.agent_name,
+      participantBindingId: row.participant_binding_id,
+      agentPrincipalId: row.agent_principal_id,
+      principalId: row.principal_id,
       status: row.status,
+      revision: row.revision,
+      joinedAt: row.joined_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
     }));
   }
 
@@ -336,6 +384,137 @@ export class MeetingAiRepository {
     return result.rows.map(turnSummaryFromRow);
   }
 
+  async updateParticipant(input: {
+    readonly meetingId: string;
+    readonly agentId: string;
+    readonly expectedRevision: number;
+    readonly value: UpdateMeetingAiParticipantInput;
+    readonly actorId: string;
+  }): Promise<MeetingAiParticipant | undefined> {
+    return this.database.transaction(async (client) => {
+      const current = await client.query<ParticipantRow>(
+        `SELECT
+           participant.project_id,
+           participant.agent_id,
+           agent.name AS agent_name,
+           participant.participant_binding_id,
+           COALESCE(
+             participant.agent_principal_id,
+             agent.id::text
+           ) AS agent_principal_id,
+           COALESCE(
+             participant.principal_id,
+             participant.agent_principal_id,
+             agent.id::text
+           ) AS principal_id,
+           participant.status,
+           participant.revision,
+           participant.joined_at,
+           participant.updated_at
+         FROM meeting_ai_participants AS participant
+         JOIN agents AS agent ON agent.id = participant.agent_id
+         WHERE participant.meeting_id = $1
+           AND participant.agent_id = $2
+         FOR UPDATE OF participant`,
+        [input.meetingId, input.agentId],
+      );
+      const row = current.rows[0];
+      if (row === undefined || row.revision !== input.expectedRevision) {
+        return undefined;
+      }
+      if (row.status === "removed" && input.value.status !== "removed") {
+        return undefined;
+      }
+      const updated = await client.query<ParticipantRow>(
+        `UPDATE meeting_ai_participants
+         SET status = $3,
+             revision = revision + 1,
+             updated_by = $4,
+             updated_at = NOW()
+         WHERE meeting_id = $1 AND agent_id = $2
+         RETURNING
+           project_id, agent_id,
+           $5::text AS agent_name,
+           participant_binding_id,
+           agent_principal_id,
+           principal_id,
+           status,
+           revision,
+           joined_at,
+           updated_at`,
+        [
+          input.meetingId,
+          input.agentId,
+          input.value.status,
+          input.actorId,
+          row.agent_name,
+        ],
+      );
+      if (updated.rows[0]?.participant_binding_id !== null) {
+        await client.query(
+          `UPDATE scene_participant_bindings
+           SET status = $2,
+               left_at = CASE
+                 WHEN $2 = 'removed' THEN COALESCE(left_at, NOW())
+                 ELSE NULL
+               END,
+               revision = revision + 1,
+               updated_at = NOW()
+           WHERE id = $1
+             AND NOT (status = 'removed' AND $2 <> 'removed')`,
+          [
+            updated.rows[0]?.participant_binding_id,
+            input.value.status,
+          ],
+        );
+        if (input.value.status !== "active") {
+          await client.query(
+            `UPDATE scene_sessions
+             SET status = 'reset', revision = revision + 1, updated_at = NOW()
+             WHERE participant_binding_id = $1
+               AND status IN ('preparing', 'active')`,
+            [updated.rows[0]?.participant_binding_id],
+          );
+        }
+      }
+      if (input.value.status !== "active") {
+        await cancelAgentOpenRunsForMeetingWithClient(
+          client,
+          input.meetingId,
+          input.agentId,
+          input.value.reason === ""
+            ? `Meeting AI participant is ${input.value.status}`
+            : input.value.reason,
+        );
+      }
+      await appendAuditEventWithClient(client, {
+        action: "meeting.ai.participant.updated",
+        actorPrincipalId: input.actorId,
+        reason: input.value.reason,
+        metadata: {
+          meetingId: input.meetingId,
+          agentId: input.agentId,
+          status: input.value.status,
+          revision: updated.rows[0]?.revision,
+        },
+      });
+      const result = updated.rows[0]!;
+      return {
+        meetingId: input.meetingId,
+        projectId: result.project_id,
+        agentId: result.agent_id,
+        agentName: result.agent_name,
+        participantBindingId: result.participant_binding_id,
+        agentPrincipalId: result.agent_principal_id,
+        principalId: result.principal_id,
+        status: result.status,
+        revision: result.revision,
+        joinedAt: result.joined_at.toISOString(),
+        updatedAt: result.updated_at.toISOString(),
+      };
+    });
+  }
+
   async updatePolicy(input: {
     readonly id: string;
     readonly expectedRevision: number;
@@ -347,12 +526,18 @@ export class MeetingAiRepository {
        SET
          status = COALESCE($3, status),
          trigger_kinds = COALESCE($4::jsonb, trigger_kinds),
-         cooldown_seconds = COALESCE($5, cooldown_seconds),
-         max_rounds = COALESCE($6, max_rounds),
-         max_messages = COALESCE($7, max_messages),
-         run_budget_ms = COALESCE($8, run_budget_ms),
+         auto_speak = COALESCE($5, auto_speak),
+         cooldown_seconds = COALESCE($6, cooldown_seconds),
+         max_rounds = COALESCE($7, max_rounds),
+         max_messages = COALESCE($8, max_messages),
+         run_budget_ms = COALESCE($9, run_budget_ms),
+         max_trigger_depth = COALESCE($10, max_trigger_depth),
+         max_concurrent_agents_per_scene = COALESCE(
+           $11,
+           max_concurrent_agents_per_scene
+         ),
          revision = revision + 1,
-         updated_by = $9,
+         updated_by = $12,
          updated_at = NOW()
        WHERE id = $1
          AND revision = $2
@@ -365,10 +550,13 @@ export class MeetingAiRepository {
         input.patch.triggerKinds === undefined
           ? null
           : JSON.stringify(input.patch.triggerKinds),
+        input.patch.autoSpeak ?? null,
         input.patch.cooldownSeconds ?? null,
         input.patch.maxRounds ?? null,
         input.patch.maxMessages ?? null,
         input.patch.runBudgetMs ?? null,
+        input.patch.maxTriggerDepth ?? null,
+        input.patch.maxConcurrentAgentsPerScene ?? null,
         input.actorId,
       ],
     );
@@ -487,8 +675,12 @@ export class MeetingAiRepository {
         );
       }
       if (input.trigger.sourceMessageId !== undefined) {
-        const source = await client.query<{ id: string }>(
-          `SELECT id FROM meeting_messages
+        const source = await client.query<{
+          id: string;
+          sequence: string | number;
+          trigger_depth: number;
+        }>(
+          `SELECT id, sequence, trigger_depth FROM meeting_messages
            WHERE id = $1 AND meeting_id = $2`,
           [input.trigger.sourceMessageId, input.meetingId],
         );
@@ -527,6 +719,22 @@ export class MeetingAiRepository {
           `The ${input.trigger.kind} trigger is disabled by policy`,
         );
       }
+      let triggerDepth = input.trigger.triggerDepth ?? 0;
+      if (input.trigger.sourceMessageId !== undefined) {
+        const sourceDepth = await client.query<{ trigger_depth: number }>(
+          `SELECT trigger_depth
+           FROM meeting_messages
+           WHERE id = $1 AND meeting_id = $2`,
+          [input.trigger.sourceMessageId, input.meetingId],
+        );
+        triggerDepth = sourceDepth.rows[0]?.trigger_depth ?? 0;
+      }
+      if (triggerDepth >= policy.maxTriggerDepth) {
+        throw new MeetingAiPreconditionError(
+          "meeting_ai_trigger_depth_exceeded",
+          "The Meeting AI trigger depth limit has been reached",
+        );
+      }
       const roundDedupeKey = triggerRoundDedupeKey({
         kind: input.trigger.kind,
         sourceMessageId: input.trigger.sourceMessageId,
@@ -563,8 +771,22 @@ export class MeetingAiRepository {
       >(
         `SELECT
            participant.agent_id,
+           participant.project_id,
            agent.name AS agent_name,
+           participant.participant_binding_id,
+           COALESCE(
+             participant.agent_principal_id,
+             agent.id::text
+           ) AS agent_principal_id,
+           COALESCE(
+             participant.principal_id,
+             participant.agent_principal_id,
+             agent.id::text
+           ) AS principal_id,
            participant.status,
+           participant.revision,
+           participant.joined_at,
+           participant.updated_at,
            agent.status AS global_agent_status,
            COALESCE(member.status, 'inactive') AS project_member_status
          FROM meeting_ai_participants AS participant
@@ -658,6 +880,30 @@ export class MeetingAiRepository {
           skipped,
         };
       }
+      const activeRuns = await client.query<{ count: string }>(
+        `SELECT COUNT(*)::text AS count
+         FROM meeting_ai_turns
+         WHERE meeting_id = $1
+           AND status = 'running'`,
+        [input.meetingId],
+      );
+      const availableConcurrency = Math.max(
+        0,
+        policy.maxConcurrentAgentsPerScene - Number(activeRuns.rows[0]?.count),
+      );
+      if (availableConcurrency === 0) {
+        return {
+          policy,
+          outcome: "skipped",
+          roundNumber: null,
+          turns: [],
+          skipped: eligible.map((participant) => ({
+            agentId: participant.agent_id,
+            agentName: participant.agent_name,
+            reason: "max_concurrent_agents",
+          })),
+        };
+      }
       if (policy.stats.remainingRounds <= 0) {
         throw new MeetingAiPreconditionError(
           "meeting_ai_max_rounds",
@@ -671,12 +917,19 @@ export class MeetingAiRepository {
           "The meeting AI message budget is exhausted",
         );
       }
-      const selected = eligible.slice(0, remainingMessages);
-      for (const participant of eligible.slice(remainingMessages)) {
+      const selectable = eligible.slice(
+        0,
+        Math.min(remainingMessages, availableConcurrency),
+      );
+      const selected = selectable;
+      for (const participant of eligible.slice(selectable.length)) {
         skipped.push({
           agentId: participant.agent_id,
           agentName: participant.agent_name,
-          reason: "max_messages",
+          reason:
+            selectable.length >= remainingMessages
+              ? "max_messages"
+              : "max_concurrent_agents",
         });
       }
       const nextRoundResult = await client.query<{ next_round: number }>(
@@ -747,10 +1000,11 @@ export class MeetingAiRepository {
              id, round_id, meeting_id, project_id, agent_id, policy_id,
              policy_revision, trigger_kind, trigger_reason,
              source_message_id, agenda_item, dedupe_key, status,
+             participant_binding_id, agent_principal_id, trigger_depth,
              created_at, updated_at
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-             'queued', NOW(), NOW()
+             'queued', $13, $14, $15, NOW(), NOW()
            )`,
           [
             turnId,
@@ -765,6 +1019,9 @@ export class MeetingAiRepository {
             input.trigger.sourceMessageId ?? null,
             input.trigger.agendaItem ?? null,
             turnDedupeKey,
+            participant.participant_binding_id,
+            participant.agent_principal_id,
+            triggerDepth,
           ],
         );
         const runtime = await client.query<{ runtime_kind: string }>(
@@ -863,6 +1120,7 @@ export class MeetingAiRepository {
         );
         if (run.rowCount !== 1)
           throw new Error("meeting AI run was not created");
+        await captureRunSkillSnapshotWithClient(client, runId);
         await client.query(
           "UPDATE meeting_ai_turns SET run_id = $2 WHERE id = $1",
           [turnId, runId],
@@ -891,8 +1149,10 @@ export class MeetingAiRepository {
             JSON.stringify({
               meetingId: input.meetingId,
               turnId,
+              participantBindingId: participant.participant_binding_id,
               triggerKind: input.trigger.kind,
               roundNumber,
+              triggerDepth,
             }),
             trace.traceId,
             newSpanId(),
@@ -939,6 +1199,8 @@ export class MeetingAiRepository {
           project_id: input.projectId,
           agent_id: participant.agent_id,
           agent_name: participant.agent_name,
+          participant_binding_id: participant.participant_binding_id,
+          agent_principal_id: participant.agent_principal_id,
           policy_id: policy.id,
           policy_revision: policy.revision,
           trigger_kind: input.trigger.kind,
@@ -951,6 +1213,7 @@ export class MeetingAiRepository {
           message_id: null,
           error_code: null,
           error_message: null,
+          trigger_depth: triggerDepth,
           started_at: null,
           completed_at: null,
           created_at: new Date(),
@@ -1338,10 +1601,11 @@ export class MeetingAiRepository {
       `INSERT INTO meeting_messages (
          id, meeting_id, author_type, author_id, author_name, content,
          turn_id, policy_id, policy_revision, trigger_kind, trigger_reason,
-         run_id, trace_id, status, created_at
+         run_id, trace_id, status, participant_binding_id, trigger_depth,
+         sender_principal_id, created_at
        ) VALUES (
          $1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-         'sent', NOW()
+         'sent', $13, $14, $15, NOW()
        )
        ON CONFLICT (turn_id) WHERE turn_id IS NOT NULL DO NOTHING`,
       [
@@ -1357,6 +1621,9 @@ export class MeetingAiRepository {
         row.trigger_reason,
         runId,
         row.trace_id,
+        row.participant_binding_id,
+        row.trigger_depth + 1,
+        row.agent_principal_id ?? row.agent_id,
       ],
     );
     const inserted = await client.query<{ id: string }>(
@@ -1416,10 +1683,12 @@ export async function failMeetingTurnWithClient(
       `INSERT INTO meeting_messages (
          id, meeting_id, author_type, author_id, author_name, content,
          turn_id, policy_id, policy_revision, trigger_kind, trigger_reason,
-         run_id, trace_id, status, error_code, error_message, created_at
+         run_id, trace_id, status, error_code, error_message,
+         participant_binding_id, trigger_depth, sender_principal_id,
+         created_at
        ) VALUES (
          $1, $2, 'agent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-         'failed', $13, $14, NOW()
+         'failed', $13, $14, $15, $16, $17, NOW()
        )
        ON CONFLICT (turn_id) WHERE turn_id IS NOT NULL DO NOTHING`,
       [
@@ -1437,6 +1706,9 @@ export async function failMeetingTurnWithClient(
         row.trace_id,
         safeCode,
         safeMessage,
+        row.participant_binding_id,
+        row.trigger_depth + 1,
+        row.agent_principal_id ?? row.agent_id,
       ],
     );
     const inserted = await client.query<{ id: string }>(
@@ -1469,4 +1741,47 @@ export async function failMeetingTurnWithClient(
   await client.query("UPDATE meetings SET updated_at = NOW() WHERE id = $1", [
     row.meeting_id,
   ]);
+}
+
+async function cancelAgentOpenRunsForMeetingWithClient(
+  client: PoolClient,
+  meetingId: string,
+  agentId: string,
+  reason: string,
+): Promise<void> {
+  const safeReason = reason.slice(0, 2_000);
+  const runs = await client.query<{ run_id: string }>(
+    `SELECT run_id
+     FROM meeting_ai_turns
+     WHERE meeting_id = $1
+       AND agent_id = $2
+       AND status IN ('queued', 'running')
+       AND run_id IS NOT NULL
+     FOR UPDATE`,
+    [meetingId, agentId],
+  );
+  for (const run of runs.rows) {
+    await client.query(
+      `UPDATE runs
+       SET status = 'cancelled', error = $2, ended_at = NOW(),
+           updated_at = NOW()
+       WHERE id = $1 AND status IN ('queued', 'running')`,
+      [run.run_id, safeReason],
+    );
+    await client.query(
+      `UPDATE jobs
+       SET status = 'cancelled', last_error = $2, updated_at = NOW()
+       WHERE run_id = $1 AND status IN ('queued', 'running')`,
+      [run.run_id, safeReason],
+    );
+  }
+  await client.query(
+    `UPDATE meeting_ai_turns
+     SET status = 'cancelled', error_code = 'participant_disabled',
+         error_message = $3, completed_at = NOW(), updated_at = NOW()
+     WHERE meeting_id = $1
+       AND agent_id = $2
+       AND status IN ('queued', 'running')`,
+    [meetingId, agentId, safeReason],
+  );
 }

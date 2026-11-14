@@ -6,7 +6,7 @@ import type {
 } from "@pluginmax/contracts";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Database } from "./database.js";
-import { migrate } from "./migrate.js";
+import { LATEST_MIGRATION_VERSION, migrate } from "./migrate.js";
 import { PlatformRepositories } from "./repositories.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -167,7 +167,7 @@ integration("agent runtime binding repository", () => {
       const after = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(after.rows[0]?.version).toBe(32);
+      expect(after.rows[0]?.version).toBe(LATEST_MIGRATION_VERSION);
       const tableAfter = await isolated.query<{ name: string | null }>(
         "SELECT to_regclass('agent_runtime_bindings')::text AS name",
       );

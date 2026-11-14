@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  AGENT_TASK_TOOLS_FLAG,
+  AGENT_WORKSPACE_FILES_FLAG,
   type ActionTicket,
   type ActionTicketAction,
   type Agent,
   type AgentRuntimePreflightInput,
+  type DelegationTicketBinding,
   type CapabilityGap,
   type ExecutionEnvelope,
   type ExecutionGateRequest,
@@ -110,7 +113,10 @@ function policyContext(
         : "task";
 }
 
-function builtinCapability(agent: Agent): {
+function builtinCapability(
+  agent: Agent,
+  additionalToolCategories: readonly string[] = [],
+): {
   readonly runtimeId: string;
   readonly runtimeRevision: number;
   readonly profile: RuntimeCapabilityProfile;
@@ -145,7 +151,7 @@ function builtinCapability(agent: Agent): {
         structuredToolEvents: state("structuredToolEvents"),
         structuredSubagent: state("structuredSubagent"),
       },
-      toolCategories: [],
+      toolCategories: [...additionalToolCategories],
       networkModes: ["none"],
       gateEnforcement: "blocking",
       limits: {},
@@ -512,6 +518,7 @@ function actionTicket(input: {
     readonly effectivePermissions: readonly ScopedAuthorizationPermission[];
     readonly membershipId: string | null;
   };
+  readonly delegation?: DelegationTicketBinding | undefined;
 }): ActionTicket {
   const writeback = writebackAction(input.contextType);
   const workspaceId = input.executionEnvelope.envelope.workspaceId;
@@ -548,6 +555,7 @@ function actionTicket(input: {
       membershipId: input.authorization.membershipId,
     },
     executionEnvelope: input.executionEnvelope,
+    delegation: input.delegation ?? null,
     issuedAt: input.issuedAt.toISOString(),
     expiresAt: input.expiresAt.toISOString(),
     issuedBy: input.principalId,
@@ -639,6 +647,8 @@ export class TaskExecutionPreflightService {
     readonly model?: string;
     readonly reasoningEffort?: AgentRuntimePreflightInput["reasoningEffort"];
     readonly deadlineAt?: string;
+    readonly delegation?: DelegationTicketBinding;
+    readonly delegationExpiresAt?: string;
   }): Promise<TaskExecutionPreparation> {
     const principal = await this.repositories.authorization.getPrincipal(
       input.actorId,
@@ -720,6 +730,25 @@ export class TaskExecutionPreflightService {
         ? {}
         : { deadlineAt: input.deadlineAt }),
     });
+    if (
+      input.delegationExpiresAt !== undefined &&
+      new Date(input.delegationExpiresAt).getTime() <= issuedAt.getTime()
+    ) {
+      throw new TaskExecutionPreflightError(
+        "delegation_expired",
+        "Delegation expired before the Ticket could be issued",
+        409,
+      );
+    }
+    const ticketExpiresAt =
+      input.delegationExpiresAt === undefined
+        ? expiresAt
+        : new Date(
+            Math.min(
+              expiresAt.getTime(),
+              new Date(input.delegationExpiresAt).getTime(),
+            ),
+          );
     let prepared: Omit<
       TaskExecutionPreparation,
       "actionTicket" | "executionGates"
@@ -737,7 +766,7 @@ export class TaskExecutionPreflightService {
         requiredCapabilities,
       });
     } else {
-      prepared = this.prepareBuiltin({
+      prepared = await this.prepareBuiltin({
         ...input,
         ticketId,
         policy,
@@ -757,9 +786,12 @@ export class TaskExecutionPreflightService {
       projectId: input.projectId,
       principalId: input.actorId,
       issuedAt,
-      expiresAt,
+      expiresAt: ticketExpiresAt,
       executionEnvelope: prepared.executionEnvelope,
       authorization,
+      ...(input.delegation === undefined
+        ? {}
+        : { delegation: input.delegation }),
     });
     return {
       ...prepared,
@@ -967,7 +999,7 @@ export class TaskExecutionPreflightService {
     };
   }
 
-  private prepareBuiltin(input: {
+  private async prepareBuiltin(input: {
     readonly agent: Agent;
     readonly actorId: string;
     readonly projectId: string | null;
@@ -990,8 +1022,27 @@ export class TaskExecutionPreflightService {
     };
     readonly authSource: "bearer" | "local-development";
     readonly agentPrincipalId: string | null;
-  }): Omit<TaskExecutionPreparation, "actionTicket" | "executionGates"> {
-    const binding = builtinCapability(input.agent);
+  }): Promise<
+    Omit<TaskExecutionPreparation, "actionTicket" | "executionGates">
+  > {
+    const taskContext =
+      input.contextType === "task" || input.contextType === "workflow-task";
+    const [taskTools, workspaceFiles] = taskContext
+      ? await Promise.all([
+          this.repositories.featureFlags.isEnabled(
+            AGENT_TASK_TOOLS_FLAG,
+            input.projectId,
+          ),
+          this.repositories.featureFlags.isEnabled(
+            AGENT_WORKSPACE_FILES_FLAG,
+            input.projectId,
+          ),
+        ])
+      : [false, false];
+    const binding = builtinCapability(input.agent, [
+      ...(taskTools ? ["task.read", "task.write"] : []),
+      ...(workspaceFiles ? ["fs.read", "fs.write"] : []),
+    ]);
     assertPolicyRequirements(input.policy.policy, binding.profile);
     const raw = builtinEnvelope({
       agent: input.agent,

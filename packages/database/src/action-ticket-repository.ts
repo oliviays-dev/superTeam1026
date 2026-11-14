@@ -34,6 +34,11 @@ interface ActionTicketRow {
   envelope_digest: string;
   authorization_snapshot: ActionTicket["authorizationSnapshot"];
   execution_envelope: ActionTicket["executionEnvelope"];
+  delegation_id: string | null;
+  delegation_revision: number | null;
+  delegation_context_hash: string | null;
+  owner_principal_id: string | null;
+  representative_principal_id: string | null;
   issued_at: Date;
   expires_at: Date;
   issued_by: string;
@@ -139,6 +144,20 @@ function ticketFromRow(row: ActionTicketRow): ActionTicket {
     envelopeDigest: row.envelope_digest,
     authorizationSnapshot: row.authorization_snapshot,
     executionEnvelope: row.execution_envelope,
+    delegation:
+      row.delegation_id === null ||
+      row.delegation_revision === null ||
+      row.delegation_context_hash === null ||
+      row.owner_principal_id === null ||
+      row.representative_principal_id === null
+        ? null
+        : {
+            delegationId: row.delegation_id,
+            delegationRevision: row.delegation_revision,
+            delegationContextHash: row.delegation_context_hash,
+            ownerPrincipalId: row.owner_principal_id,
+            representativePrincipalId: row.representative_principal_id,
+          },
     issuedAt: row.issued_at.toISOString(),
     expiresAt: row.expires_at.toISOString(),
     issuedBy: row.issued_by,
@@ -285,11 +304,13 @@ export class ActionTicketRepository {
          context_type, context_id, task_id, run_id, allowed_actions,
          denied_actions, resource_scopes, policy_id, policy_revision,
          envelope_id, envelope_digest, authorization_snapshot,
-         execution_envelope, issued_at, expires_at, issued_by
+         execution_envelope, delegation_id, delegation_revision,
+         delegation_context_hash, owner_principal_id,
+         representative_principal_id, issued_at, expires_at, issued_by
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9,
          $10::text[], $11::text[], $12::text[], $13, $14, $15, $16,
-         $17::jsonb, $18::jsonb, $19, $20, $21
+         $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23, $24, $25, $26
        )
        ON CONFLICT (id) DO NOTHING`,
       [
@@ -311,6 +332,11 @@ export class ActionTicketRepository {
         parsed.envelopeDigest,
         JSON.stringify(parsed.authorizationSnapshot),
         JSON.stringify(parsed.executionEnvelope),
+        parsed.delegation?.delegationId ?? null,
+        parsed.delegation?.delegationRevision ?? null,
+        parsed.delegation?.delegationContextHash ?? null,
+        parsed.delegation?.ownerPrincipalId ?? null,
+        parsed.delegation?.representativePrincipalId ?? null,
         parsed.issuedAt,
         parsed.expiresAt,
         parsed.issuedBy,

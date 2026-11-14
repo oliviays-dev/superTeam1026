@@ -5,11 +5,28 @@ export const sceneTypeSchema = z.enum([
   "workflow-node",
   "meeting",
   "direct-chat",
+  "delegation",
+  "group",
 ]);
 export type SceneType = z.infer<typeof sceneTypeSchema>;
 
-export const sceneSessionStatusSchema = z.enum(["active", "archived", "reset"]);
+export const sceneSessionStatusSchema = z.enum([
+  "preparing",
+  "active",
+  "archived",
+  "reset",
+]);
 export type SceneSessionStatus = z.infer<typeof sceneSessionStatusSchema>;
+
+export const sceneParticipantStatusSchema = z.enum([
+  "active",
+  "paused",
+  "left",
+  "removed",
+]);
+export type SceneParticipantStatus = z.infer<
+  typeof sceneParticipantStatusSchema
+>;
 
 export const sceneChatChannelStatusSchema = z.enum(["active", "archived"]);
 export type SceneChatChannelStatus = z.infer<
@@ -23,6 +40,7 @@ export const sceneContextContributionKindSchema = z.enum([
   "workflow-node",
   "meeting-minutes",
   "meeting-private-note",
+  "delegation-brief",
   "direct-chat-message",
   "agent-memory",
   "project-memory",
@@ -61,6 +79,7 @@ export const sceneSourceRefTypeSchema = z.enum([
   "meeting-message",
   "minutes-version",
   "meeting-private-briefing",
+  "delegation",
   "direct-chat",
   "direct-chat-message",
   "memory",
@@ -87,17 +106,74 @@ export const sceneSessionBindingSchema = z.object({
   sceneType: sceneTypeSchema,
   sceneId: z.string().trim().min(1).max(240),
   projectId: z.string().uuid().nullable(),
+  participantBindingId: z.string().uuid().nullable(),
   agentId: z.string().uuid(),
   agentPrincipalId: z.string().trim().min(1).max(180).nullable(),
   ownerPrincipalId: z.string().trim().min(1).max(180).nullable(),
+  delegationId: z.string().uuid().nullable().optional(),
   channelId: z.string().uuid().nullable(),
   sessionHandle: z.string().trim().min(1).max(240),
   generation: z.number().int().nonnegative(),
   status: sceneSessionStatusSchema,
+  revision: z.number().int().positive(),
+  lastContextSeq: z.number().int().nonnegative(),
+  contextUsageRatio: z.number().nonnegative(),
+  compactionCount: z.number().int().nonnegative(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
 export type SceneSessionBinding = z.infer<typeof sceneSessionBindingSchema>;
+
+export const sceneParticipantBindingSchema = z.object({
+  id: z.string().uuid(),
+  sceneType: z.literal("group"),
+  sceneId: z.string().trim().min(1).max(240),
+  projectId: z.string().uuid(),
+  participantKind: z.literal("ai"),
+  agentId: z.string().uuid(),
+  agentPrincipalId: z.string().trim().min(1).max(180),
+  principalId: z.string().trim().min(1).max(180),
+  status: sceneParticipantStatusSchema,
+  revision: z.number().int().positive(),
+  joinedAt: z.string().datetime({ offset: true }),
+  leftAt: z.string().datetime({ offset: true }).nullable(),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type SceneParticipantBinding = z.infer<
+  typeof sceneParticipantBindingSchema
+>;
+
+export const createGroupSceneParticipantInputSchema = z
+  .object({
+    projectId: z.string().uuid(),
+    agentId: z.string().uuid(),
+    agentPrincipalId: z.string().trim().min(1).max(180),
+    principalId: z.string().trim().min(1).max(180),
+  })
+  .strict();
+export type CreateGroupSceneParticipantInput = z.infer<
+  typeof createGroupSceneParticipantInputSchema
+>;
+
+export const updateGroupSceneParticipantInputSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    status: z.enum(["active", "paused", "left", "removed"]),
+  })
+  .strict();
+export type UpdateGroupSceneParticipantInput = z.infer<
+  typeof updateGroupSceneParticipantInputSchema
+>;
+
+export const createGroupSceneSessionInputSchema = z
+  .object({
+    projectId: z.string().uuid(),
+    participantBindingId: z.string().uuid(),
+  })
+  .strict();
+export type CreateGroupSceneSessionInput = z.infer<
+  typeof createGroupSceneSessionInputSchema
+>;
 
 export const sceneChatChannelSchema = z.object({
   id: z.string().uuid(),
@@ -120,6 +196,7 @@ export const sceneContextContributionSchema = z.object({
   sceneType: sceneTypeSchema,
   sceneId: z.string().trim().min(1).max(240),
   projectId: z.string().uuid().nullable(),
+  delegationId: z.string().uuid().nullable().optional(),
   agentId: z.string().uuid(),
   agentPrincipalId: z.string().trim().min(1).max(180).nullable(),
   ownerPrincipalId: z.string().trim().min(1).max(180).nullable(),
@@ -210,6 +287,7 @@ export const sceneContextReceiptSchema = z.object({
   sceneType: sceneTypeSchema,
   sceneId: z.string().trim().min(1).max(240),
   projectId: z.string().uuid().nullable(),
+  delegationId: z.string().uuid().nullable().optional(),
   agentId: z.string().uuid(),
   principalId: z.string().trim().min(1).max(180),
   agentPrincipalId: z.string().trim().min(1).max(180).nullable(),
@@ -217,6 +295,9 @@ export const sceneContextReceiptSchema = z.object({
   contentHash: z.string().regex(/^[a-f0-9]{64}$/),
   rendererVersion: z.string().trim().min(1).max(80),
   runtimeStateful: z.boolean(),
+  contextBoundarySeq: z.number().int().nonnegative(),
+  contextPolicyVersion: z.number().int().nonnegative(),
+  contextUsageRatio: z.number().nonnegative(),
   cursorBefore: z.number().int().nonnegative(),
   cursorAfter: z.number().int().nonnegative(),
   delivered: z.array(sceneContextDeliveredContributionSchema).max(500),
@@ -227,11 +308,28 @@ export const sceneContextReceiptSchema = z.object({
 });
 export type SceneContextReceipt = z.infer<typeof sceneContextReceiptSchema>;
 
+export const sceneContextCommitReceiptSchema = z.object({
+  id: z.string().uuid(),
+  runId: z.string().uuid(),
+  contextPackId: z.string().uuid(),
+  sceneSessionId: z.string().uuid(),
+  contextBoundarySeq: z.number().int().nonnegative(),
+  previousContextSeq: z.number().int().nonnegative(),
+  contextPolicyVersion: z.number().int().nonnegative(),
+  contextUsageRatio: z.number().nonnegative(),
+  runtimeSuccess: z.literal(true),
+  committedAt: z.string().datetime({ offset: true }),
+});
+export type SceneContextCommitReceipt = z.infer<
+  typeof sceneContextCommitReceiptSchema
+>;
+
 export const sceneContextSnapshotSchema = z.object({
   binding: sceneSessionBindingSchema,
   channel: sceneChatChannelSchema.nullable(),
   cursor: sceneContextDeliveryCursorSchema.nullable(),
   receipt: sceneContextReceiptSchema.nullable(),
+  commitReceipt: sceneContextCommitReceiptSchema.nullable(),
   contributions: z.array(sceneContextContributionSchema),
 });
 export type SceneContextSnapshot = z.infer<typeof sceneContextSnapshotSchema>;

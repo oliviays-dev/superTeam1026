@@ -98,7 +98,7 @@ export const sceneSessionResetResultSchema = z.object({
     id: z.string().uuid(),
     sessionHandle: z.string(),
     generation: z.number().int().nonnegative(),
-    status: z.enum(["active", "archived", "reset"]),
+    status: z.enum(["preparing", "active", "archived", "reset"]),
     createdAt: z.string().datetime({ offset: true }),
   }),
 });

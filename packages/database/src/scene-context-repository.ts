@@ -6,26 +6,35 @@ import type {
   SceneContextContribution,
   SceneContextDeliveryCursor,
   SceneContextReceipt,
+  SceneContextCommitReceipt,
   SceneContextSnapshot,
+  SceneParticipantBinding,
   SceneSessionBinding,
   SceneSourceRef,
   SceneType,
 } from "@pluginmax/contracts";
 import type { Database } from "./database.js";
+import { appendAuditEventWithClient } from "./audit-event-repository.js";
 
 interface SceneSessionRow {
   id: string;
   scene_type: SceneType;
   scene_id: string;
   project_id: string | null;
+  participant_binding_id: string | null;
   agent_id: string;
   agent_principal_id: string | null;
   owner_principal_id: string | null;
+  delegation_id: string | null;
   principal_scope: string;
   channel_id: string | null;
   session_handle: string;
   generation: number;
   status: SceneSessionBinding["status"];
+  revision: number;
+  last_context_seq: string;
+  context_usage_ratio: string | number;
+  compaction_count: number;
   created_at: Date;
   updated_at: Date;
 }
@@ -53,6 +62,7 @@ interface SceneContributionRow {
   agent_id: string;
   agent_principal_id: string | null;
   owner_principal_id: string | null;
+  delegation_id: string | null;
   source_key: string;
   kind: SceneContextContribution["kind"];
   version: string;
@@ -82,6 +92,7 @@ interface SceneReceiptRow {
   scene_type: SceneType;
   scene_id: string;
   project_id: string | null;
+  delegation_id: string | null;
   agent_id: string;
   principal_id: string;
   agent_principal_id: string | null;
@@ -89,6 +100,9 @@ interface SceneReceiptRow {
   content_hash: string;
   renderer_version: string;
   runtime_stateful: boolean;
+  context_boundary_seq: string;
+  context_policy_version: number;
+  context_usage_ratio: string | number;
   cursor_before: string;
   cursor_after: string;
   delivered: SceneContextReceipt["delivered"];
@@ -96,6 +110,35 @@ interface SceneReceiptRow {
   source_refs: SceneSourceRef[];
   excluded: SceneContextReceipt["excluded"];
   created_at: Date;
+}
+
+interface ParticipantBindingRow {
+  id: string;
+  scene_type: "group";
+  scene_id: string;
+  project_id: string;
+  participant_kind: "ai";
+  agent_id: string;
+  agent_principal_id: string;
+  principal_id: string;
+  status: SceneParticipantBinding["status"];
+  revision: number;
+  joined_at: Date;
+  left_at: Date | null;
+  updated_at: Date;
+}
+
+interface CommitReceiptRow {
+  id: string;
+  run_id: string;
+  context_pack_id: string;
+  scene_session_id: string;
+  context_boundary_seq: string;
+  previous_context_seq: string;
+  context_policy_version: number;
+  context_usage_ratio: string | number;
+  runtime_success: boolean;
+  committed_at: Date;
 }
 
 export class SceneContextRepositoryError extends Error {
@@ -153,6 +196,10 @@ function sessionHandle(
         ? "de-flow"
         : sceneType === "meeting"
           ? "de-meeting"
+          : sceneType === "delegation"
+            ? "de-delegate"
+            : sceneType === "group"
+              ? "de-group"
           : "de-chat";
   const readable = sceneId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 120);
   const suffix = generation === 0 ? "" : `-r${String(generation).slice(0, 20)}`;
@@ -168,13 +215,19 @@ function sessionFromRow(row: SceneSessionRow): SceneSessionBinding {
     sceneType: row.scene_type,
     sceneId: row.scene_id,
     projectId: row.project_id,
+    participantBindingId: row.participant_binding_id,
     agentId: row.agent_id,
     agentPrincipalId: row.agent_principal_id,
     ownerPrincipalId: row.owner_principal_id,
+    ...(row.delegation_id === null ? {} : { delegationId: row.delegation_id }),
     channelId: row.channel_id,
     sessionHandle: row.session_handle,
     generation: row.generation,
     status: row.status,
+    revision: row.revision,
+    lastContextSeq: Number(row.last_context_seq),
+    contextUsageRatio: Number(row.context_usage_ratio),
+    compactionCount: row.compaction_count,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -205,6 +258,7 @@ function contributionFromRow(
     sceneType: row.scene_type,
     sceneId: row.scene_id,
     projectId: row.project_id,
+    ...(row.delegation_id === null ? {} : { delegationId: row.delegation_id }),
     agentId: row.agent_id,
     agentPrincipalId: row.agent_principal_id,
     ownerPrincipalId: row.owner_principal_id,
@@ -241,6 +295,7 @@ function receiptFromRow(row: SceneReceiptRow): SceneContextReceipt {
     sceneType: row.scene_type,
     sceneId: row.scene_id,
     projectId: row.project_id,
+    ...(row.delegation_id === null ? {} : { delegationId: row.delegation_id }),
     agentId: row.agent_id,
     principalId: row.principal_id,
     agentPrincipalId: row.agent_principal_id,
@@ -248,6 +303,9 @@ function receiptFromRow(row: SceneReceiptRow): SceneContextReceipt {
     contentHash: row.content_hash,
     rendererVersion: row.renderer_version,
     runtimeStateful: row.runtime_stateful,
+    contextBoundarySeq: Number(row.context_boundary_seq),
+    contextPolicyVersion: row.context_policy_version,
+    contextUsageRatio: Number(row.context_usage_ratio),
     cursorBefore: Number(row.cursor_before),
     cursorAfter: Number(row.cursor_after),
     delivered: row.delivered,
@@ -258,8 +316,209 @@ function receiptFromRow(row: SceneReceiptRow): SceneContextReceipt {
   };
 }
 
+function participantBindingFromRow(
+  row: ParticipantBindingRow,
+): SceneParticipantBinding {
+  return {
+    id: row.id,
+    sceneType: row.scene_type,
+    sceneId: row.scene_id,
+    projectId: row.project_id,
+    participantKind: row.participant_kind,
+    agentId: row.agent_id,
+    agentPrincipalId: row.agent_principal_id,
+    principalId: row.principal_id,
+    status: row.status,
+    revision: row.revision,
+    joinedAt: row.joined_at.toISOString(),
+    leftAt: row.left_at?.toISOString() ?? null,
+    updatedAt: row.updated_at.toISOString(),
+  };
+}
+
+function commitReceiptFromRow(
+  row: CommitReceiptRow,
+): SceneContextCommitReceipt {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    contextPackId: row.context_pack_id,
+    sceneSessionId: row.scene_session_id,
+    contextBoundarySeq: Number(row.context_boundary_seq),
+    previousContextSeq: Number(row.previous_context_seq),
+    contextPolicyVersion: row.context_policy_version,
+    contextUsageRatio: Number(row.context_usage_ratio),
+    runtimeSuccess: row.runtime_success as true,
+    committedAt: row.committed_at.toISOString(),
+  };
+}
+
 export class SceneContextRepository {
   constructor(private readonly database: Database) {}
+
+  async ensureParticipantBinding(input: {
+    readonly sceneId: string;
+    readonly projectId: string;
+    readonly agentId: string;
+    readonly agentPrincipalId: string;
+    readonly principalId: string;
+  }): Promise<SceneParticipantBinding> {
+    const id = deterministicUuid("scene-participant-binding", [
+      "group",
+      input.sceneId,
+      input.agentId,
+      input.principalId,
+    ].join(":"));
+    const result = await this.database.query<ParticipantBindingRow>(
+      `INSERT INTO scene_participant_bindings (
+         id, scene_type, scene_id, project_id, participant_kind, agent_id,
+         agent_principal_id, principal_id, status, revision, joined_at,
+         left_at, updated_at
+       ) VALUES (
+         $1, 'group', $2, $3, 'ai', $4, $5, $6, 'active', 1, NOW(), NULL,
+         NOW()
+       )
+       ON CONFLICT (scene_type, scene_id, agent_id, principal_id)
+       DO UPDATE SET
+         status = CASE
+           WHEN scene_participant_bindings.status = 'removed'
+             THEN scene_participant_bindings.status
+           ELSE 'active'
+         END,
+         left_at = CASE
+           WHEN scene_participant_bindings.status = 'removed'
+             THEN scene_participant_bindings.left_at
+           ELSE NULL
+         END,
+         revision = CASE
+           WHEN scene_participant_bindings.status = 'active'
+             THEN scene_participant_bindings.revision
+           ELSE scene_participant_bindings.revision + 1
+         END,
+         updated_at = NOW()
+       RETURNING *`,
+      [
+        id,
+        input.sceneId,
+        input.projectId,
+        input.agentId,
+        input.agentPrincipalId,
+        input.principalId,
+      ],
+    );
+    return participantBindingFromRow(result.rows[0]!);
+  }
+
+  async participantBinding(
+    id: string,
+  ): Promise<SceneParticipantBinding | undefined> {
+    const result = await this.database.query<ParticipantBindingRow>(
+      "SELECT * FROM scene_participant_bindings WHERE id = $1",
+      [id],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : participantBindingFromRow(row);
+  }
+
+  async listParticipantBindings(
+    sceneId: string,
+    projectId: string,
+  ): Promise<SceneParticipantBinding[]> {
+    const result = await this.database.query<ParticipantBindingRow>(
+      `SELECT *
+       FROM scene_participant_bindings
+       WHERE scene_type = 'group'
+         AND scene_id = $1
+         AND project_id = $2
+       ORDER BY joined_at, id`,
+      [sceneId, projectId],
+    );
+    return result.rows.map(participantBindingFromRow);
+  }
+
+  async updateParticipantBinding(input: {
+    readonly id: string;
+    readonly expectedRevision: number;
+    readonly status: SceneParticipantBinding["status"];
+    readonly actorId: string;
+  }): Promise<SceneParticipantBinding | undefined> {
+    return this.database.transaction(async (client) => {
+      const result = await client.query<ParticipantBindingRow>(
+        `UPDATE scene_participant_bindings
+         SET status = $3,
+             left_at = CASE
+               WHEN $3 IN ('left', 'removed') THEN COALESCE(left_at, NOW())
+               ELSE NULL
+             END,
+             revision = revision + 1,
+             updated_at = NOW()
+         WHERE id = $1
+           AND revision = $2
+           AND NOT (status = 'removed' AND $3 <> 'removed')
+         RETURNING *`,
+        [input.id, input.expectedRevision, input.status],
+      );
+      const row = result.rows[0];
+      if (row === undefined) return undefined;
+      if (
+        input.status === "paused" ||
+        input.status === "left" ||
+        input.status === "removed"
+      ) {
+        await client.query(
+          `UPDATE scene_sessions
+           SET status = 'reset',
+               revision = revision + 1,
+               updated_at = NOW()
+           WHERE participant_binding_id = $1
+             AND status IN ('preparing', 'active')`,
+          [row.id],
+        );
+      }
+      await appendAuditEventWithClient(client, {
+        action: "group.scene.participant.updated",
+        actorPrincipalId: input.actorId,
+        metadata: {
+          participantBindingId: row.id,
+          sceneId: row.scene_id,
+          projectId: row.project_id,
+          agentId: row.agent_id,
+          status: row.status,
+          revision: row.revision,
+        },
+      });
+      return participantBindingFromRow(row);
+    });
+  }
+
+  async sessionForRun(runId: string): Promise<SceneSessionBinding | undefined> {
+    const receipt = await this.database.query<SceneSessionRow>(
+      `SELECT session.*
+       FROM scene_context_receipts AS receipt
+       JOIN scene_sessions AS session
+         ON session.id = receipt.scene_session_id
+       WHERE receipt.run_id = $1
+       ORDER BY receipt.created_at DESC
+       LIMIT 1`,
+      [runId],
+    );
+    if (receipt.rows[0] !== undefined) {
+      return sessionFromRow(receipt.rows[0]);
+    }
+    const attribution = await this.database.query<SceneSessionRow>(
+      `SELECT session.*
+       FROM teammate_run_attributions AS attribution
+       JOIN scene_sessions AS session
+         ON session.id = attribution.scene_session_id
+       WHERE attribution.run_id = $1
+       LIMIT 1`,
+      [runId],
+    );
+    if (attribution.rows[0] !== undefined) {
+      return sessionFromRow(attribution.rows[0]);
+    }
+    return undefined;
+  }
 
   async ensureChatChannel(input: {
     readonly sceneId: string;
@@ -309,24 +568,41 @@ export class SceneContextRepository {
     readonly agentId: string;
     readonly agentPrincipalId: string | null;
     readonly ownerPrincipalId?: string | null;
+    readonly delegationId?: string | null;
     readonly channelId?: string | null;
+    readonly participantBindingId?: string | null;
   }): Promise<SceneSessionBinding> {
     return this.database.transaction(async (client) => {
       const principalScope =
         input.agentPrincipalId ?? input.ownerPrincipalId ?? "";
+      const participantBindingId =
+        input.participantBindingId ??
+        (input.sceneType === "meeting" || input.sceneType === "group"
+          ? undefined
+          : null);
       const latest = await client.query<SceneSessionRow>(
         `SELECT * FROM scene_sessions
          WHERE scene_type = $1
            AND scene_id = $2
            AND agent_id = $3
            AND principal_scope = $4
+           AND participant_binding_id IS NOT DISTINCT FROM $5::uuid
          ORDER BY generation DESC
          LIMIT 1
          FOR UPDATE`,
-        [input.sceneType, input.sceneId, input.agentId, principalScope],
+        [
+          input.sceneType,
+          input.sceneId,
+          input.agentId,
+          principalScope,
+          participantBindingId ?? null,
+        ],
       );
       const latestRow = latest.rows[0];
-      if (latestRow?.status === "active") {
+      if (
+        latestRow?.status === "active" ||
+        latestRow?.status === "preparing"
+      ) {
         return sessionFromRow(latestRow);
       }
       const generation = latestRow === undefined ? 0 : latestRow.generation + 1;
@@ -335,6 +611,7 @@ export class SceneContextRepository {
         input.sceneId,
         input.agentId,
         principalScope,
+        participantBindingId ?? "",
         generation,
       ].join(":");
       const id = deterministicUuid("scene-session", identity);
@@ -342,18 +619,14 @@ export class SceneContextRepository {
         `INSERT INTO scene_sessions (
            id, scene_type, scene_id, project_id, agent_id,
            agent_principal_id, owner_principal_id, principal_scope, channel_id,
-           session_handle, generation, status, created_at, updated_at
+           delegation_id, participant_binding_id, session_handle, generation,
+           status, revision, last_context_seq, context_usage_ratio,
+           compaction_count, created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9,
-           $10, $11, 'active', NOW(), NOW()
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+           $11, $12, $13, 'preparing', 1, 0, 0, 0, NOW(), NOW()
          )
-         ON CONFLICT (
-           scene_type,
-           scene_id,
-           agent_id,
-           principal_scope,
-           generation
-         ) DO NOTHING`,
+         ON CONFLICT DO NOTHING`,
         [
           id,
           input.sceneType,
@@ -364,6 +637,8 @@ export class SceneContextRepository {
           input.ownerPrincipalId ?? null,
           principalScope,
           input.channelId ?? null,
+          input.delegationId ?? null,
+          participantBindingId ?? null,
           sessionHandle(
             input.sceneType,
             input.sceneId,
@@ -379,12 +654,14 @@ export class SceneContextRepository {
            AND scene_id = $2
            AND agent_id = $3
            AND principal_scope = $4
-           AND generation = $5`,
+           AND participant_binding_id IS NOT DISTINCT FROM $5::uuid
+           AND generation = $6`,
         [
           input.sceneType,
           input.sceneId,
           input.agentId,
           principalScope,
+          participantBindingId ?? null,
           generation,
         ],
       );
@@ -415,7 +692,7 @@ export class SceneContextRepository {
          WHERE scene_type = $1
            AND scene_id = $2
            AND project_id IS NOT DISTINCT FROM $3::uuid
-           AND status = 'active'
+           AND status IN ('preparing', 'active')
          ORDER BY generation DESC, id
          FOR UPDATE`,
         [input.sceneType, input.sceneId, input.projectId],
@@ -434,7 +711,7 @@ export class SceneContextRepository {
              reset_at = NOW(),
              updated_at = NOW()
            WHERE id = $1
-             AND status = 'active'`,
+             AND status IN ('preparing', 'active')`,
           [previous.id, input.reason, input.actorId],
         );
         const generation = previous.generation + 1;
@@ -443,17 +720,19 @@ export class SceneContextRepository {
           previous.scene_id,
           previous.agent_id,
           previous.principal_scope,
+          previous.participant_binding_id ?? "",
           generation,
         ].join(":");
         const result = await client.query<SceneSessionRow>(
           `INSERT INTO scene_sessions (
              id, scene_type, scene_id, project_id, agent_id,
              agent_principal_id, owner_principal_id, principal_scope,
-             channel_id, session_handle, generation, status,
-             created_at, updated_at
+             channel_id, delegation_id, participant_binding_id, session_handle,
+             generation, status, revision, last_context_seq,
+             context_usage_ratio, compaction_count, created_at, updated_at
            ) VALUES (
-             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-             'active', NOW(), NOW()
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+             'preparing', 1, 0, 0, 0, NOW(), NOW()
            )
            RETURNING *`,
           [
@@ -466,6 +745,8 @@ export class SceneContextRepository {
             previous.owner_principal_id,
             previous.principal_scope,
             previous.channel_id,
+            previous.delegation_id,
+            previous.participant_binding_id,
             sessionHandle(
               previous.scene_type,
               previous.scene_id,
@@ -522,10 +803,11 @@ export class SceneContextRepository {
       `INSERT INTO scene_context_contributions (
          id, scene_session_id, scene_type, scene_id, project_id, agent_id,
          agent_principal_id, owner_principal_id, source_key, kind, version,
-         authority, visibility, text, source_refs, created_by, created_at
+         authority, visibility, text, source_refs, delegation_id, created_by,
+         created_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-         $12, $13, $14, $15::jsonb, $16, NOW()
+         $12, $13, $14, $15::jsonb, $16, $17, NOW()
        )
        ON CONFLICT DO NOTHING`,
       [
@@ -544,6 +826,7 @@ export class SceneContextRepository {
         input.visibility,
         input.text,
         JSON.stringify(input.sourceRefs),
+        input.session.delegationId ?? null,
         input.createdBy,
       ],
     );
@@ -656,11 +939,16 @@ export class SceneContextRepository {
         : this.receiptByRun(runId),
       this.listContributions({ session: binding, actorPrincipalId }),
     ]);
+    const commitReceipt =
+      runId === undefined
+        ? undefined
+        : await this.commitReceiptByRun(runId);
     return {
       binding,
       channel: channel ?? null,
       cursor: cursor ?? null,
       receipt: receipt ?? null,
+      commitReceipt: commitReceipt ?? null,
       contributions,
     };
   }
@@ -677,7 +965,18 @@ export class SceneContextRepository {
     return { ...snapshot, receipt };
   }
 
-  async saveDelivery(input: {
+  async commitReceiptByRun(
+    runId: string,
+  ): Promise<SceneContextCommitReceipt | undefined> {
+    const result = await this.database.query<CommitReceiptRow>(
+      "SELECT * FROM scene_context_commit_receipts WHERE run_id = $1",
+      [runId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : commitReceiptFromRow(row);
+  }
+
+  async savePreparedDelivery(input: {
     readonly pack: ContextPack;
     readonly legacyReceipt: ContextReceipt;
     readonly receipt: SceneContextReceipt;
@@ -696,40 +995,23 @@ export class SceneContextRepository {
         ) {
           throw new SceneContextRepositoryError(
             "scene_context_conflict",
-            "A Run cannot commit a different Scene context receipt",
+            "A Run cannot prepare a different Scene context receipt",
             { runId: input.receipt.runId },
           );
         }
         return persisted;
-      }
-      const cursor = await client.query<DeliveryCursorRow>(
-        `SELECT * FROM scene_context_delivery_cursors
-         WHERE scene_session_id = $1
-         FOR UPDATE`,
-        [input.receipt.sceneSessionId],
-      );
-      const currentCursor = cursor.rows[0];
-      const currentSequence =
-        currentCursor === undefined ? 0 : Number(currentCursor.cursor_sequence);
-      if (currentSequence !== input.receipt.cursorBefore) {
-        throw new SceneContextRepositoryError(
-          "scene_context_cursor_conflict",
-          "Scene context delivery cursor changed during assembly",
-          {
-            expected: input.receipt.cursorBefore,
-            actual: currentSequence,
-          },
-        );
       }
       const insertedPack = await client.query(
         `INSERT INTO context_packs (
            id, run_id, project_id, task_id, meeting_turn_id,
            direct_chat_turn_id, agent_id, pack, receipt, content_hash,
            created_at, scene_session_id, scene_type, scene_id,
-           agent_principal_id, logical_digest, renderer_version, as_of
+           agent_principal_id, logical_digest, renderer_version, as_of,
+           context_boundary_seq, context_policy_version,
+           context_usage_ratio
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10,
-           $11, $12, $13, $14, $15, $16, $17, $18
+           $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
          )
          ON CONFLICT (run_id) DO NOTHING
          RETURNING id`,
@@ -752,6 +1034,10 @@ export class SceneContextRepository {
           input.pack.logicalDigest ?? input.pack.contentHash,
           input.pack.rendererVersion ?? "scene-context-v1",
           input.pack.asOf ?? input.pack.createdAt,
+          input.pack.contextBoundarySeq ?? input.receipt.contextBoundarySeq,
+          input.pack.contextPolicyVersion ??
+            input.receipt.contextPolicyVersion,
+          input.pack.contextUsageRatio ?? input.receipt.contextUsageRatio,
         ],
       );
       if (insertedPack.rowCount === 0) {
@@ -770,12 +1056,13 @@ export class SceneContextRepository {
            id, run_id, context_pack_id, scene_session_id, scene_type, scene_id,
            project_id, agent_id, principal_id, agent_principal_id,
            logical_digest, content_hash, renderer_version, runtime_stateful,
-           cursor_before, cursor_after, delivered, reused, source_refs,
-           excluded, created_at
+           context_boundary_seq, context_policy_version,
+           context_usage_ratio, cursor_before, cursor_after, delivered,
+           reused, source_refs, delegation_id, excluded, created_at
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-           $11, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb,
-           $19::jsonb, $20::jsonb, $21
+           $11, $12, $13, $14, $15, $16, $17, $18, $19,
+           $20::jsonb, $21::jsonb, $22::jsonb, $23, $24::jsonb, $25
          )
          RETURNING *`,
         [
@@ -793,18 +1080,76 @@ export class SceneContextRepository {
           input.receipt.contentHash,
           input.receipt.rendererVersion,
           input.receipt.runtimeStateful,
+          input.receipt.contextBoundarySeq,
+          input.receipt.contextPolicyVersion,
+          input.receipt.contextUsageRatio,
           input.receipt.cursorBefore,
           input.receipt.cursorAfter,
           JSON.stringify(input.receipt.delivered),
           JSON.stringify(input.receipt.reused),
           JSON.stringify(input.receipt.sourceRefs),
+          input.receipt.delegationId ?? null,
           JSON.stringify(input.receipt.excluded),
           input.receipt.createdAt,
         ],
       );
+      return receiptFromRow(insertedReceipt.rows[0]!);
+    });
+  }
+
+  async commitConsumed(runId: string): Promise<SceneContextCommitReceipt> {
+    return this.database.transaction(async (client) => {
+      const existing = await client.query<CommitReceiptRow>(
+        "SELECT * FROM scene_context_commit_receipts WHERE run_id = $1",
+        [runId],
+      );
+      if (existing.rows[0] !== undefined) {
+        return commitReceiptFromRow(existing.rows[0]);
+      }
+      const receiptResult = await client.query<SceneReceiptRow>(
+        "SELECT * FROM scene_context_receipts WHERE run_id = $1",
+        [runId],
+      );
+      const receiptRow = receiptResult.rows[0];
+      if (receiptRow === undefined) {
+        throw new SceneContextRepositoryError(
+          "scene_session_not_found",
+          "Prepared Scene Context receipt is not available",
+        );
+      }
+      const receipt = receiptFromRow(receiptRow);
+      const sessionResult = await client.query<SceneSessionRow>(
+        "SELECT * FROM scene_sessions WHERE id = $1 FOR UPDATE",
+        [receipt.sceneSessionId],
+      );
+      const sessionRow = sessionResult.rows[0];
+      if (sessionRow === undefined) {
+        throw new SceneContextRepositoryError(
+          "scene_session_not_found",
+          "Scene session is unavailable",
+        );
+      }
+      const session = sessionFromRow(sessionRow);
+      if (session.lastContextSeq !== receipt.cursorBefore) {
+        throw new SceneContextRepositoryError(
+          "scene_context_cursor_conflict",
+          "Scene context cursor changed before Runtime consumption committed",
+          {
+            expected: receipt.cursorBefore,
+            actual: session.lastContextSeq,
+          },
+        );
+      }
+      const cursorResult = await client.query<DeliveryCursorRow>(
+        `SELECT * FROM scene_context_delivery_cursors
+         WHERE scene_session_id = $1
+         FOR UPDATE`,
+        [session.id],
+      );
+      const currentCursor = cursorResult.rows[0];
       const deliveredIds = [
         ...(currentCursor?.delivered_contribution_ids ?? []),
-        ...input.receipt.delivered.map((contribution) => contribution.id),
+        ...receipt.delivered.map((contribution) => contribution.id),
       ].filter((value, index, values) => values.indexOf(value) === index);
       await client.query(
         `INSERT INTO scene_context_delivery_cursors (
@@ -812,23 +1157,81 @@ export class SceneContextRepository {
            last_run_id, revision, updated_at
          ) VALUES ($1, $2, $3::uuid[], $4, 1, NOW())
          ON CONFLICT (scene_session_id) DO UPDATE SET
-           cursor_sequence =
-             GREATEST(
-               scene_context_delivery_cursors.cursor_sequence,
-               EXCLUDED.cursor_sequence
-             ),
+           cursor_sequence = EXCLUDED.cursor_sequence,
            delivered_contribution_ids = EXCLUDED.delivered_contribution_ids,
            last_run_id = EXCLUDED.last_run_id,
            revision = scene_context_delivery_cursors.revision + 1,
            updated_at = NOW()`,
         [
-          input.receipt.sceneSessionId,
-          input.receipt.cursorAfter,
+          session.id,
+          receipt.contextBoundarySeq,
           deliveredIds,
-          input.receipt.runId,
+          receipt.runId,
         ],
       );
-      return receiptFromRow(insertedReceipt.rows[0]!);
+      const compacted =
+        receipt.contextUsageRatio >= 0.85 ? 1 : 0;
+      await client.query(
+        `UPDATE scene_sessions
+         SET status = CASE WHEN status = 'preparing' THEN 'active' ELSE status END,
+             last_context_seq = $2,
+             context_usage_ratio = $3,
+             compaction_count = compaction_count + $4,
+             revision = revision + 1,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [
+          session.id,
+          receipt.contextBoundarySeq,
+          receipt.contextUsageRatio,
+          compacted,
+        ],
+      );
+      const inserted = await client.query<CommitReceiptRow>(
+        `INSERT INTO scene_context_commit_receipts (
+           id, run_id, context_pack_id, scene_session_id,
+           context_boundary_seq, previous_context_seq,
+           context_policy_version, context_usage_ratio, runtime_success,
+           committed_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8, TRUE, NOW()
+         )
+         RETURNING *`,
+        [
+          deterministicUuid("scene-context-commit", runId),
+          runId,
+          receipt.contextPackId,
+          session.id,
+          receipt.contextBoundarySeq,
+          receipt.cursorBefore,
+          receipt.contextPolicyVersion,
+          receipt.contextUsageRatio,
+        ],
+      );
+      await appendAuditEventWithClient(client, {
+        action: "context.committed",
+        actorPrincipalId: receipt.principalId,
+        metadata: {
+          runId,
+          contextPackId: receipt.contextPackId,
+          sceneSessionId: session.id,
+          contextBoundarySeq: receipt.contextBoundarySeq,
+          previousContextSeq: receipt.cursorBefore,
+          contextPolicyVersion: receipt.contextPolicyVersion,
+          contextUsageRatio: receipt.contextUsageRatio,
+        },
+      });
+      return commitReceiptFromRow(inserted.rows[0]!);
     });
+  }
+
+  async saveDelivery(input: {
+    readonly pack: ContextPack;
+    readonly legacyReceipt: ContextReceipt;
+    readonly receipt: SceneContextReceipt;
+  }): Promise<SceneContextReceipt> {
+    const receipt = await this.savePreparedDelivery(input);
+    await this.commitConsumed(receipt.runId);
+    return receipt;
   }
 }

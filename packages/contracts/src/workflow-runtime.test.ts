@@ -23,6 +23,7 @@ describe("workflow runtime API contracts", () => {
     ).toEqual({
       title: "Release",
       context: { complexity: 8, security: true, owner: "local-admin" },
+      bindingOverrides: [],
     });
     expect(() =>
       startWorkflowInputSchema.parse({

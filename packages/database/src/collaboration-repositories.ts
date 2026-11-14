@@ -433,6 +433,11 @@ interface WorkflowRow {
   status: WorkflowDefinition["status"];
   source_template_id: string | null;
   source_template_version: number | null;
+  scope: WorkflowDefinition["scope"];
+  origin: WorkflowDefinition["origin"];
+  published_by_principal_id: string | null;
+  published_at: Date | null;
+  revision: number;
   created_at: Date;
   updated_at: Date;
 }
@@ -454,8 +459,23 @@ export class WorkflowRepository {
 
   async list(projectId: string): Promise<WorkflowDefinition[]> {
     const result = await this.database.query<WorkflowRow>(
-      "SELECT * FROM workflow_definitions WHERE project_id = $1 ORDER BY updated_at DESC",
+      `SELECT *
+       FROM workflow_definitions
+       WHERE project_id = $1 AND scope = 'project'
+       ORDER BY updated_at DESC`,
       [projectId],
+    );
+    return result.rows.map(workflowFromRow);
+  }
+
+  async listPlatformTemplates(): Promise<WorkflowDefinition[]> {
+    const result = await this.database.query<WorkflowRow>(
+      `SELECT *
+       FROM workflow_definitions
+       WHERE scope = 'platform'
+         AND status = 'active'
+         AND published_at IS NOT NULL
+       ORDER BY published_at DESC, updated_at DESC`,
     );
     return result.rows.map(workflowFromRow);
   }
@@ -518,6 +538,77 @@ export class WorkflowRepository {
     const result = await this.database.query<WorkflowRow>(
       "SELECT * FROM workflow_definitions WHERE id = $1",
       [id],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : workflowFromRow(row);
+  }
+
+  async update(
+    id: string,
+    input: {
+      readonly name?: string;
+      readonly description?: string;
+      readonly sourceMarkdown?: string;
+      readonly expectedRevision: number;
+    },
+  ): Promise<WorkflowDefinition | undefined> {
+    const result = await this.database.query<WorkflowRow>(
+      `UPDATE workflow_definitions
+       SET
+         name = COALESCE($2, name),
+         description = COALESCE($3, description),
+         source_md = COALESCE($4, source_md),
+         revision = revision + 1,
+         updated_at = NOW()
+       WHERE id = $1 AND revision = $5
+       RETURNING *`,
+      [
+        id,
+        input.name ?? null,
+        input.description ?? null,
+        input.sourceMarkdown ?? null,
+        input.expectedRevision,
+      ],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : workflowFromRow(row);
+  }
+
+  async publish(
+    id: string,
+    actorId: string,
+  ): Promise<WorkflowDefinition | undefined> {
+    const result = await this.database.query<WorkflowRow>(
+      `UPDATE workflow_definitions
+       SET
+         scope = 'platform',
+         status = 'active',
+         published_by_principal_id = $2,
+         published_at = NOW(),
+         revision = revision + 1,
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id, actorId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : workflowFromRow(row);
+  }
+
+  async unpublish(
+    id: string,
+    actorId: string,
+  ): Promise<WorkflowDefinition | undefined> {
+    const result = await this.database.query<WorkflowRow>(
+      `UPDATE workflow_definitions
+       SET
+         status = 'archived',
+         published_by_principal_id = $2,
+         revision = revision + 1,
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING *`,
+      [id, actorId],
     );
     const row = result.rows[0];
     return row === undefined ? undefined : workflowFromRow(row);
@@ -636,6 +727,7 @@ interface MeetingRow {
 interface MeetingMessageRow {
   id: string;
   meeting_id: string;
+  sequence: string | number;
   author_type: MeetingMessage["authorType"];
   author_id: string;
   author_name: string;
@@ -653,6 +745,8 @@ interface MeetingMessageRow {
   client_message_id: string | null;
   delegate_id: string | null;
   sender_principal_id: string | null;
+  participant_binding_id: string | null;
+  trigger_depth: number;
   created_at: Date;
 }
 
@@ -763,11 +857,63 @@ export class MeetingRepository {
       );
       for (const participant of participants) {
         if (participant.kind !== "agent") continue;
+        const principal = await client.query<{
+          agent_principal_id: string;
+          principal_id: string;
+        }>(
+          `SELECT
+             COALESCE(agent.principal_id, member.principal_id, $3::text)
+               AS agent_principal_id,
+             COALESCE(member.principal_id, agent.principal_id, $3::text)
+               AS principal_id
+           FROM agents AS agent
+           LEFT JOIN project_members AS member
+             ON member.project_id = $2
+            AND member.kind = 'agent'
+            AND member.actor_id = agent.id::text
+           WHERE agent.id = $1`,
+          [participant.id, input.projectId, participant.id],
+        );
+        const agentPrincipalId =
+          principal.rows[0]?.agent_principal_id ?? participant.id;
+        const principalId =
+          principal.rows[0]?.principal_id ?? agentPrincipalId;
+        const participantBindingId = randomUUID();
+        await client.query(
+          `INSERT INTO scene_participant_bindings (
+             id, scene_type, scene_id, project_id, participant_kind, agent_id,
+             agent_principal_id, principal_id, status, revision, joined_at,
+             left_at, updated_at
+           ) VALUES (
+             $1, 'meeting', $2, $3, 'ai', $4, $5, $6, 'active', 1, NOW(),
+             NULL, NOW()
+           )`,
+          [
+            participantBindingId,
+            meetingId,
+            input.projectId,
+            participant.id,
+            agentPrincipalId,
+            principalId,
+          ],
+        );
         await client.query(
           `INSERT INTO meeting_ai_participants (
-             meeting_id, project_id, agent_id, status, joined_at, updated_at
-           ) VALUES ($1, $2, $3, 'active', NOW(), NOW())`,
-          [meetingId, input.projectId, participant.id],
+             meeting_id, project_id, agent_id, status, joined_at, updated_at,
+             participant_binding_id, agent_principal_id, principal_id,
+             revision, updated_by
+           ) VALUES (
+             $1, $2, $3, 'active', NOW(), NOW(), $4, $5, $6, 1, $7
+           )`,
+          [
+            meetingId,
+            input.projectId,
+            participant.id,
+            participantBindingId,
+            agentPrincipalId,
+            principalId,
+            actorId,
+          ],
         );
       }
       return meetingFromRow(result.rows[0]!);
@@ -934,6 +1080,11 @@ function workflowFromRow(row: WorkflowRow): WorkflowDefinition {
   return {
     id: row.id,
     projectId: row.project_id,
+    ownerProjectId: row.project_id,
+    scope: row.scope,
+    origin: row.origin,
+    publishedByPrincipalId: row.published_by_principal_id,
+    publishedAt: row.published_at?.toISOString() ?? null,
     name: row.name,
     description: row.description,
     steps: row.steps,
@@ -942,6 +1093,7 @@ function workflowFromRow(row: WorkflowRow): WorkflowDefinition {
     status: row.status,
     sourceTemplateId: row.source_template_id,
     sourceTemplateVersion: row.source_template_version,
+    revision: row.revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -961,6 +1113,7 @@ function workflowInstanceFromRow(row: WorkflowInstanceRow): WorkflowInstance {
     failureReason: null,
     pausedAt: null,
     lastReconciledAt: null,
+    bindingRevision: null,
     revision: 1,
     runtime: { nodes: [], edges: [], context: {} },
     graph: null,
@@ -989,6 +1142,7 @@ function meetingMessageFromRow(row: MeetingMessageRow): MeetingMessage {
   return {
     id: row.id,
     meetingId: row.meeting_id,
+    sequence: Number(row.sequence),
     authorType: row.author_type,
     authorId: row.author_id,
     authorName: row.author_name,
@@ -1006,6 +1160,8 @@ function meetingMessageFromRow(row: MeetingMessageRow): MeetingMessage {
     clientMessageId: row.client_message_id,
     delegateId: row.delegate_id,
     senderPrincipalId: row.sender_principal_id,
+    participantBindingId: row.participant_binding_id,
+    triggerDepth: row.trigger_depth,
     createdAt: row.created_at.toISOString(),
   };
 }

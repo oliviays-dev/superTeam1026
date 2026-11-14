@@ -16,6 +16,20 @@ integration("approval SLA lifecycle", () => {
     await migrate(database);
     repositories = new PlatformRepositories(database);
     application = new PlatformApplication(repositories);
+    await repositories.featureFlags.set({
+      flagKey: "workflow.assignment_bindings",
+      scopeType: "platform",
+      scopeId: "platform",
+      mode: "on",
+      updatedBy: "test",
+    });
+    await repositories.featureFlags.set({
+      flagKey: "workflow.platform_templates",
+      scopeType: "platform",
+      scopeId: "platform",
+      mode: "on",
+      updatedBy: "test",
+    });
   });
 
   afterAll(async () => {
@@ -90,7 +104,7 @@ integration("approval SLA lifecycle", () => {
     });
     const instance = await application.startWorkflow(
       workflow.id,
-      { title: "SLA workflow", context: {} },
+      { title: "SLA workflow", context: {}, bindingOverrides: [] },
       "local-admin",
     );
     expect(instance.status).toBe("waiting");

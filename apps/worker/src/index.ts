@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { PlatformApplication, RunExecutor } from "@pluginmax/application";
+import {
+  PlatformApplication,
+  RunExecutor,
+  SharedSpaceApplication,
+} from "@pluginmax/application";
 import { loadConfig, loadLocalEnv } from "@pluginmax/config";
 import { Database, PlatformRepositories } from "@pluginmax/database";
+import { LocalFileStore } from "@pluginmax/files";
 import { WorkerRuntime } from "./worker-runtime.js";
 import { RuntimeMaintenanceService } from "./maintenance-service.js";
 import { RuntimeProbeService } from "./runtime-probe-service.js";
@@ -12,6 +17,10 @@ const config = loadConfig();
 const database = new Database(config.databaseUrl);
 const repositories = new PlatformRepositories(database);
 const application = new PlatformApplication(repositories);
+const sharedSpace = new SharedSpaceApplication(
+  repositories,
+  new LocalFileStore(config.fileStoreRoot),
+);
 const executor = new RunExecutor(repositories, {
   workspaceRoot: config.agentWorkspaceRoot,
   fileStoreRoot: config.fileStoreRoot,
@@ -52,6 +61,36 @@ const sweep = async () => {
   });
   if (result.claimed > 0) {
     log("workflow.sweep", result);
+  }
+  const planSweep = await application.sweepWorkflowPlans(workerId, {
+    batchSize: config.workflowSweepBatchSize,
+    leaseSeconds: config.workflowSweepLeaseSeconds,
+    staleAfterSeconds: config.workflowSweepStaleSeconds,
+  });
+  if (planSweep.claimed > 0 || planSweep.fenced > 0) {
+    log("workflow_plan.sweep", { ...planSweep });
+  }
+  const sharedSpaceRecovery = await sharedSpace.recoverApprovedWrites(
+    config.workerRecoveryBatchSize,
+  );
+  if (
+    sharedSpaceRecovery.written > 0 ||
+    sharedSpaceRecovery.failed > 0 ||
+    sharedSpaceRecovery.expiredLocks > 0 ||
+    sharedSpaceRecovery.expiredClaims > 0 ||
+    sharedSpaceRecovery.expiredRequests > 0
+  ) {
+    log("shared_space.recovery", sharedSpaceRecovery);
+  }
+  const delegationSweep = await application.delegations.sweepDue();
+  if (
+    delegationSweep.expired > 0 ||
+    delegationSweep.expiryNotifications > 0 ||
+    delegationSweep.confirmationsExpired > 0 ||
+    delegationSweep.reportsGenerated > 0 ||
+    delegationSweep.reportsFailed > 0
+  ) {
+    log("delegation.sweep", delegationSweep);
   }
 };
 
