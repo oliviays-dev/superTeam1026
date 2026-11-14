@@ -7712,3 +7712,240 @@ FROM meeting_ai_participants AS participant
 WHERE turn.participant_binding_id IS NULL
   AND participant.meeting_id = turn.meeting_id
   AND participant.agent_id = turn.agent_id;
+
+UPDATE meeting_ai_turns AS turn
+SET trigger_depth = message.trigger_depth
+FROM meeting_messages AS message
+WHERE message.id = turn.source_message_id
+  AND turn.trigger_depth = 0;
+`;
+
+export const M6_PROJECT_OPERATIONS_SCHEMA_SQL = `
+-- M6 expand: project-scoped AI PM provisioning state and report metadata.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('project.ai_pm', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS project_ai_pms (
+  project_id UUID PRIMARY KEY REFERENCES projects(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'provisioning'
+    CHECK (status IN ('provisioning', 'ready', 'failed')),
+  role_id UUID REFERENCES project_roles(id) ON DELETE RESTRICT,
+  member_id UUID REFERENCES project_members(id) ON DELETE RESTRICT,
+  agent_id UUID UNIQUE REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT REFERENCES principals(id) ON DELETE RESTRICT,
+  teammate_id UUID UNIQUE REFERENCES teammates(id) ON DELETE RESTRICT,
+  template_id UUID UNIQUE REFERENCES teammate_templates(id) ON DELETE RESTRICT,
+  template_version_id UUID
+    REFERENCES teammate_template_versions(id) ON DELETE RESTRICT,
+  skill_id UUID REFERENCES skill_definitions(id) ON DELETE RESTRICT,
+  skill_version_id UUID REFERENCES skill_versions(id) ON DELETE RESTRICT,
+  skill_installation_id UUID
+    REFERENCES skill_installations(id) ON DELETE RESTRICT,
+  skill_binding_id UUID
+    REFERENCES teammate_template_skill_bindings(id) ON DELETE RESTRICT,
+  runtime_profile_id TEXT
+    CHECK (
+      runtime_profile_id IS NULL
+      OR length(btrim(runtime_profile_id)) BETWEEN 1 AND 180
+    ),
+  runtime_profile_kind TEXT NOT NULL DEFAULT 'builtin'
+    CHECK (runtime_profile_kind IN ('builtin', 'external')),
+  last_error TEXT,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    status <> 'ready'
+    OR (
+      role_id IS NOT NULL
+      AND member_id IS NOT NULL
+      AND agent_id IS NOT NULL
+      AND agent_principal_id IS NOT NULL
+      AND teammate_id IS NOT NULL
+      AND template_id IS NOT NULL
+      AND template_version_id IS NOT NULL
+      AND skill_id IS NOT NULL
+      AND skill_version_id IS NOT NULL
+      AND skill_installation_id IS NOT NULL
+      AND skill_binding_id IS NOT NULL
+      AND runtime_profile_id IS NOT NULL
+    )
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS project_ai_pms_agent_principal_idx
+  ON project_ai_pms(agent_principal_id)
+  WHERE agent_principal_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS project_ai_pms_runtime_profile_idx
+  ON project_ai_pms(runtime_profile_id)
+  WHERE runtime_profile_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS project_ai_pms_status_idx
+  ON project_ai_pms(status, updated_at);
+
+ALTER TABLE project_reports
+  ADD COLUMN IF NOT EXISTS report_kind TEXT,
+  ADD COLUMN IF NOT EXISTS period_start TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS period_end TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS generated_by_principal_id TEXT
+    REFERENCES principals(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS run_id UUID
+    REFERENCES runs(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS skill_id UUID
+    REFERENCES skill_definitions(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS skill_version INTEGER
+    CHECK (skill_version IS NULL OR skill_version > 0),
+  ADD COLUMN IF NOT EXISTS skill_digest TEXT
+    CHECK (skill_digest IS NULL OR skill_digest ~ '^[a-f0-9]{64}$'),
+  ADD COLUMN IF NOT EXISTS trigger_source TEXT,
+  ADD COLUMN IF NOT EXISTS source_digest TEXT
+    CHECK (source_digest IS NULL OR source_digest ~ '^[a-f0-9]{64}$'),
+  ADD COLUMN IF NOT EXISTS source_cutoff_at TIMESTAMPTZ;
+
+ALTER TABLE project_report_sources
+  ADD COLUMN IF NOT EXISTS cutoff_at TIMESTAMPTZ;
+
+-- Suspend the immutable trigger only inside this migration transaction.
+DROP TRIGGER IF EXISTS project_reports_immutable ON project_reports;
+
+UPDATE project_reports AS report
+SET
+  report_kind = COALESCE(report.report_kind, 'daily'),
+  period_start = COALESCE(
+    report.period_start,
+    report.report_date::timestamp AT TIME ZONE 'Asia/Shanghai'
+  ),
+  period_end = COALESCE(
+    report.period_end,
+    (
+      report.report_date::timestamp AT TIME ZONE 'Asia/Shanghai'
+      + INTERVAL '1 day'
+    )
+  ),
+  generated_by_principal_id = COALESCE(
+    report.generated_by_principal_id,
+    principal.id
+  ),
+  trigger_source = COALESCE(report.trigger_source, 'legacy'),
+  source_digest = COALESCE(report.source_digest, report.content_hash),
+  source_cutoff_at = COALESCE(report.source_cutoff_at, report.generated_at)
+FROM principals AS principal
+WHERE principal.id = report.generated_by
+  AND (
+    report.report_kind IS NULL
+    OR report.period_start IS NULL
+    OR report.period_end IS NULL
+    OR report.generated_by_principal_id IS NULL
+    OR report.trigger_source IS NULL
+    OR report.source_digest IS NULL
+    OR report.source_cutoff_at IS NULL
+  );
+
+UPDATE project_reports AS report
+SET
+  report_kind = COALESCE(report.report_kind, 'daily'),
+  period_start = COALESCE(
+    report.period_start,
+    report.report_date::timestamp AT TIME ZONE 'Asia/Shanghai'
+  ),
+  period_end = COALESCE(
+    report.period_end,
+    (
+      report.report_date::timestamp AT TIME ZONE 'Asia/Shanghai'
+      + INTERVAL '1 day'
+    )
+  ),
+  trigger_source = COALESCE(report.trigger_source, 'legacy'),
+  source_digest = COALESCE(report.source_digest, report.content_hash),
+  source_cutoff_at = COALESCE(report.source_cutoff_at, report.generated_at)
+WHERE report.report_kind IS NULL
+   OR report.period_start IS NULL
+   OR report.period_end IS NULL
+   OR report.trigger_source IS NULL
+   OR report.source_digest IS NULL
+   OR report.source_cutoff_at IS NULL;
+
+UPDATE project_report_sources AS source
+SET cutoff_at = report.source_cutoff_at
+FROM project_reports AS report
+WHERE report.id = source.report_id
+  AND source.cutoff_at IS NULL;
+
+-- Validate the future identity before enforcing the new unique constraints.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM project_reports
+    GROUP BY project_id, report_kind, report_date, version
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'M6 project report kind/date/version conflict';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM project_reports
+    GROUP BY project_id, report_kind, report_date, content_hash
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'M6 project report kind/date/content conflict';
+  END IF;
+END;
+$$;
+
+ALTER TABLE project_reports
+  DROP CONSTRAINT IF EXISTS project_reports_project_id_report_date_version_key,
+  DROP CONSTRAINT IF EXISTS project_reports_project_id_report_date_content_hash_key;
+
+ALTER TABLE project_reports
+  ALTER COLUMN report_kind SET DEFAULT 'daily',
+  ALTER COLUMN report_kind SET NOT NULL,
+  ALTER COLUMN trigger_source SET DEFAULT 'manual',
+  ALTER COLUMN trigger_source SET NOT NULL,
+  ALTER COLUMN source_cutoff_at SET DEFAULT NOW(),
+  ALTER COLUMN source_cutoff_at SET NOT NULL;
+
+ALTER TABLE project_reports
+  DROP CONSTRAINT IF EXISTS project_reports_kind_check,
+  DROP CONSTRAINT IF EXISTS project_reports_period_check,
+  DROP CONSTRAINT IF EXISTS project_reports_trace_fields_check,
+  ADD CONSTRAINT project_reports_kind_check
+    CHECK (report_kind IN ('daily', 'weekly', 'progress')),
+  ADD CONSTRAINT project_reports_period_check
+    CHECK (
+      period_start IS NULL
+      OR period_end IS NULL
+      OR period_end > period_start
+    ),
+  ADD CONSTRAINT project_reports_trace_fields_check
+    CHECK (
+      (run_id IS NULL
+        AND skill_id IS NULL
+        AND skill_version IS NULL
+        AND skill_digest IS NULL)
+      OR
+      (run_id IS NOT NULL
+        AND skill_id IS NOT NULL
+        AND skill_version IS NOT NULL
+        AND skill_digest IS NOT NULL)
+    );
+
+ALTER TABLE project_reports
+  ADD CONSTRAINT project_reports_project_kind_date_version_key
+    UNIQUE (project_id, report_kind, report_date, version),
+  ADD CONSTRAINT project_reports_project_kind_date_content_key
+    UNIQUE (project_id, report_kind, report_date, content_hash);
+
+CREATE INDEX IF NOT EXISTS project_reports_project_kind_idx
+  ON project_reports(
+    project_id,
+    report_kind,
+    report_date DESC,
+    version DESC
+  );

@@ -237,3 +237,7 @@ export {
   ContextPolicyRepository,
   ContextPolicyRepositoryError,
 } from "./context-policy-repository.js";
+export {
+  ProjectAiPmRepository,
+  ProjectAiPmRepositoryError,
+} from "./project-ai-pm-repository.js";
