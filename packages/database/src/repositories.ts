@@ -109,6 +109,8 @@ import { TaskCaptureRepository } from "./task-capture-repository.js";
 import { ContextPolicyRepository } from "./context-policy-repository.js";
 import { ProjectAiPmRepository } from "./project-ai-pm-repository.js";
 import { DataFabricRepository } from "./data-fabric-repository.js";
+import { MarketRepository } from "./market-repository.js";
+import { WorkbenchConfigurationRepository } from "./workbench-configuration-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2244,6 +2246,8 @@ export class PlatformRepositories {
   readonly contextPolicies: ContextPolicyRepository;
   readonly projectAiPms: ProjectAiPmRepository;
   readonly dataFabric: DataFabricRepository;
+  readonly workbenchConfiguration: WorkbenchConfigurationRepository;
+  readonly market: MarketRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2308,5 +2312,9 @@ export class PlatformRepositories {
     this.contextPolicies = new ContextPolicyRepository(database);
     this.projectAiPms = new ProjectAiPmRepository(database);
     this.dataFabric = new DataFabricRepository(database);
+    this.workbenchConfiguration = new WorkbenchConfigurationRepository(
+      database,
+    );
+    this.market = new MarketRepository(database);
   }
 }

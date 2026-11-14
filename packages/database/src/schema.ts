@@ -8533,3 +8533,736 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+DROP TRIGGER IF EXISTS query_runs_guard_transition ON query_runs;
+CREATE TRIGGER query_runs_guard_transition
+BEFORE UPDATE ON query_runs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_query_run_transition();
+
+-- M7 enable state: data_fabric stays off until the independent security gate
+-- and an explicit release activation.
+`;
+
+export const M8_WORKBENCH_MARKET_SCHEMA_SQL = `
+-- M8 expand: personal Workbench instances and versions, server layouts,
+-- trusted static panel placements, Resource Market assets and entitlements.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('workbench.v2', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW()),
+  ('market', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS market_assets (
+  id UUID PRIMARY KEY,
+  asset_key TEXT NOT NULL UNIQUE
+    CHECK (
+      length(asset_key) BETWEEN 2 AND 120
+      AND asset_key ~ '^[a-z0-9][a-z0-9._-]+$'
+    ),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'panel',
+    'skill',
+    'mcp',
+    'workbench-template',
+    'plugin'
+  )),
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 160),
+  description TEXT NOT NULL DEFAULT ''
+    CHECK (length(description) <= 4000),
+  publisher_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  trust_level TEXT NOT NULL
+    CHECK (trust_level IN ('official', 'verified', 'private')),
+  visibility TEXT NOT NULL
+    CHECK (visibility IN ('public', 'private', 'workspace', 'project')),
+  visibility_scope_id TEXT
+    CHECK (
+      visibility_scope_id IS NULL
+      OR length(btrim(visibility_scope_id)) BETWEEN 1 AND 180
+    ),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'delisted', 'archived')),
+  current_version INTEGER NOT NULL DEFAULT 1
+    CHECK (current_version > 0),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    (visibility IN ('workspace', 'project')
+      AND visibility_scope_id IS NOT NULL)
+    OR
+    (visibility IN ('public', 'private')
+      AND visibility_scope_id IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS market_assets_catalog_idx
+  ON market_assets(kind, status, trust_level, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS market_assets_visibility_idx
+  ON market_assets(visibility, visibility_scope_id, status);
+
+CREATE TABLE IF NOT EXISTS market_asset_versions (
+  id UUID PRIMARY KEY,
+  asset_id UUID NOT NULL
+    REFERENCES market_assets(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  publisher_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  manifest JSONB NOT NULL CHECK (jsonb_typeof(manifest) = 'object'),
+  compatibility JSONB NOT NULL
+    CHECK (jsonb_typeof(compatibility) = 'object'),
+  status TEXT NOT NULL DEFAULT 'published'
+    CHECK (status IN ('published', 'deprecated', 'revoked')),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (asset_id, version),
+  UNIQUE (asset_id, digest)
+);
+
+CREATE INDEX IF NOT EXISTS market_asset_versions_asset_idx
+  ON market_asset_versions(asset_id, version DESC);
+
+CREATE INDEX IF NOT EXISTS market_asset_versions_panel_idx
+  ON market_asset_versions((manifest ->> 'panelPluginId'))
+  WHERE manifest ? 'panelPluginId';
+
+CREATE TABLE IF NOT EXISTS market_templates (
+  id UUID PRIMARY KEY,
+  asset_id UUID NOT NULL UNIQUE
+    REFERENCES market_assets(id) ON DELETE RESTRICT,
+  template_key TEXT NOT NULL UNIQUE
+    CHECK (
+      length(template_key) BETWEEN 2 AND 120
+      AND template_key ~ '^[a-z0-9][a-z0-9._-]+$'
+    ),
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 160),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  current_version INTEGER NOT NULL DEFAULT 1
+    CHECK (current_version > 0),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE TABLE IF NOT EXISTS market_template_dependencies (
+  template_id UUID NOT NULL
+    REFERENCES market_templates(id) ON DELETE RESTRICT,
+  asset_version_id UUID NOT NULL
+    REFERENCES market_asset_versions(id) ON DELETE RESTRICT,
+  dependency_asset_id UUID NOT NULL
+    REFERENCES market_assets(id) ON DELETE RESTRICT,
+  minimum_version INTEGER NOT NULL DEFAULT 1
+    CHECK (minimum_version > 0),
+  required BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (template_id, asset_version_id, dependency_asset_id),
+  CHECK (template_id <> dependency_asset_id)
+);
+
+CREATE INDEX IF NOT EXISTS market_template_dependencies_asset_idx
+  ON market_template_dependencies(
+    dependency_asset_id,
+    template_id,
+    asset_version_id
+  );
+
+CREATE TABLE IF NOT EXISTS market_entitlements (
+  id UUID PRIMARY KEY,
+  principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  asset_id UUID NOT NULL
+    REFERENCES market_assets(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'revoked')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  granted_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  granted_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (principal_id, asset_id),
+  CHECK (updated_at >= granted_at)
+);
+
+CREATE INDEX IF NOT EXISTS market_entitlements_principal_idx
+  ON market_entitlements(principal_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_installations (
+  id UUID PRIMARY KEY,
+  principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  asset_id UUID NOT NULL
+    REFERENCES market_assets(id) ON DELETE RESTRICT,
+  asset_version_id UUID NOT NULL
+    REFERENCES market_asset_versions(id) ON DELETE RESTRICT,
+  entitlement_id UUID NOT NULL
+    REFERENCES market_entitlements(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'uninstalled')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  config JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(config) = 'object'),
+  installed_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  installed_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (principal_id, asset_id),
+  CHECK (updated_at >= installed_at)
+);
+
+CREATE INDEX IF NOT EXISTS market_installations_principal_idx
+  ON market_installations(principal_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_template_copies (
+  id UUID PRIMARY KEY,
+  principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  template_id UUID NOT NULL
+    REFERENCES market_templates(id) ON DELETE RESTRICT,
+  asset_version_id UUID NOT NULL
+    REFERENCES market_asset_versions(id) ON DELETE RESTRICT,
+  workbench_id UUID NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'uninstalled')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (principal_id, template_id),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS market_template_copies_principal_idx
+  ON market_template_copies(principal_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS workbenches (
+  id UUID PRIMARY KEY,
+  owner_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 80),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  current_version INTEGER NOT NULL DEFAULT 1
+    CHECK (current_version > 0),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS workbenches_owner_name_idx
+  ON workbenches(owner_principal_id, lower(btrim(name)))
+  WHERE status = 'active';
+
+CREATE INDEX IF NOT EXISTS workbenches_owner_idx
+  ON workbenches(owner_principal_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS workbench_layouts (
+  id UUID PRIMARY KEY,
+  workbench_id UUID NOT NULL
+    REFERENCES workbenches(id) ON DELETE RESTRICT,
+  owner_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 80),
+  is_default BOOLEAN NOT NULL DEFAULT FALSE,
+  is_factory_default BOOLEAN NOT NULL DEFAULT FALSE,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS workbench_layouts_workbench_name_idx
+  ON workbench_layouts(workbench_id, lower(btrim(name)))
+  WHERE status = 'active';
+
+CREATE TABLE IF NOT EXISTS workbench_panels (
+  plugin_id TEXT PRIMARY KEY
+    CHECK (
+      length(plugin_id) BETWEEN 1 AND 120
+      AND plugin_id ~ '^[a-z0-9][a-z0-9._-]*$'
+    ),
+  version TEXT NOT NULL CHECK (length(btrim(version)) BETWEEN 1 AND 40),
+  title TEXT NOT NULL CHECK (length(btrim(title)) BETWEEN 1 AND 160),
+  trusted_build BOOLEAN NOT NULL DEFAULT TRUE CHECK (trusted_build),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled')),
+  default_width INTEGER NOT NULL CHECK (default_width BETWEEN 1 AND 6),
+  min_height INTEGER NOT NULL CHECK (min_height BETWEEN 190 AND 900),
+  max_height INTEGER NOT NULL CHECK (max_height BETWEEN 190 AND 900),
+  refreshable BOOLEAN NOT NULL DEFAULT TRUE,
+  build_digest TEXT NOT NULL CHECK (build_digest ~ '^[a-f0-9]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (max_height >= min_height),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE TABLE IF NOT EXISTS workbench_panel_instances (
+  id UUID PRIMARY KEY,
+  layout_id UUID NOT NULL
+    REFERENCES workbench_layouts(id) ON DELETE RESTRICT,
+  plugin_id TEXT NOT NULL
+    REFERENCES workbench_panels(plugin_id) ON DELETE RESTRICT,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 6),
+  height INTEGER CHECK (height BETWEEN 190 AND 900),
+  config JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(config) = 'object'),
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (layout_id, plugin_id),
+  UNIQUE (layout_id, position),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS workbench_panel_instances_layout_idx
+  ON workbench_panel_instances(layout_id, position);
+
+CREATE TABLE IF NOT EXISTS workbench_layout_versions (
+  id UUID PRIMARY KEY,
+  layout_id UUID NOT NULL
+    REFERENCES workbench_layouts(id) ON DELETE RESTRICT,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  document JSONB NOT NULL CHECK (jsonb_typeof(document) = 'object'),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  changed_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (layout_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS workbench_versions (
+  id UUID PRIMARY KEY,
+  workbench_id UUID NOT NULL
+    REFERENCES workbenches(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  layout_id UUID NOT NULL
+    REFERENCES workbench_layouts(id) ON DELETE RESTRICT,
+  layout_revision INTEGER NOT NULL CHECK (layout_revision > 0),
+  document JSONB NOT NULL CHECK (jsonb_typeof(document) = 'object'),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (workbench_id, version)
+);
+
+-- M8 backfill: seed the trusted panel metadata and create one factory
+-- Workbench for every active human Principal that predates this migration.
+INSERT INTO workbench_panels (
+  plugin_id, version, title, trusted_build, status, default_width,
+  min_height, max_height, refreshable, build_digest, created_at, updated_at
+) VALUES
+  ('metrics', '1.0.0', 'Metrics', TRUE, 'active', 6, 190, 360, TRUE,
+   encode(public.digest('metrics:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('brief', '1.0.0', 'Daily Brief', TRUE, 'active', 6, 260, 900, TRUE,
+   encode(public.digest('brief:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('todo', '1.0.0', 'My Todos', TRUE, 'active', 4, 260, 900, TRUE,
+   encode(public.digest('todo:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('focus', '1.0.0', 'Focus', TRUE, 'active', 2, 260, 900, TRUE,
+   encode(public.digest('focus:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('meeting-minutes', '1.0.0', 'Meeting Minutes', TRUE, 'active', 3, 240,
+   900, TRUE, encode(public.digest('meeting-minutes:1.0.0', 'sha256'), 'hex'),
+   NOW(), NOW()),
+  ('control', '1.0.0', 'Run Exceptions', TRUE, 'active', 3, 240, 900, TRUE,
+   encode(public.digest('control:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('supply', '1.0.0', 'Supply Exceptions', TRUE, 'active', 3, 240, 900,
+   TRUE, encode(public.digest('supply:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('supplier', '1.0.0', 'Supplier Risks', TRUE, 'active', 3, 240, 900,
+   TRUE, encode(public.digest('supplier:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('reports', '1.0.0', 'Project Reports', TRUE, 'active', 6, 240, 900,
+   TRUE, encode(public.digest('reports:1.0.0', 'sha256'), 'hex'), NOW(), NOW()),
+  ('market.sample', '1.0.0', 'Market Sample Panel', TRUE, 'active', 3, 240,
+   600, TRUE, encode(public.digest('market.sample:1.0.0', 'sha256'), 'hex'),
+   NOW(), NOW())
+ON CONFLICT (plugin_id) DO NOTHING;
+
+INSERT INTO workbenches (
+  id, owner_principal_id, name, status, current_version, revision,
+  created_at, updated_at
+)
+SELECT
+  gen_random_uuid(), principal.id, 'My Workbench', 'active', 1, 1,
+  NOW(), NOW()
+FROM principals AS principal
+WHERE principal.kind = 'human'
+  AND principal.status = 'active'
+  AND NOT EXISTS (
+    SELECT 1 FROM workbenches AS existing
+    WHERE existing.owner_principal_id = principal.id
+      AND existing.status = 'active'
+  );
+
+INSERT INTO workbench_layouts (
+  id, workbench_id, owner_principal_id, name, is_default,
+  is_factory_default, revision, status, created_at, updated_at
+)
+SELECT
+  gen_random_uuid(), workbench.id, workbench.owner_principal_id,
+  'Default', TRUE, TRUE, 1, 'active', NOW(), NOW()
+FROM workbenches AS workbench
+WHERE workbench.status = 'active'
+  AND NOT EXISTS (
+    SELECT 1 FROM workbench_layouts AS layout
+    WHERE layout.workbench_id = workbench.id
+      AND layout.status = 'active'
+  );
+
+INSERT INTO workbench_panel_instances (
+  id, layout_id, plugin_id, position, width, height, config, enabled,
+  created_at, updated_at
+)
+SELECT
+  gen_random_uuid(), layout.id, panel.plugin_id, seed.position, panel.default_width,
+  NULL, '{}'::jsonb, TRUE, NOW(), NOW()
+FROM workbench_layouts AS layout
+CROSS JOIN (
+  VALUES
+    ('metrics', 0),
+    ('brief', 1),
+    ('todo', 2),
+    ('focus', 3),
+    ('meeting-minutes', 4),
+    ('control', 5),
+    ('supply', 6),
+    ('supplier', 7),
+    ('reports', 8)
+) AS seed(plugin_id, position)
+JOIN workbench_panels AS panel ON panel.plugin_id = seed.plugin_id
+WHERE layout.is_factory_default
+  AND NOT EXISTS (
+    SELECT 1 FROM workbench_panel_instances AS existing
+    WHERE existing.layout_id = layout.id
+  );
+
+INSERT INTO workbench_layout_versions (
+  id, layout_id, revision, document, digest, changed_by_principal_id,
+  created_at
+)
+SELECT
+  gen_random_uuid(),
+  layout.id,
+  layout.revision,
+  jsonb_build_object(
+    'version', 1,
+    'panels', COALESCE(
+      (
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'instanceId', instance.id,
+            'pluginId', instance.plugin_id,
+            'position', instance.position,
+            'width', instance.width,
+            'height', instance.height,
+            'config', instance.config,
+            'enabled', instance.enabled
+          )
+          ORDER BY instance.position, instance.plugin_id
+        )
+        FROM workbench_panel_instances AS instance
+        WHERE instance.layout_id = layout.id
+      ),
+      '[]'::jsonb
+    )
+  ),
+  encode(public.digest(
+    jsonb_build_object(
+      'version', 1,
+      'panels', COALESCE(
+        (
+          SELECT jsonb_agg(
+            jsonb_build_object(
+              'instanceId', instance.id,
+              'pluginId', instance.plugin_id,
+              'position', instance.position,
+              'width', instance.width,
+              'height', instance.height,
+              'config', instance.config,
+              'enabled', instance.enabled
+            )
+            ORDER BY instance.position, instance.plugin_id
+          )
+          FROM workbench_panel_instances AS instance
+          WHERE instance.layout_id = layout.id
+        ),
+        '[]'::jsonb
+      )
+    )::text,
+    'sha256'
+  ), 'hex'),
+  layout.owner_principal_id,
+  NOW()
+FROM workbench_layouts AS layout
+WHERE layout.is_factory_default
+  AND NOT EXISTS (
+    SELECT 1 FROM workbench_layout_versions AS version
+    WHERE version.layout_id = layout.id
+      AND version.revision = layout.revision
+  );
+
+INSERT INTO workbench_versions (
+  id, workbench_id, version, layout_id, layout_revision, document, digest,
+  created_by_principal_id, created_at
+)
+SELECT
+  gen_random_uuid(),
+  workbench.id,
+  workbench.current_version,
+  layout.id,
+  layout.revision,
+  version.document,
+  version.digest,
+  workbench.owner_principal_id,
+  NOW()
+FROM workbenches AS workbench
+JOIN workbench_layouts AS layout
+  ON layout.workbench_id = workbench.id
+ AND layout.is_default
+ AND layout.status = 'active'
+JOIN workbench_layout_versions AS version
+  ON version.layout_id = layout.id
+ AND version.revision = layout.revision
+WHERE NOT EXISTS (
+  SELECT 1 FROM workbench_versions AS existing
+  WHERE existing.workbench_id = workbench.id
+    AND existing.version = workbench.current_version
+);
+
+-- Validate defaults and version heads before creating unique/default indexes.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM workbench_layouts
+    WHERE is_default AND status = 'active'
+    GROUP BY owner_principal_id
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'M8 Principal has more than one default Workbench layout';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM workbench_layouts AS layout
+    JOIN workbenches AS workbench ON workbench.id = layout.workbench_id
+    WHERE layout.owner_principal_id <> workbench.owner_principal_id
+  ) THEN
+    RAISE EXCEPTION 'M8 Workbench layout owner mismatch';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM workbench_layouts AS layout
+    LEFT JOIN workbench_layout_versions AS version
+      ON version.layout_id = layout.id
+     AND version.revision = layout.revision
+    WHERE version.id IS NULL
+  ) THEN
+    RAISE EXCEPTION 'M8 Workbench layout version head is inconsistent';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM workbenches AS workbench
+    LEFT JOIN workbench_versions AS version
+      ON version.workbench_id = workbench.id
+     AND version.version = workbench.current_version
+    WHERE version.id IS NULL
+  ) THEN
+    RAISE EXCEPTION 'M8 Workbench version head is inconsistent';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM market_assets AS asset
+    LEFT JOIN market_asset_versions AS version
+      ON version.asset_id = asset.id
+     AND version.version = asset.current_version
+    WHERE version.id IS NULL
+  ) THEN
+    RAISE EXCEPTION 'M8 Market asset version head is inconsistent';
+  END IF;
+END;
+$$;
+
+-- M8 enforce: one default layout per Principal, owner consistency, immutable
+-- versions, immutable asset identity/digest, and Cross-Principal safeguards.
+CREATE UNIQUE INDEX IF NOT EXISTS workbench_layouts_owner_default_idx
+  ON workbench_layouts(owner_principal_id)
+  WHERE is_default AND status = 'active';
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_workbench_layout_owner()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  expected_owner TEXT;
+BEGIN
+  SELECT owner_principal_id INTO expected_owner
+  FROM workbenches
+  WHERE id = NEW.workbench_id;
+  IF expected_owner IS NULL OR expected_owner <> NEW.owner_principal_id THEN
+    RAISE EXCEPTION 'Workbench layout owner must match Workbench owner';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS workbench_layouts_owner_guard ON workbench_layouts;
+CREATE TRIGGER workbench_layouts_owner_guard
+BEFORE INSERT OR UPDATE OF workbench_id, owner_principal_id
+ON workbench_layouts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_workbench_layout_owner();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_workbench_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Workbench versions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS workbench_layout_versions_immutable
+  ON workbench_layout_versions;
+CREATE TRIGGER workbench_layout_versions_immutable
+BEFORE UPDATE OR DELETE ON workbench_layout_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_workbench_version_mutation();
+
+DROP TRIGGER IF EXISTS workbench_versions_immutable ON workbench_versions;
+CREATE TRIGGER workbench_versions_immutable
+BEFORE UPDATE OR DELETE ON workbench_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_workbench_version_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_market_asset_version()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Market asset versions cannot be deleted';
+  END IF;
+  IF NEW.asset_id IS DISTINCT FROM OLD.asset_id
+    OR NEW.version IS DISTINCT FROM OLD.version
+    OR NEW.digest IS DISTINCT FROM OLD.digest
+    OR NEW.publisher_principal_id IS DISTINCT FROM OLD.publisher_principal_id
+    OR NEW.manifest IS DISTINCT FROM OLD.manifest
+    OR NEW.compatibility IS DISTINCT FROM OLD.compatibility
+    OR NEW.created_at IS DISTINCT FROM OLD.created_at
+  THEN
+    RAISE EXCEPTION 'Market asset version identity and digest are immutable';
+  END IF;
+  IF OLD.status = 'revoked' AND NEW.status <> 'revoked' THEN
+    RAISE EXCEPTION 'Revoked Market asset versions cannot be restored';
+  END IF;
+  IF OLD.status = 'deprecated'
+    AND NEW.status NOT IN ('deprecated', 'revoked')
+  THEN
+    RAISE EXCEPTION 'Deprecated Market asset versions can only be revoked';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_asset_versions_guard
+  ON market_asset_versions;
+CREATE TRIGGER market_asset_versions_guard
+BEFORE UPDATE OR DELETE ON market_asset_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_market_asset_version();
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_market_installation_scope()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  entitlement_principal TEXT;
+  entitlement_asset UUID;
+  version_asset UUID;
+BEGIN
+  SELECT principal_id, asset_id
+  INTO entitlement_principal, entitlement_asset
+  FROM market_entitlements
+  WHERE id = NEW.entitlement_id;
+  SELECT asset_id INTO version_asset
+  FROM market_asset_versions
+  WHERE id = NEW.asset_version_id;
+  IF entitlement_principal IS NULL
+    OR entitlement_principal <> NEW.principal_id
+    OR entitlement_asset IS NULL
+    OR entitlement_asset <> NEW.asset_id
+    OR version_asset IS NULL
+    OR version_asset <> NEW.asset_id
+  THEN
+    RAISE EXCEPTION 'Market installation scope does not match entitlement';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_installations_scope_guard
+  ON market_installations;
+CREATE TRIGGER market_installations_scope_guard
+BEFORE INSERT OR UPDATE OF principal_id, asset_id, asset_version_id, entitlement_id
+ON market_installations
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_market_installation_scope();
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_market_template_copy_owner()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  workbench_owner TEXT;
+BEGIN
+  SELECT owner_principal_id INTO workbench_owner
+  FROM workbenches
+  WHERE id = NEW.workbench_id;
+  IF workbench_owner IS NULL OR workbench_owner <> NEW.principal_id THEN
+    RAISE EXCEPTION 'Market template copy Workbench owner mismatch';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_template_copies_owner_guard
+  ON market_template_copies;
+CREATE TRIGGER market_template_copies_owner_guard
+BEFORE INSERT OR UPDATE OF principal_id, workbench_id
+ON market_template_copies
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_market_template_copy_owner();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_market_template_dependency_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Market template dependencies are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_template_dependencies_immutable
+  ON market_template_dependencies;
+CREATE TRIGGER market_template_dependencies_immutable
+BEFORE UPDATE OR DELETE ON market_template_dependencies
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_market_template_dependency_mutation();
+
+-- M8 enable state: workbench.v2 and market remain off until explicit release
+-- activation and the M8 observation window completes.
+`;

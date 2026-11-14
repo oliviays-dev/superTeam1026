@@ -22,6 +22,7 @@ import {
   M5_COLLABORATION_CONTEXT_SCHEMA_SQL,
   M6_PROJECT_OPERATIONS_SCHEMA_SQL,
   M7_DATA_FABRIC_SCHEMA_SQL,
+  M8_WORKBENCH_MARKET_SCHEMA_SQL,
   PROJECT_MEMBERSHIP_SCHEMA_SQL,
   PROJECT_TEMPLATES_SCHEMA_SQL,
   PRODUCTION_READINESS_SCHEMA_SQL,
@@ -89,6 +90,7 @@ const migrations = [
   { version: 41, sql: M5_COLLABORATION_CONTEXT_SCHEMA_SQL },
   { version: 42, sql: M6_PROJECT_OPERATIONS_SCHEMA_SQL },
   { version: 43, sql: M7_DATA_FABRIC_SCHEMA_SQL },
+  { version: 44, sql: M8_WORKBENCH_MARKET_SCHEMA_SQL },
 ] as const;
 
 export const LATEST_MIGRATION_VERSION =
@@ -113,12 +115,18 @@ export async function migrate(
     );
     if (applied.rowCount !== 0) continue;
 
-    await database.transaction(async (client) => {
-      await client.query(migration.sql);
-      await client.query(
-        "INSERT INTO platform_migrations (version, applied_at) VALUES ($1, NOW())",
-        [migration.version],
-      );
-    });
+    try {
+      await database.transaction(async (client) => {
+        await client.query(migration.sql);
+        await client.query(
+          "INSERT INTO platform_migrations (version, applied_at) VALUES ($1, NOW())",
+          [migration.version],
+        );
+      });
+    } catch (error) {
+      throw new Error(`Migration ${migration.version} failed`, {
+        cause: error,
+      });
+    }
   }
 }

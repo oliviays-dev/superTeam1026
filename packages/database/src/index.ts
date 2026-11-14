@@ -250,3 +250,19 @@ export {
   type DatasetQueryBundle,
   type ProjectReportReference,
 } from "./data-fabric-repository.js";
+export {
+  WorkbenchConfigurationRepository,
+  WorkbenchConfigurationRepositoryError,
+  factoryWorkbenchDocument,
+  workbenchDocumentDigest,
+  type TemplateCopyWorkbenchCandidate,
+  type WorkbenchConfigurationErrorCode,
+  type WorkbenchConfigurationRecord,
+  type WorkbenchPanelRecord,
+} from "./workbench-configuration-repository.js";
+export {
+  MarketRepository,
+  MarketRepositoryError,
+  type MarketRepositoryErrorCode,
+  type MarketVisibilityActor,
+} from "./market-repository.js";
