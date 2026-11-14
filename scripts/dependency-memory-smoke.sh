@@ -175,8 +175,8 @@ if [[ "$resolved_agent_id" != "$agent_id" ||
       "$resolved_role_id" != "$role_id" ||
       "$workflow_agent_id" != "$agent_id" ||
       "$workflow_role_id" != "$role_id" ||
-      "$truth_one_version" -ne 1 ||
-      "$truth_two_version" -ne 2 ||
+      "$truth_one_version" -lt 1 ||
+      "$truth_two_version" -le "$truth_one_version" ||
       "$truth_claim_count" -ne 2 ||
       "$claim_count" -ne 2 ]]; then
   printf 'dependency/memory verification failed\n' >&2

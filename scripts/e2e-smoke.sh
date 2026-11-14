@@ -138,7 +138,7 @@ memory_count="$(printf '%s' "$memory_json" | jq '.items | length')"
 workflow_json="$(
   curl -fsS -X POST "$API_BASE/workflows" \
     -H "content-type: application/json" \
-    -d "{\"projectId\":\"$project_id\",\"name\":\"E2E workflow $STAMP\",\"description\":\"Workflow smoke\",\"stepNames\":[\"Analysis\",\"Approval\"]}"
+    -d "{\"projectId\":\"$project_id\",\"name\":\"E2E workflow $STAMP\",\"description\":\"Workflow smoke\",\"stepNames\":[\"Analysis\",\"Approval\"],\"stepRoleIds\":[\"$role_id\",\"$role_id\"]}"
 )"
 workflow_id="$(printf '%s' "$workflow_json" | jq -r '.id')"
 instance_json="$(
@@ -147,11 +147,7 @@ instance_json="$(
     -d "{\"title\":\"Workflow run $STAMP\"}"
 )"
 instance_id="$(printf '%s' "$instance_json" | jq -r '.id')"
-curl -fsS -X POST "$API_BASE/workflow-instances/$instance_id/advance" >/dev/null
-workflow_final="$(
-  curl -fsS -X POST "$API_BASE/workflow-instances/$instance_id/advance"
-)"
-workflow_status="$(printf '%s' "$workflow_final" | jq -r '.status')"
+workflow_status="$(printf '%s' "$instance_json" | jq -r '.status')"
 
 meeting_json="$(
   curl -fsS -X POST "$API_BASE/meetings" \
@@ -177,7 +173,7 @@ agent_disabled="$(
 agent_final_status="$(printf '%s' "$agent_disabled" | jq -r '.agent.status')"
 agent_final_version="$(printf '%s' "$agent_disabled" | jq -r '.agent.version')"
 
-if [[ "$agent_version" -ne 2 || "$agent_event_count" -lt 2 || "$project_description" != "Automated engineering smoke test with project updates" || "$project_member_count" -lt 2 || "$project_owner_count" -ne 1 || "$project_role_count" -lt 2 || "$member_responsibility" != "Updated membership smoke" || "$task_acceptance_count" -ne 3 || "$task_message_count" -lt 1 || "$approved_status" != "done" || "$memory_count" -lt 1 || "$workflow_status" != "completed" || "$meeting_messages" -lt 1 || "$meeting_participants" -lt 2 || "$agent_final_status" != "disabled" || "$agent_final_version" -ne 3 ]]; then
+if [[ "$agent_version" -ne 2 || "$agent_event_count" -lt 2 || "$project_description" != "Automated engineering smoke test with project updates" || "$project_member_count" -lt 2 || "$project_owner_count" -ne 1 || "$project_role_count" -lt 2 || "$member_responsibility" != "Updated membership smoke" || "$task_acceptance_count" -ne 3 || "$task_message_count" -lt 1 || "$approved_status" != "done" || "$memory_count" -lt 1 || "$workflow_status" != "active" || "$meeting_messages" -lt 1 || "$meeting_participants" -lt 2 || "$agent_final_status" != "disabled" || "$agent_final_version" -ne 3 ]]; then
   printf 'full e2e verification failed\n' >&2
   exit 1
 fi

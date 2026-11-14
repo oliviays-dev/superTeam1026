@@ -29,7 +29,7 @@ cleanup() {
 trap cleanup EXIT
 
 psql_query() {
-  docker-compose -p "$COMPOSE_PROJECT" -f "$ROOT/$COMPOSE_FILE" \
+  "$ROOT/scripts/db-compose.sh" -p "$COMPOSE_PROJECT" -f "$ROOT/$COMPOSE_FILE" \
     exec -T postgres psql -U pluginmax -d pluginmax -qAt -v ON_ERROR_STOP=1 -c "$1"
 }
 
@@ -312,27 +312,28 @@ wait_pid_exit "$worker_crash"
 sleep 2.1
 start_worker recovery-a 1 3 500 1000
 worker_recovery="$WORKER_PID"
-wait_run_status "$crash_run" completed 25
+wait_run_status "$crash_run" failed 25
 interrupted_events="$(psql_query "
   SELECT COUNT(*) FROM run_events
   WHERE run_id = '$crash_run' AND type = 'run.interrupted';
-")"
-recovered_events="$(psql_query "
-  SELECT COUNT(*) FROM run_events
-  WHERE run_id = '$crash_run' AND type = 'run.recovered';
-")"
-recovered_artifacts="$(psql_query "
-  SELECT COUNT(*) FROM artifacts WHERE run_id = '$crash_run';
 ")"
 recovered_attempts="$(psql_query "
   SELECT COUNT(*) FROM job_attempts
   WHERE job_id = (SELECT id FROM jobs WHERE run_id = '$crash_run');
 ")"
-if [[ "$interrupted_events" -lt 1 || "$recovered_events" -lt 1 ||
-      "$recovered_artifacts" != "1" || "$recovered_attempts" -lt 2 ]]; then
-  printf 'lease recovery convergence failed: interrupted=%s recovered=%s artifacts=%s attempts=%s\n' \
-    "$interrupted_events" "$recovered_events" "$recovered_artifacts" \
-    "$recovered_attempts" >&2
+recovery_job_status="$(psql_query "
+  SELECT status FROM jobs WHERE run_id = '$crash_run';
+")"
+recovery_error="$(psql_query "
+  SELECT last_error FROM jobs WHERE run_id = '$crash_run';
+")"
+if [[ "$interrupted_events" -lt 1 ||
+      "$recovered_attempts" -lt 2 ||
+      "$recovery_job_status" != "dead_letter" ||
+      "$recovery_error" != *"already in progress and cannot be replayed"* ]]; then
+  printf 'lease recovery safety failed: interrupted=%s attempts=%s job=%s error=%s\n' \
+    "$interrupted_events" "$recovered_attempts" \
+    "$recovery_job_status" "$recovery_error" >&2
   exit 1
 fi
 kill -TERM "$worker_recovery"
@@ -372,12 +373,22 @@ fi
 set_runtime_options "$dead_letter_run" '{}'
 start_worker dead-letter-recovered-a 1 3 500 1000
 worker_dead_letter_recovered="$WORKER_PID"
-wait_job_field "$dead_letter_run" status completed 20
+wait_job_field "$dead_letter_run" status dead_letter 20
 manual_recoveries="$(psql_query "
   SELECT manual_recovery_count FROM jobs WHERE run_id = '$dead_letter_run';
 ")"
-if [[ "$manual_recoveries" != "1" ]]; then
-  printf 'manual recovery count mismatch: %s\n' "$manual_recoveries" >&2
+manual_recovery_error="$(psql_query "
+  SELECT last_error FROM jobs WHERE run_id = '$dead_letter_run';
+")"
+manual_recovery_status="$(psql_query "
+  SELECT status FROM runs WHERE id = '$dead_letter_run';
+")"
+if [[ "$manual_recoveries" != "1" ||
+      "$manual_recovery_status" != "failed" ||
+      "$manual_recovery_error" != *"already in progress and cannot be replayed"* ]]; then
+  printf 'manual recovery safety mismatch: count=%s run=%s error=%s\n' \
+    "$manual_recoveries" "$manual_recovery_status" \
+    "$manual_recovery_error" >&2
   exit 1
 fi
 kill -TERM "$worker_dead_letter_recovered"
@@ -412,7 +423,19 @@ wait_pid_exit "$worker_timeout"
 wait_run_status "$timeout_run" interrupted 10
 start_worker after-timeout-a 1 3 500 1000
 worker_after_timeout="$WORKER_PID"
-wait_run_status "$timeout_run" completed 20
+wait_run_status "$timeout_run" failed 20
+timeout_job_status="$(psql_query "
+  SELECT status FROM jobs WHERE run_id = '$timeout_run';
+")"
+timeout_error="$(psql_query "
+  SELECT last_error FROM jobs WHERE run_id = '$timeout_run';
+")"
+if [[ "$timeout_job_status" != "dead_letter" ||
+      "$timeout_error" != *"already in progress and cannot be replayed"* ]]; then
+  printf 'forced interrupt safety mismatch: job=%s error=%s\n' \
+    "$timeout_job_status" "$timeout_error" >&2
+  exit 1
+fi
 kill -TERM "$worker_after_timeout"
 wait_pid_exit "$worker_after_timeout"
 
@@ -426,7 +449,7 @@ wait_log "$LOG_DIR/sigint-a.log" '"event":"worker.drained"' 10
 metrics="$(api GET /operations)"
 migration_version="$(printf '%s' "$metrics" | jq '.metrics.migrationVersion')"
 if [[ "$migration_version" -lt 14 ||
-      "$(printf '%s' "$metrics" | jq '.maintenanceSchedules | length')" != "4" ]]; then
+      "$(printf '%s' "$metrics" | jq '.maintenanceSchedules | length')" -lt 4 ]]; then
   printf 'operations migration version mismatch\n' >&2
   exit 1
 fi

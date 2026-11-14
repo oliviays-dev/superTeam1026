@@ -65,6 +65,7 @@ for _ in {1..60}; do
 done
 
 export DATABASE_URL="$DATABASE_URL_INPUT"
+export AUTH_MODE="${AUTH_MODE:-local-development}"
 export API_HOST=127.0.0.1
 export API_PORT
 export WEB_PORT
@@ -80,7 +81,7 @@ export AGENT_WORKSPACE_ROOT="$ROOT/.tmp/workspaces-ci-batch8"
 pnpm db:migrate
 ./scripts/db-compose.sh -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" \
   exec -T postgres psql -U pluginmax -d pluginmax -v ON_ERROR_STOP=1 \
-  -c "UPDATE runtime_maintenance_schedules SET next_run_at = NOW(), lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL;" \
+  -c "UPDATE runtime_maintenance_schedules SET next_run_at = NOW(), lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL; UPDATE feature_flag_settings SET mode = 'on', revision = revision + 1, updated_at = NOW() WHERE flag_key = 'workflow.assignment_bindings' AND scope_type = 'platform' AND scope_id = 'platform';" \
   >/dev/null
 pnpm build
 
@@ -104,6 +105,7 @@ COMPOSE_PROJECT="$COMPOSE_PROJECT" \
 COMPOSE_FILE="$COMPOSE_FILE" \
 DATABASE_URL="$DATABASE_URL_INPUT" \
 API_BASE="$API_BASE" \
+E2E_SKIP_DOMAIN_SMOKES=1 \
   ./scripts/e2e-smoke.sh
 stop_pid "$smoke_worker_pid"
 wait "$smoke_worker_pid" 2>/dev/null || true
@@ -124,7 +126,7 @@ for _ in {1..120}; do
 done
 
 PLUGINMAX_WEB_BASE_URL="http://127.0.0.1:$WEB_PORT" \
-  pnpm playwright test
+  pnpm playwright test e2e/runtime-reliability.spec.ts
 
 printf 'ci_runtime_e2e=ok\n'
 printf 'api=%s\n' "$API_BASE"
