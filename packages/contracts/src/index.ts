@@ -22,3 +22,4 @@ export * from "./teammate.js";
 export * from "./delegation.js";
 export * from "./execution-decision.js";
 export * from "./task-execution-evidence.js";
+export * from "./agent-task-tools.js";

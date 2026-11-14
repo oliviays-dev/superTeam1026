@@ -197,3 +197,9 @@ export {
   TaskAcceptanceRepositoryError,
   TaskExecutionAnomalyRepository,
 } from "./task-execution-evidence-repository.js";
+export {
+  AgentToolRepository,
+  AgentToolRepositoryError,
+  type BeginToolInvocationResult,
+  type ToolInvocationIdentity,
+} from "./agent-tool-repository.js";

@@ -98,6 +98,7 @@ import {
   TaskAcceptanceRepository,
   TaskExecutionAnomalyRepository,
 } from "./task-execution-evidence-repository.js";
+import { AgentToolRepository } from "./agent-tool-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2224,6 +2225,7 @@ export class PlatformRepositories {
   readonly featureFlags: FeatureFlagRepository;
   readonly taskAcceptance: TaskAcceptanceRepository;
   readonly taskAnomalies: TaskExecutionAnomalyRepository;
+  readonly agentTools: AgentToolRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2280,5 +2282,6 @@ export class PlatformRepositories {
     this.featureFlags = new FeatureFlagRepository(database);
     this.taskAcceptance = new TaskAcceptanceRepository(database);
     this.taskAnomalies = new TaskExecutionAnomalyRepository(database);
+    this.agentTools = new AgentToolRepository(database);
   }
 }

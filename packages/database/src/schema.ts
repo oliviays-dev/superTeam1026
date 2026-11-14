@@ -5850,3 +5850,89 @@ BEGIN
   END IF;
 END;
 $$;
+`;
+
+export const AGENT_TASK_TOOLS_SCHEMA_SQL = `
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('agent.task_tools', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW()),
+  ('agent.workspace_files', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS tool_invocations (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  run_attempt INTEGER NOT NULL CHECK (run_attempt > 0),
+  scene_session_id UUID REFERENCES scene_sessions(id) ON DELETE RESTRICT,
+  task_id UUID REFERENCES tasks(id) ON DELETE RESTRICT,
+  project_id UUID REFERENCES projects(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT
+    CHECK (
+      agent_principal_id IS NULL
+      OR length(btrim(agent_principal_id)) BETWEEN 1 AND 180
+    ),
+  envelope_id TEXT
+    CHECK (
+      envelope_id IS NULL
+      OR length(btrim(envelope_id)) BETWEEN 1 AND 180
+    ),
+  envelope_digest TEXT
+    CHECK (
+      envelope_digest IS NULL
+      OR envelope_digest ~ '^[a-f0-9]{64}$'
+    ),
+  ticket_id UUID REFERENCES action_tickets(id) ON DELETE RESTRICT,
+  gate_id UUID REFERENCES execution_gate_requests(gate_id) ON DELETE RESTRICT,
+  tool_name TEXT NOT NULL CHECK (tool_name IN (
+    'task_query',
+    'task_submit_deliverable',
+    'task_request_input',
+    'task_comment',
+    'read_file',
+    'write_file',
+    'list_files'
+  )),
+  tool_category TEXT NOT NULL CHECK (tool_category IN (
+    'task.read',
+    'task.write',
+    'fs.read',
+    'fs.write'
+  )),
+  request_digest TEXT NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 8 AND 240),
+  status TEXT NOT NULL DEFAULT 'started'
+    CHECK (status IN ('started', 'succeeded', 'failed')),
+  result JSONB CHECK (result IS NULL OR jsonb_typeof(result) = 'object'),
+  rejection_code TEXT
+    CHECK (
+      rejection_code IS NULL
+      OR length(btrim(rejection_code)) BETWEEN 1 AND 180
+    ),
+  rejection_reason TEXT
+    CHECK (rejection_reason IS NULL OR length(rejection_reason) <= 4000),
+  path_digest TEXT
+    CHECK (path_digest IS NULL OR path_digest ~ '^[a-f0-9]{64}$'),
+  path_summary TEXT
+    CHECK (path_summary IS NULL OR length(path_summary) <= 500),
+  byte_count BIGINT CHECK (byte_count IS NULL OR byte_count >= 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, idempotency_key),
+  UNIQUE (gate_id),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS tool_invocations_run_idx
+  ON tool_invocations(run_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS tool_invocations_task_idx
+  ON tool_invocations(task_id, created_at DESC)
+  WHERE task_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS tool_invocations_status_idx
