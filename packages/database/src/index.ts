@@ -203,3 +203,14 @@ export {
   type BeginToolInvocationResult,
   type ToolInvocationIdentity,
 } from "./agent-tool-repository.js";
+export {
+  WorkflowAssignmentRepository,
+  WorkflowAssignmentRepositoryError,
+  appendWorkflowAuditWithClient,
+  insertWorkflowBindingsWithClient,
+  type ReplaceWorkflowBindingsInput,
+  type WorkflowApproverWriteInput,
+  type WorkflowAssignmentWriteInput,
+  type WorkflowBindingSeed,
+  type WorkflowBindingWriteInput,
+} from "./workflow-assignment-repository.js";

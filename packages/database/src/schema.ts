@@ -5936,3 +5936,195 @@ CREATE INDEX IF NOT EXISTS tool_invocations_task_idx
   WHERE task_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS tool_invocations_status_idx
+  ON tool_invocations(run_id, status, updated_at DESC);
+`;
+
+export const M2_WORKFLOW_ASSIGNMENT_SCHEMA_SQL = `
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('workflow.assignment_bindings', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW()),
+  ('workflow.platform_templates', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+ALTER TABLE workflow_definitions
+  ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'project',
+  ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'template',
+  ADD COLUMN IF NOT EXISTS published_by_principal_id TEXT,
+  ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE workflow_definitions
+  DROP CONSTRAINT IF EXISTS workflow_definitions_scope_check;
+
+ALTER TABLE workflow_definitions
+  ADD CONSTRAINT workflow_definitions_scope_check
+  CHECK (scope IN ('project', 'platform'));
+
+ALTER TABLE workflow_definitions
+  DROP CONSTRAINT IF EXISTS workflow_definitions_origin_check;
+
+ALTER TABLE workflow_definitions
+  ADD CONSTRAINT workflow_definitions_origin_check
+  CHECK (origin IN ('template', 'router', 'manual'));
+
+ALTER TABLE workflow_definitions
+  DROP CONSTRAINT IF EXISTS workflow_definitions_revision_check;
+
+ALTER TABLE workflow_definitions
+  ADD CONSTRAINT workflow_definitions_revision_check
+  CHECK (revision > 0);
+
+CREATE INDEX IF NOT EXISTS workflow_definitions_platform_idx
+  ON workflow_definitions(scope, status, published_at DESC)
+  WHERE scope = 'platform';
+
+DO $$
+DECLARE
+  conflict_count INTEGER;
+BEGIN
+  SELECT COUNT(*)
+  INTO conflict_count
+  FROM (
+    SELECT project_id, lower(btrim(code))
+    FROM project_roles
+    WHERE btrim(code) <> ''
+    GROUP BY project_id, lower(btrim(code))
+    HAVING COUNT(*) > 1
+  ) AS conflicts;
+
+  IF conflict_count > 0 THEN
+    RAISE EXCEPTION
+      'project role code conflict preflight found % duplicate codes',
+      conflict_count;
+  END IF;
+END;
+$$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS project_roles_project_code_idx
+  ON project_roles(project_id, lower(btrim(code)))
+  WHERE btrim(code) <> '';
+
+ALTER TABLE workflow_instances
+  ADD COLUMN IF NOT EXISTS definition_snapshot JSONB,
+  ADD COLUMN IF NOT EXISTS binding_revision TEXT;
+
+UPDATE workflow_instances AS instance
+SET definition_snapshot = definition.graph
+FROM workflow_definitions AS definition
+WHERE definition.id = instance.workflow_id
+  AND instance.definition_snapshot IS NULL;
+
+ALTER TABLE workflow_instances
+  DROP CONSTRAINT IF EXISTS workflow_instances_binding_revision_check;
+
+ALTER TABLE workflow_instances
+  ADD CONSTRAINT workflow_instances_binding_revision_check
+  CHECK (
+    binding_revision IS NULL
+    OR binding_revision ~ '^[a-f0-9]{64}$'
+  );
+
+CREATE TABLE IF NOT EXISTS workflow_instance_assignments (
+  id UUID PRIMARY KEY,
+  instance_id UUID NOT NULL
+    REFERENCES workflow_instances(id) ON DELETE RESTRICT,
+  task_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
+  node_id TEXT NOT NULL
+    CHECK (length(btrim(node_id)) BETWEEN 1 AND 160),
+  source_kind TEXT NOT NULL
+    CHECK (source_kind IN ('role', 'user', 'agent', 'employee', 'system')),
+  source_id TEXT NOT NULL
+    CHECK (length(btrim(source_id)) BETWEEN 1 AND 180),
+  source_role_code TEXT
+    CHECK (
+      source_role_code IS NULL
+      OR length(btrim(source_role_code)) BETWEEN 1 AND 80
+    ),
+  source_label TEXT
+    CHECK (source_label IS NULL OR length(btrim(source_label)) <= 160),
+  dispatch_mode TEXT NOT NULL
+    CHECK (dispatch_mode IN ('assigned', 'claim')),
+  status TEXT NOT NULL
+    CHECK (status IN ('resolved', 'unresolved', 'overridden')),
+  primary_principal_id TEXT
+    CHECK (
+      primary_principal_id IS NULL
+      OR length(btrim(primary_principal_id)) BETWEEN 1 AND 180
+    ),
+  candidate_pool JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(candidate_pool) = 'array'),
+  resolved_by TEXT NOT NULL
+    CHECK (length(btrim(resolved_by)) BETWEEN 1 AND 180),
+  resolved_at TIMESTAMPTZ NOT NULL,
+  source_change_reason TEXT NOT NULL DEFAULT ''
+    CHECK (length(source_change_reason) <= 2000),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (instance_id, node_id),
+  CHECK (
+    dispatch_mode <> 'assigned'
+    OR status = 'unresolved'
+    OR primary_principal_id IS NOT NULL
+  ),
+  CHECK (
+    dispatch_mode <> 'claim'
+    OR status = 'unresolved'
+    OR jsonb_array_length(candidate_pool) > 0
+  ),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_instance_assignments_task_idx
+  ON workflow_instance_assignments(task_id)
+  WHERE task_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS workflow_instance_assignments_instance_idx
+  ON workflow_instance_assignments(instance_id, node_id);
+
+CREATE TABLE IF NOT EXISTS workflow_instance_approvers (
+  id UUID PRIMARY KEY,
+  instance_id UUID NOT NULL
+    REFERENCES workflow_instances(id) ON DELETE RESTRICT,
+  node_id TEXT NOT NULL
+    CHECK (length(btrim(node_id)) BETWEEN 1 AND 160),
+  principal_id TEXT NOT NULL
+    CHECK (length(btrim(principal_id)) BETWEEN 1 AND 180),
+  source_kind TEXT NOT NULL
+    CHECK (source_kind IN ('role', 'user', 'agent', 'employee', 'system')),
+  source_id TEXT NOT NULL
+    CHECK (length(btrim(source_id)) BETWEEN 1 AND 180),
+  source_role_code TEXT
+    CHECK (
+      source_role_code IS NULL
+      OR length(btrim(source_role_code)) BETWEEN 1 AND 80
+    ),
+  status TEXT NOT NULL
+    CHECK (status IN ('resolved', 'unresolved', 'overridden')),
+  resolved_by TEXT NOT NULL
+    CHECK (length(btrim(resolved_by)) BETWEEN 1 AND 180),
+  resolved_at TIMESTAMPTZ NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (instance_id, node_id, principal_id),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS workflow_instance_approvers_instance_idx
+  ON workflow_instance_approvers(instance_id, node_id, principal_id);
+
+CREATE TABLE IF NOT EXISTS project_role_mapping_presets (
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  role_id UUID NOT NULL REFERENCES project_roles(id) ON DELETE CASCADE,
+  assignees JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(assignees) = 'array'),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  updated_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(updated_by_principal_id)) BETWEEN 1 AND 180),
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (project_id, role_id)
+);
