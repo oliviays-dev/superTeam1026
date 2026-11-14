@@ -105,6 +105,8 @@ import {
   captureRunSkillSnapshotWithClient,
   SkillRepository,
 } from "./skill-repository.js";
+import { TaskCaptureRepository } from "./task-capture-repository.js";
+import { ContextPolicyRepository } from "./context-policy-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2236,6 +2238,8 @@ export class PlatformRepositories {
   readonly workflowAssignments: WorkflowAssignmentRepository;
   readonly workflowPlans: WorkflowPlanRepository;
   readonly skills: SkillRepository;
+  readonly taskCapture: TaskCaptureRepository;
+  readonly contextPolicies: ContextPolicyRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2296,5 +2300,7 @@ export class PlatformRepositories {
     this.workflowAssignments = new WorkflowAssignmentRepository(database);
     this.workflowPlans = new WorkflowPlanRepository(database);
     this.skills = new SkillRepository(database);
+    this.taskCapture = new TaskCaptureRepository(database);
+    this.contextPolicies = new ContextPolicyRepository(database);
   }
 }

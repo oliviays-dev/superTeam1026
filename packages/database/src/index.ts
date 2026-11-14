@@ -229,3 +229,11 @@ export {
   SkillRepositoryError,
   skillVersionDigest,
 } from "./skill-repository.js";
+export {
+  TaskCaptureRepository,
+  TaskCaptureRepositoryError,
+} from "./task-capture-repository.js";
+export {
+  ContextPolicyRepository,
+  ContextPolicyRepositoryError,
+} from "./context-policy-repository.js";

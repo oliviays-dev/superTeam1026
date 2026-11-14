@@ -26,3 +26,5 @@ export * from "./agent-task-tools.js";
 export * from "./workflow-assignment.js";
 export * from "./workflow-plan.js";
 export * from "./skill.js";
+export * from "./task-capture.js";
+export * from "./context-policy.js";

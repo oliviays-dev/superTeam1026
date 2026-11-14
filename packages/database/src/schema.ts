@@ -6788,3 +6788,927 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS skill_audit_events_append_only
+  ON skill_audit_events;
+CREATE TRIGGER skill_audit_events_append_only
+BEFORE UPDATE OR DELETE ON skill_audit_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_skill_audit_mutation();
+`;
+
+export const M5_COLLABORATION_CONTEXT_SCHEMA_SQL = `
+-- M5 expand: collaboration capture, participant-bound Scene Sessions,
+-- versioned Context Policy, Runtime-consumed Context commits, and Meeting AI
+-- multi-participant controls.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('task.capture', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW()),
+  ('context.group_policy', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS scene_participant_bindings (
+  id UUID PRIMARY KEY,
+  scene_type TEXT NOT NULL CHECK (scene_type IN ('group', 'meeting')),
+  scene_id TEXT NOT NULL
+    CHECK (length(btrim(scene_id)) BETWEEN 1 AND 240),
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  participant_kind TEXT NOT NULL DEFAULT 'ai'
+    CHECK (participant_kind = 'ai'),
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT NOT NULL
+    CHECK (length(btrim(agent_principal_id)) BETWEEN 1 AND 180),
+  principal_id TEXT NOT NULL
+    CHECK (length(btrim(principal_id)) BETWEEN 1 AND 180),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'paused', 'left', 'removed')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  joined_at TIMESTAMPTZ NOT NULL,
+  left_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (scene_type, scene_id, agent_id, principal_id),
+  CHECK (
+    (status IN ('left', 'removed') AND left_at IS NOT NULL)
+    OR (status IN ('active', 'paused') AND left_at IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS scene_participant_bindings_scene_idx
+  ON scene_participant_bindings(scene_type, scene_id, status, joined_at);
+
+CREATE INDEX IF NOT EXISTS scene_participant_bindings_project_idx
+  ON scene_participant_bindings(project_id, updated_at DESC);
+
+ALTER TABLE scene_sessions
+  ADD COLUMN IF NOT EXISTS participant_binding_id UUID
+    REFERENCES scene_participant_bindings(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS last_context_seq BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS context_usage_ratio NUMERIC(8, 6)
+    NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS compaction_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE scene_sessions
+  DROP CONSTRAINT IF EXISTS scene_sessions_status_check;
+ALTER TABLE scene_sessions
+  ADD CONSTRAINT scene_sessions_status_check
+  CHECK (status IN ('preparing', 'active', 'archived', 'reset'));
+
+ALTER TABLE scene_sessions
+  DROP CONSTRAINT IF EXISTS scene_sessions_scene_type_check;
+ALTER TABLE scene_sessions
+  ADD CONSTRAINT scene_sessions_scene_type_check
+  CHECK (scene_type IN (
+    'task',
+    'workflow-node',
+    'meeting',
+    'direct-chat',
+    'delegation',
+    'group'
+  ));
+
+ALTER TABLE scene_sessions
+  DROP CONSTRAINT IF EXISTS scene_sessions_revision_check,
+  DROP CONSTRAINT IF EXISTS scene_sessions_last_context_seq_check,
+  DROP CONSTRAINT IF EXISTS scene_sessions_context_usage_ratio_check,
+  DROP CONSTRAINT IF EXISTS scene_sessions_compaction_count_check;
+
+ALTER TABLE scene_sessions
+  ADD CONSTRAINT scene_sessions_revision_check CHECK (revision > 0),
+  ADD CONSTRAINT scene_sessions_last_context_seq_check
+    CHECK (last_context_seq >= 0),
+  ADD CONSTRAINT scene_sessions_context_usage_ratio_check
+    CHECK (context_usage_ratio >= 0),
+  ADD CONSTRAINT scene_sessions_compaction_count_check
+    CHECK (compaction_count >= 0);
+
+INSERT INTO scene_participant_bindings (
+  id, scene_type, scene_id, project_id, participant_kind, agent_id,
+  agent_principal_id, principal_id, status, revision, joined_at, left_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  CASE
+    WHEN session.scene_type = 'meeting' THEN 'meeting'
+    ELSE 'group'
+  END,
+  session.scene_id,
+  session.project_id,
+  'ai',
+  session.agent_id,
+  COALESCE(session.agent_principal_id, session.agent_id::text),
+  COALESCE(
+    session.owner_principal_id,
+    session.agent_principal_id,
+    session.agent_id::text
+  ),
+  'active',
+  1,
+  session.created_at,
+  NULL,
+  session.updated_at
+FROM scene_sessions AS session
+WHERE session.project_id IS NOT NULL
+  AND session.scene_type IN ('meeting', 'group')
+  AND NOT EXISTS (
+    SELECT 1
+    FROM scene_participant_bindings AS binding
+    WHERE binding.scene_type =
+        CASE
+          WHEN session.scene_type = 'meeting' THEN 'meeting'
+          ELSE 'group'
+        END
+      AND binding.scene_id = session.scene_id
+      AND binding.agent_id = session.agent_id
+      AND binding.principal_id = COALESCE(
+        session.owner_principal_id,
+        session.agent_principal_id,
+        session.agent_id::text
+      )
+  )
+ON CONFLICT (scene_type, scene_id, agent_id, principal_id) DO NOTHING;
+
+UPDATE scene_sessions AS session
+SET participant_binding_id = binding.id
+FROM scene_participant_bindings AS binding
+WHERE session.participant_binding_id IS NULL
+  AND session.scene_type IN ('meeting', 'group')
+  AND binding.scene_type =
+    CASE
+      WHEN session.scene_type = 'meeting' THEN 'meeting'
+      ELSE 'group'
+    END
+  AND binding.scene_id = session.scene_id
+  AND binding.agent_id = session.agent_id
+  AND binding.principal_id = COALESCE(
+    session.owner_principal_id,
+    session.agent_principal_id,
+    session.agent_id::text
+  );
+
+UPDATE scene_sessions AS session
+SET
+  last_context_seq = COALESCE(cursor.cursor_sequence, 0),
+  status = CASE
+    WHEN session.status = 'active' AND COALESCE(cursor.cursor_sequence, 0) = 0
+      THEN 'preparing'
+    ELSE session.status
+  END
+FROM (
+  SELECT
+    scene_session_id,
+    cursor_sequence
+  FROM scene_context_delivery_cursors
+) AS cursor
+WHERE cursor.scene_session_id = session.id
+  AND session.last_context_seq = 0;
+
+ALTER TABLE scene_sessions
+  DROP CONSTRAINT IF EXISTS
+    scene_sessions_scene_type_scene_id_agent_id_principal_scope_generation_key;
+
+CREATE UNIQUE INDEX IF NOT EXISTS
+  scene_sessions_participant_binding_generation_idx
+  ON scene_sessions(
+    scene_type,
+    scene_id,
+    participant_binding_id,
+    agent_id,
+    principal_scope,
+    generation
+  )
+  WHERE participant_binding_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS scene_sessions_legacy_generation_idx
+  ON scene_sessions(
+    scene_type,
+    scene_id,
+    agent_id,
+    principal_scope,
+    generation
+  )
+  WHERE participant_binding_id IS NULL;
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_scene_session_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.id IS DISTINCT FROM NEW.id
+    OR OLD.scene_type IS DISTINCT FROM NEW.scene_type
+    OR OLD.scene_id IS DISTINCT FROM NEW.scene_id
+    OR OLD.participant_binding_id IS DISTINCT FROM NEW.participant_binding_id
+    OR OLD.agent_id IS DISTINCT FROM NEW.agent_id
+    OR OLD.agent_principal_id IS DISTINCT FROM NEW.agent_principal_id
+    OR OLD.owner_principal_id IS DISTINCT FROM NEW.owner_principal_id
+    OR OLD.channel_id IS DISTINCT FROM NEW.channel_id
+    OR OLD.session_handle IS DISTINCT FROM NEW.session_handle
+    OR OLD.generation IS DISTINCT FROM NEW.generation
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'scene session identity is immutable';
+  END IF;
+  IF NEW.revision < OLD.revision
+    OR NEW.last_context_seq < OLD.last_context_seq
+    OR NEW.compaction_count < OLD.compaction_count
+  THEN
+    RAISE EXCEPTION 'scene session progress cannot move backwards';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS context_policy_heads (
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('platform', 'project')),
+  scope_id TEXT NOT NULL
+    CHECK (length(btrim(scope_id)) BETWEEN 1 AND 180),
+  scene_type TEXT NOT NULL
+    CHECK (scene_type IN ('default', 'direct-chat', 'group', 'meeting')),
+  warning_ratio NUMERIC(8, 6) NOT NULL CHECK (
+    warning_ratio >= 0 AND warning_ratio <= 1
+  ),
+  compact_ratio NUMERIC(8, 6) NOT NULL CHECK (
+    compact_ratio >= warning_ratio AND compact_ratio <= 1
+  ),
+  rollover_ratio NUMERIC(8, 6) NOT NULL CHECK (
+    rollover_ratio >= compact_ratio AND rollover_ratio <= 1
+  ),
+  preserve_recent_messages INTEGER NOT NULL
+    CHECK (preserve_recent_messages >= 0),
+  max_trigger_depth INTEGER NOT NULL CHECK (max_trigger_depth > 0),
+  max_concurrent_agents_per_scene INTEGER NOT NULL
+    CHECK (max_concurrent_agents_per_scene > 0),
+  max_context_chars INTEGER NOT NULL CHECK (max_context_chars > 0),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  updated_by TEXT NOT NULL
+    CHECK (length(btrim(updated_by)) BETWEEN 1 AND 180),
+  updated_at TIMESTAMPTZ NOT NULL,
+  PRIMARY KEY (scope_type, scope_id, scene_type)
+);
+
+CREATE TABLE IF NOT EXISTS context_policy_versions (
+  id UUID PRIMARY KEY,
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('platform', 'project')),
+  scope_id TEXT NOT NULL
+    CHECK (length(btrim(scope_id)) BETWEEN 1 AND 180),
+  scene_type TEXT NOT NULL
+    CHECK (scene_type IN ('default', 'direct-chat', 'group', 'meeting')),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  warning_ratio NUMERIC(8, 6) NOT NULL,
+  compact_ratio NUMERIC(8, 6) NOT NULL,
+  rollover_ratio NUMERIC(8, 6) NOT NULL,
+  preserve_recent_messages INTEGER NOT NULL,
+  max_trigger_depth INTEGER NOT NULL,
+  max_concurrent_agents_per_scene INTEGER NOT NULL,
+  max_context_chars INTEGER NOT NULL,
+  source TEXT NOT NULL
+    CHECK (source IN ('update', 'reset', 'seed')),
+  updated_by TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (scope_type, scope_id, scene_type, revision)
+);
+
+CREATE INDEX IF NOT EXISTS context_policy_versions_scope_idx
+  ON context_policy_versions(scope_type, scope_id, scene_type, revision DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_context_policy_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Context Policy versions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS context_policy_versions_immutable
+  ON context_policy_versions;
+CREATE TRIGGER context_policy_versions_immutable
+BEFORE UPDATE OR DELETE ON context_policy_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_context_policy_version_mutation();
+
+INSERT INTO context_policy_heads (
+  scope_type, scope_id, scene_type, warning_ratio, compact_ratio,
+  rollover_ratio, preserve_recent_messages, max_trigger_depth,
+  max_concurrent_agents_per_scene, max_context_chars, revision,
+  updated_by, updated_at
+)
+SELECT
+  'platform',
+  'platform',
+  scene_type,
+  0.7,
+  0.85,
+  0.95,
+  12,
+  3,
+  3,
+  32000,
+  1,
+  'system:migration',
+  NOW()
+FROM (VALUES ('default'), ('direct-chat'), ('group'), ('meeting'))
+  AS scenes(scene_type)
+ON CONFLICT (scope_type, scope_id, scene_type) DO NOTHING;
+
+INSERT INTO context_policy_versions (
+  id, scope_type, scope_id, scene_type, revision, warning_ratio,
+  compact_ratio, rollover_ratio, preserve_recent_messages,
+  max_trigger_depth, max_concurrent_agents_per_scene, max_context_chars,
+  source, updated_by, created_at
+)
+SELECT
+  gen_random_uuid(),
+  head.scope_type,
+  head.scope_id,
+  head.scene_type,
+  head.revision,
+  head.warning_ratio,
+  head.compact_ratio,
+  head.rollover_ratio,
+  head.preserve_recent_messages,
+  head.max_trigger_depth,
+  head.max_concurrent_agents_per_scene,
+  head.max_context_chars,
+  'seed',
+  head.updated_by,
+  head.updated_at
+FROM context_policy_heads AS head
+WHERE head.scope_type = 'platform'
+  AND head.scope_id = 'platform'
+ON CONFLICT (scope_type, scope_id, scene_type, revision) DO NOTHING;
+
+ALTER TABLE context_packs
+  ADD COLUMN IF NOT EXISTS context_boundary_seq BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS context_policy_version INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS context_usage_ratio NUMERIC(8, 6)
+    NOT NULL DEFAULT 0;
+
+ALTER TABLE scene_context_receipts
+  ADD COLUMN IF NOT EXISTS context_boundary_seq BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS context_policy_version INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS context_usage_ratio NUMERIC(8, 6)
+    NOT NULL DEFAULT 0;
+
+ALTER TABLE context_packs
+  DROP CONSTRAINT IF EXISTS context_packs_context_boundary_seq_check,
+  DROP CONSTRAINT IF EXISTS context_packs_context_policy_version_check,
+  DROP CONSTRAINT IF EXISTS context_packs_context_usage_ratio_check;
+
+ALTER TABLE context_packs
+  ADD CONSTRAINT context_packs_context_boundary_seq_check
+    CHECK (context_boundary_seq IS NULL OR context_boundary_seq >= 0),
+  ADD CONSTRAINT context_packs_context_policy_version_check
+    CHECK (context_policy_version IS NULL OR context_policy_version >= 0),
+  ADD CONSTRAINT context_packs_context_usage_ratio_check
+    CHECK (context_usage_ratio IS NULL OR context_usage_ratio >= 0);
+
+ALTER TABLE scene_context_receipts
+  DROP CONSTRAINT IF EXISTS
+    scene_context_receipts_context_boundary_seq_check,
+  DROP CONSTRAINT IF EXISTS
+    scene_context_receipts_context_policy_version_check,
+  DROP CONSTRAINT IF EXISTS
+    scene_context_receipts_context_usage_ratio_check;
+
+ALTER TABLE scene_context_receipts
+  ADD CONSTRAINT scene_context_receipts_context_boundary_seq_check
+    CHECK (context_boundary_seq >= 0),
+  ADD CONSTRAINT scene_context_receipts_context_policy_version_check
+    CHECK (context_policy_version >= 0),
+  ADD CONSTRAINT scene_context_receipts_context_usage_ratio_check
+    CHECK (context_usage_ratio >= 0);
+
+CREATE TABLE IF NOT EXISTS scene_context_commit_receipts (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE RESTRICT,
+  context_pack_id UUID NOT NULL UNIQUE
+    REFERENCES context_packs(id) ON DELETE RESTRICT,
+  scene_session_id UUID NOT NULL
+    REFERENCES scene_sessions(id) ON DELETE RESTRICT,
+  context_boundary_seq BIGINT NOT NULL CHECK (context_boundary_seq >= 0),
+  previous_context_seq BIGINT NOT NULL CHECK (previous_context_seq >= 0),
+  context_policy_version INTEGER NOT NULL
+    CHECK (context_policy_version >= 0),
+  context_usage_ratio NUMERIC(8, 6) NOT NULL
+    CHECK (context_usage_ratio >= 0),
+  runtime_success BOOLEAN NOT NULL CHECK (runtime_success = TRUE),
+  committed_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS scene_context_commit_receipts_session_idx
+  ON scene_context_commit_receipts(scene_session_id, committed_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_scene_context_commit_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Scene Context commit receipts are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS scene_context_commit_receipts_immutable
+  ON scene_context_commit_receipts;
+CREATE TRIGGER scene_context_commit_receipts_immutable
+BEFORE UPDATE OR DELETE ON scene_context_commit_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_scene_context_commit_mutation();
+
+ALTER TABLE scene_context_contributions
+  DROP CONSTRAINT IF EXISTS scene_context_contributions_scene_type_check;
+ALTER TABLE scene_context_contributions
+  ADD CONSTRAINT scene_context_contributions_scene_type_check
+  CHECK (scene_type IN (
+    'task',
+    'workflow-node',
+    'meeting',
+    'direct-chat',
+    'delegation',
+    'group'
+  ));
+
+ALTER TABLE scene_context_receipts
+  DROP CONSTRAINT IF EXISTS scene_context_receipts_scene_type_check;
+ALTER TABLE scene_context_receipts
+  ADD CONSTRAINT scene_context_receipts_scene_type_check
+  CHECK (scene_type IN (
+    'task',
+    'workflow-node',
+    'meeting',
+    'direct-chat',
+    'delegation',
+    'group'
+  ));
+
+ALTER TABLE context_packs
+  DROP CONSTRAINT IF EXISTS context_packs_scene_type_check;
+ALTER TABLE context_packs
+  ADD CONSTRAINT context_packs_scene_type_check
+  CHECK (
+    scene_type IS NULL
+    OR scene_type IN (
+      'task',
+      'workflow-node',
+      'meeting',
+      'direct-chat',
+      'delegation',
+      'group'
+    )
+  );
+
+CREATE TABLE IF NOT EXISTS task_capture_sessions (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  source_type TEXT NOT NULL CHECK (source_type IN (
+    'direct-chat',
+    'meeting',
+    'workbench',
+    'workflow',
+    'manual'
+  )),
+  source_id TEXT NOT NULL
+    CHECK (length(btrim(source_id)) BETWEEN 1 AND 240),
+  source_version TEXT NOT NULL
+    CHECK (length(btrim(source_version)) BETWEEN 1 AND 120),
+  owner_principal_id TEXT NOT NULL
+    CHECK (length(btrim(owner_principal_id)) BETWEEN 1 AND 180),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived', 'expired')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, source_type, source_id, source_version, owner_principal_id)
+);
+
+CREATE INDEX IF NOT EXISTS task_capture_sessions_project_idx
+  ON task_capture_sessions(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_capture_candidates (
+  id UUID PRIMARY KEY,
+  session_id UUID NOT NULL
+    REFERENCES task_capture_sessions(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  source_type TEXT NOT NULL CHECK (source_type IN (
+    'direct-chat',
+    'meeting',
+    'workbench',
+    'workflow',
+    'manual'
+  )),
+  source_id TEXT NOT NULL
+    CHECK (length(btrim(source_id)) BETWEEN 1 AND 240),
+  source_version TEXT NOT NULL
+    CHECK (length(btrim(source_version)) BETWEEN 1 AND 120),
+  source_refs JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(source_refs) = 'array'),
+  excerpt TEXT NOT NULL
+    CHECK (length(btrim(excerpt)) BETWEEN 1 AND 20000),
+  excerpt_hash TEXT NOT NULL CHECK (excerpt_hash ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN (
+      'pending',
+      'drafting',
+      'converted',
+      'dismissed',
+      'invalidated'
+    )),
+  invalidation_reason TEXT
+    CHECK (
+      invalidation_reason IS NULL
+      OR length(invalidation_reason) <= 2000
+    ),
+  invalidated_at TIMESTAMPTZ,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (session_id, source_id, source_version, excerpt_hash),
+  CHECK (
+    (status = 'invalidated'
+      AND invalidation_reason IS NOT NULL
+      AND invalidated_at IS NOT NULL)
+    OR (status <> 'invalidated'
+      AND invalidation_reason IS NULL
+      AND invalidated_at IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS task_capture_candidates_session_idx
+  ON task_capture_candidates(session_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS task_draft_batches (
+  id UUID PRIMARY KEY,
+  session_id UUID NOT NULL
+    REFERENCES task_capture_sessions(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'preparing'
+    CHECK (status IN (
+      'preparing',
+      'committing',
+      'committed',
+      'partial',
+      'failed'
+    )),
+  creation_key TEXT NOT NULL UNIQUE
+    CHECK (
+      length(btrim(creation_key)) BETWEEN 8 AND 300
+      AND creation_key ~ '^[a-zA-Z0-9_.:-]+$'
+    ),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(created_by_principal_id)) BETWEEN 1 AND 180),
+  result JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(result) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS task_draft_batches_session_idx
+  ON task_draft_batches(session_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_drafts (
+  id UUID PRIMARY KEY,
+  batch_id UUID NOT NULL
+    REFERENCES task_draft_batches(id) ON DELETE RESTRICT,
+  session_id UUID NOT NULL
+    REFERENCES task_capture_sessions(id) ON DELETE RESTRICT,
+  candidate_id UUID NOT NULL
+    REFERENCES task_capture_candidates(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  title TEXT NOT NULL CHECK (length(btrim(title)) BETWEEN 1 AND 240),
+  description TEXT NOT NULL
+    CHECK (length(btrim(description)) BETWEEN 1 AND 20000),
+  acceptance JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(acceptance) = 'array'),
+  priority TEXT NOT NULL DEFAULT 'medium'
+    CHECK (priority IN ('low', 'medium', 'high', 'urgent')),
+  agent_id UUID REFERENCES agents(id) ON DELETE RESTRICT,
+  role_id UUID REFERENCES project_roles(id) ON DELETE RESTRICT,
+  creation_key TEXT NOT NULL UNIQUE
+    CHECK (
+      length(btrim(creation_key)) BETWEEN 8 AND 300
+      AND creation_key ~ '^[a-zA-Z0-9_.:-]+$'
+    ),
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN (
+      'draft',
+      'committing',
+      'committed',
+      'failed',
+      'discarded',
+      'invalidated'
+    )),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  source_type TEXT NOT NULL CHECK (source_type IN (
+    'direct-chat',
+    'meeting',
+    'workbench',
+    'workflow',
+    'manual'
+  )),
+  source_id TEXT NOT NULL
+    CHECK (length(btrim(source_id)) BETWEEN 1 AND 240),
+  source_version TEXT NOT NULL
+    CHECK (length(btrim(source_version)) BETWEEN 1 AND 120),
+  excerpt_hash TEXT NOT NULL CHECK (excerpt_hash ~ '^[a-f0-9]{64}$'),
+  invalidation_reason TEXT
+    CHECK (
+      invalidation_reason IS NULL
+      OR length(invalidation_reason) <= 2000
+    ),
+  invalidated_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (batch_id, candidate_id),
+  CHECK (agent_id IS NULL OR role_id IS NULL),
+  CHECK (
+    (status = 'invalidated'
+      AND invalidation_reason IS NOT NULL
+      AND invalidated_at IS NOT NULL)
+    OR (status <> 'invalidated'
+      AND invalidation_reason IS NULL
+      AND invalidated_at IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS task_drafts_batch_idx
+  ON task_drafts(batch_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS task_draft_conversions (
+  id UUID PRIMARY KEY,
+  draft_id UUID NOT NULL UNIQUE
+    REFERENCES task_drafts(id) ON DELETE RESTRICT,
+  creation_key TEXT NOT NULL UNIQUE
+    CHECK (length(btrim(creation_key)) BETWEEN 8 AND 300),
+  status TEXT NOT NULL DEFAULT 'processing'
+    CHECK (status IN ('processing', 'committed', 'reused', 'failed')),
+  task_id UUID REFERENCES tasks(id) ON DELETE RESTRICT,
+  error_code TEXT,
+  error_message TEXT
+    CHECK (error_message IS NULL OR length(error_message) <= 4000),
+  attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+  result JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(result) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    (status IN ('committed', 'reused') AND task_id IS NOT NULL)
+    OR (status <> 'committed' AND status <> 'reused')
+  )
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_task_capture_session_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Task Capture source facts cannot be deleted';
+  END IF;
+  IF OLD.project_id IS DISTINCT FROM NEW.project_id
+    OR OLD.source_type IS DISTINCT FROM NEW.source_type
+    OR OLD.source_id IS DISTINCT FROM NEW.source_id
+    OR OLD.source_version IS DISTINCT FROM NEW.source_version
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'Task Capture source identity is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_task_capture_candidate_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Task Capture source facts cannot be deleted';
+  END IF;
+  IF OLD.project_id IS DISTINCT FROM NEW.project_id
+    OR OLD.source_type IS DISTINCT FROM NEW.source_type
+    OR OLD.source_id IS DISTINCT FROM NEW.source_id
+    OR OLD.source_version IS DISTINCT FROM NEW.source_version
+    OR OLD.excerpt_hash IS DISTINCT FROM NEW.excerpt_hash
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'Task Capture source identity is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_task_draft_source_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Task Capture source facts cannot be deleted';
+  END IF;
+  IF OLD.project_id IS DISTINCT FROM NEW.project_id
+    OR OLD.source_type IS DISTINCT FROM NEW.source_type
+    OR OLD.source_id IS DISTINCT FROM NEW.source_id
+    OR OLD.source_version IS DISTINCT FROM NEW.source_version
+    OR OLD.excerpt_hash IS DISTINCT FROM NEW.excerpt_hash
+    OR OLD.creation_key IS DISTINCT FROM NEW.creation_key
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'Task Capture source identity is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS task_capture_sessions_source_immutable
+  ON task_capture_sessions;
+CREATE TRIGGER task_capture_sessions_source_immutable
+BEFORE UPDATE OR DELETE ON task_capture_sessions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_task_capture_session_identity();
+
+DROP TRIGGER IF EXISTS task_capture_candidates_source_immutable
+  ON task_capture_candidates;
+CREATE TRIGGER task_capture_candidates_source_immutable
+BEFORE UPDATE OR DELETE ON task_capture_candidates
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_task_capture_candidate_identity();
+
+DROP TRIGGER IF EXISTS task_drafts_source_immutable ON task_drafts;
+CREATE TRIGGER task_drafts_source_immutable
+BEFORE UPDATE OR DELETE ON task_drafts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_task_draft_source_identity();
+
+ALTER TABLE meeting_ai_policies
+  ADD COLUMN IF NOT EXISTS auto_speak TEXT NOT NULL DEFAULT 'mentions',
+  ADD COLUMN IF NOT EXISTS max_trigger_depth INTEGER NOT NULL DEFAULT 3,
+  ADD COLUMN IF NOT EXISTS max_concurrent_agents_per_scene INTEGER
+    NOT NULL DEFAULT 3;
+
+ALTER TABLE meeting_ai_policies
+  DROP CONSTRAINT IF EXISTS meeting_ai_policies_auto_speak_check,
+  DROP CONSTRAINT IF EXISTS meeting_ai_policies_max_trigger_depth_check,
+  DROP CONSTRAINT IF EXISTS
+    meeting_ai_policies_max_concurrent_agents_per_scene_check;
+
+ALTER TABLE meeting_ai_policies
+  ADD CONSTRAINT meeting_ai_policies_auto_speak_check
+    CHECK (auto_speak IN ('all', 'mentions', 'manual')),
+  ADD CONSTRAINT meeting_ai_policies_max_trigger_depth_check
+    CHECK (max_trigger_depth > 0),
+  ADD CONSTRAINT meeting_ai_policies_max_concurrent_agents_per_scene_check
+    CHECK (max_concurrent_agents_per_scene > 0);
+
+ALTER TABLE meeting_ai_participants
+  ADD COLUMN IF NOT EXISTS participant_binding_id UUID
+    REFERENCES scene_participant_bindings(id) ON DELETE RESTRICT,
+  ADD COLUMN IF NOT EXISTS agent_principal_id TEXT,
+  ADD COLUMN IF NOT EXISTS principal_id TEXT,
+  ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS updated_by TEXT;
+
+ALTER TABLE meeting_ai_participants
+  DROP CONSTRAINT IF EXISTS meeting_ai_participants_revision_check;
+ALTER TABLE meeting_ai_participants
+  ADD CONSTRAINT meeting_ai_participants_revision_check
+  CHECK (revision > 0);
+
+INSERT INTO scene_participant_bindings (
+  id, scene_type, scene_id, project_id, participant_kind, agent_id,
+  agent_principal_id, principal_id, status, revision, joined_at, left_at,
+  updated_at
+)
+SELECT
+  gen_random_uuid(),
+  'meeting',
+  participant.meeting_id::text,
+  participant.project_id,
+  'ai',
+  participant.agent_id,
+  COALESCE(agent_principal.id, participant.agent_id::text),
+  COALESCE(agent_principal.id, participant.agent_id::text),
+  CASE participant.status
+    WHEN 'active' THEN 'active'
+    WHEN 'paused' THEN 'paused'
+    ELSE 'removed'
+  END,
+  1,
+  participant.joined_at,
+  CASE WHEN participant.status = 'removed' THEN participant.updated_at END,
+  participant.updated_at
+FROM meeting_ai_participants AS participant
+LEFT JOIN LATERAL (
+  SELECT principal.id
+  FROM agents AS agent
+  JOIN principals AS principal
+    ON principal.id = agent.id::text
+  WHERE agent.id = participant.agent_id
+  LIMIT 1
+) AS agent_principal ON TRUE
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM scene_participant_bindings AS binding
+  WHERE binding.scene_type = 'meeting'
+    AND binding.scene_id = participant.meeting_id::text
+    AND binding.agent_id = participant.agent_id
+)
+ON CONFLICT (scene_type, scene_id, agent_id, principal_id) DO NOTHING;
+
+UPDATE meeting_ai_participants AS participant
+SET
+  participant_binding_id = binding.id,
+  agent_principal_id = binding.agent_principal_id,
+  principal_id = binding.principal_id,
+  revision = GREATEST(participant.revision, binding.revision),
+  updated_by = COALESCE(participant.updated_by, 'system:migration')
+FROM scene_participant_bindings AS binding
+WHERE participant.participant_binding_id IS NULL
+  AND binding.scene_type = 'meeting'
+  AND binding.scene_id = participant.meeting_id::text
+  AND binding.agent_id = participant.agent_id;
+
+ALTER TABLE meeting_messages
+  ADD COLUMN IF NOT EXISTS sequence BIGINT,
+  ADD COLUMN IF NOT EXISTS trigger_depth INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS participant_binding_id UUID
+    REFERENCES scene_participant_bindings(id) ON DELETE SET NULL;
+
+WITH ranked AS (
+  SELECT
+    id,
+    ROW_NUMBER() OVER (
+      PARTITION BY meeting_id
+      ORDER BY created_at, id
+    ) AS sequence
+  FROM meeting_messages
+)
+UPDATE meeting_messages AS message
+SET sequence = ranked.sequence
+FROM ranked
+WHERE ranked.id = message.id
+  AND message.sequence IS NULL;
+
+ALTER TABLE meeting_messages
+  ALTER COLUMN sequence SET NOT NULL;
+
+ALTER TABLE meeting_messages
+  DROP CONSTRAINT IF EXISTS meeting_messages_sequence_check,
+  DROP CONSTRAINT IF EXISTS meeting_messages_trigger_depth_check;
+
+ALTER TABLE meeting_messages
+  ADD CONSTRAINT meeting_messages_sequence_check CHECK (sequence > 0),
+  ADD CONSTRAINT meeting_messages_trigger_depth_check
+    CHECK (trigger_depth >= 0);
+
+CREATE UNIQUE INDEX IF NOT EXISTS meeting_messages_sequence_idx
+  ON meeting_messages(meeting_id, sequence);
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_meeting_message_sequence()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.sequence IS NULL THEN
+    PERFORM pg_advisory_xact_lock(
+      hashtextextended('meeting-message-sequence:' || NEW.meeting_id::text, 0)
+    );
+    SELECT COALESCE(MAX(sequence), 0) + 1
+    INTO NEW.sequence
+    FROM meeting_messages
+    WHERE meeting_id = NEW.meeting_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS meeting_messages_assign_sequence
+  ON meeting_messages;
+CREATE TRIGGER meeting_messages_assign_sequence
+BEFORE INSERT ON meeting_messages
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_meeting_message_sequence();
+
+ALTER TABLE meeting_ai_turns
+  ADD COLUMN IF NOT EXISTS participant_binding_id UUID
+    REFERENCES scene_participant_bindings(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS agent_principal_id TEXT,
+  ADD COLUMN IF NOT EXISTS trigger_depth INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE meeting_ai_turns
+  DROP CONSTRAINT IF EXISTS meeting_ai_turns_trigger_depth_check;
+ALTER TABLE meeting_ai_turns
+  ADD CONSTRAINT meeting_ai_turns_trigger_depth_check
+  CHECK (trigger_depth >= 0);
+
+UPDATE meeting_ai_turns AS turn
+SET
+  participant_binding_id = participant.participant_binding_id,
+  agent_principal_id = participant.agent_principal_id
+FROM meeting_ai_participants AS participant
+WHERE turn.participant_binding_id IS NULL
+  AND participant.meeting_id = turn.meeting_id
+  AND participant.agent_id = turn.agent_id;
