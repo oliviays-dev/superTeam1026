@@ -36,6 +36,7 @@ interface TeammateTemplateRow {
   scope: TeammateTemplate["scope"];
   owner_principal_id: string | null;
   status: TeammateTemplateStatus;
+  protected: boolean;
   current_version: number;
   definition: TeammateDefinition;
   created_by: string;
@@ -209,6 +210,7 @@ function templateFromRow(row: TeammateTemplateRow): TeammateTemplate {
     scope: row.scope,
     ownerPrincipalId: row.owner_principal_id,
     status: row.status,
+    protected: row.protected,
     currentVersion: row.current_version,
     definition: teammateDefinitionSchema.parse(row.definition),
     createdBy: row.created_by,
@@ -473,6 +475,9 @@ export class TeammateRepository {
       if (current.status === "archived") {
         throw new Error("archived teammate template cannot be edited");
       }
+      if (current.protected) {
+        throw new Error("protected teammate template cannot be edited");
+      }
       const version = current.current_version + 1;
       const definition = teammateDefinitionSchema.parse(input.definition);
       await client.query<TeammateTemplateVersionRow>(
@@ -512,13 +517,18 @@ export class TeammateRepository {
        SET status = $3, updated_at = NOW()
        WHERE id = $1
          AND current_version = $2
+         AND protected = FALSE
        RETURNING *`,
       [input.templateId, input.expectedVersion, input.status],
     );
     const row = result.rows[0];
     if (row !== undefined) return templateFromRow(row);
     const existing = await this.getTemplate(input.templateId);
-    return existing === undefined ? undefined : "revision_conflict";
+    if (existing === undefined) return undefined;
+    if (existing.protected) {
+      throw new Error("protected teammate template cannot be transitioned");
+    }
+    return "revision_conflict";
   }
 
   async createTeammate(input: {

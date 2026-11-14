@@ -414,7 +414,11 @@ export const PLATFORM_ROLE_DEFINITIONS = [
     key: "ADMIN",
     displayName: "平台管理员",
     description: "管理账号、平台 Grant、Workspace 和身份审计",
-    permissions: ["platform.access", "platform.manage"],
+    permissions: [
+      "platform.access",
+      "platform.manage",
+      "manage_workflow_templates",
+    ],
   },
   {
     key: "MEMBER",
@@ -625,6 +629,10 @@ export const createPlatformGrantInputSchema = z
   .object({
     principalId: principalIdSchema,
     roleKey: platformRoleKeySchema,
+    permissions: z
+      .array(z.literal("manage_workflow_templates"))
+      .max(1)
+      .default([]),
     expiresAt: timestampSchema.nullable().default(null),
   })
   .strict();

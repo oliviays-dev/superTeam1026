@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pluginmax
+      POSTGRES_PASSWORD: pluginmax
+      POSTGRES_DB: pluginmax
+    ports:
+      - "${CORE_REGRESSION_POSTGRES_PORT:-54440}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pluginmax -d pluginmax"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

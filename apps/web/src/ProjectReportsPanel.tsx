@@ -1,11 +1,13 @@
 import type {
   Project,
   ProjectReportDetail,
+  ProjectReportKind,
   WorkbenchSourceRef,
 } from "@pluginmax/contracts";
 import { formatDateTime } from "@pluginmax/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Bot,
   CalendarDays,
   ChevronRight,
   FileClock,
@@ -16,9 +18,11 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import {
   generateProjectReport,
+  getProjectAiPm,
   getProjectReport,
   listProjectReports,
   markProjectReportRead,
+  provisionProjectAiPm,
 } from "./api.js";
 
 interface ProjectReportsPanelProps {
@@ -51,6 +55,12 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+const reportKindLabels: Record<ProjectReportKind, string> = {
+  daily: "日报",
+  weekly: "周报",
+  progress: "进度报告",
+};
+
 export function ProjectReportsPanel({
   project,
   canGenerate: capabilityCanGenerate,
@@ -60,7 +70,13 @@ export function ProjectReportsPanel({
   const queryClient = useQueryClient();
   const [query, setQuery] = useState("");
   const [reportDate, setReportDate] = useState(reportDateToday);
+  const [reportKind, setReportKind] = useState<ProjectReportKind>("daily");
   const [selectedId, setSelectedId] = useState(initialReportId ?? "");
+  const aiPmQuery = useQuery({
+    queryKey: ["project-ai-pm", project.id],
+    queryFn: () => getProjectAiPm(project.id),
+    retry: false,
+  });
   const reportsQuery = useQuery({
     queryKey: ["project-reports", project.id, query],
     queryFn: () => listProjectReports(project.id, { query }),
@@ -74,7 +90,8 @@ export function ProjectReportsPanel({
     enabled: selected !== undefined,
   });
   const generateMutation = useMutation({
-    mutationFn: () => generateProjectReport(project.id, reportDate),
+    mutationFn: () =>
+      generateProjectReport(project.id, { reportDate, reportKind }),
     onSuccess: (result) => {
       setSelectedId(result.report.id);
       void queryClient.invalidateQueries({
@@ -90,6 +107,15 @@ export function ProjectReportsPanel({
       void queryClient.invalidateQueries({
         queryKey: ["project-reports", project.id],
       });
+    },
+  });
+  const provisionAiPmMutation = useMutation({
+    mutationFn: () => provisionProjectAiPm(project.id),
+    onSuccess: (result) => {
+      queryClient.setQueryData(
+        ["project-ai-pm", project.id],
+        result.manager,
+      );
     },
   });
 
@@ -132,7 +158,19 @@ export function ProjectReportsPanel({
     <section className="project-reports-panel">
       <header className="project-reports-toolbar">
         <div>
-          <strong>项目日报</strong>
+          <strong className="project-report-title">
+            <Bot size={16} />
+            项目汇报
+            {aiPmQuery.data !== undefined && (
+              <span
+                className={`pm-pill ${
+                  aiPmQuery.data.status === "ready" ? "done" : "neutral"
+                }`}
+              >
+                AI PM {aiPmQuery.data.status}
+              </span>
+            )}
+          </strong>
           <span>
             {reports.length} 个版本 · {readOnly ? "只读" : "可刷新"}
           </span>
@@ -144,8 +182,21 @@ export function ProjectReportsPanel({
               aria-label="搜索项目日报"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索日报内容"
+              placeholder="搜索汇报内容"
             />
+          </label>
+          <label className="report-date-control">
+            <select
+              aria-label="汇报类型"
+              value={reportKind}
+              onChange={(event) =>
+                setReportKind(event.target.value as ProjectReportKind)
+              }
+            >
+              <option value="daily">日报</option>
+              <option value="weekly">周报</option>
+              <option value="progress">进度报告</option>
+            </select>
           </label>
           <label className="report-date-control">
             <CalendarDays size={14} />
@@ -159,8 +210,8 @@ export function ProjectReportsPanel({
           <button
             className="pm-icon-btn"
             type="button"
-            title="刷新项目日报"
-            aria-label="刷新项目日报"
+            title={`生成项目${reportKindLabels[reportKind]}`}
+            aria-label={`生成项目${reportKindLabels[reportKind]}`}
             disabled={!canGenerate || readOnly || generateMutation.isPending}
             onClick={() => generateMutation.mutate()}
           >
@@ -169,36 +220,53 @@ export function ProjectReportsPanel({
               className={generateMutation.isPending ? "spin" : undefined}
             />
           </button>
+          {aiPmQuery.data?.status === "failed" && (
+            <button
+              className="pm-icon-btn"
+              type="button"
+              title="重试 AI PM 初始化"
+              aria-label="重试 AI PM 初始化"
+              disabled={provisionAiPmMutation.isPending}
+              onClick={() => provisionAiPmMutation.mutate()}
+            >
+              <RefreshCw
+                size={14}
+                className={
+                  provisionAiPmMutation.isPending ? "spin" : undefined
+                }
+              />
+            </button>
+          )}
         </div>
       </header>
 
       {readOnly && (
         <div className="pm-readonly-notice">
-          项目已归档。日报历史保持只读，不可生成新版本。
+          项目已归档。汇报历史保持只读，不可生成新版本。
         </div>
       )}
       {(error !== null || generateMutation.error !== null) && (
         <div className="pm-error">
           {errorMessage(
             generateMutation.error ?? error,
-            "项目日报加载失败，请重试。",
+            "项目汇报加载失败，请重试。",
           )}
         </div>
       )}
       {loading && reports.length === 0 && (
         <div className="pm-loading">
           <LoaderCircle className="spin" size={16} />
-          正在加载项目日报
+          正在加载项目汇报
         </div>
       )}
       {!loading && reports.length === 0 && (
         <div className="project-report-empty">
           <FileClock size={22} />
-          <strong>当前项目还没有日报</strong>
+          <strong>当前项目还没有汇报</strong>
           <span>
             {canGenerate && !readOnly
-              ? "选择日期后点击刷新，生成第一份项目日报。"
-              : "项目归档前没有生成过日报。"}
+              ? "选择日期和类型后生成第一份项目汇报。"
+              : "项目归档前没有生成过汇报。"}
           </span>
         </div>
       )}
@@ -219,7 +287,7 @@ export function ProjectReportsPanel({
                 <span className="project-report-date">
                   <strong>{report.reportDate}</strong>
                   <small>
-                    v{report.version}
+                    {reportKindLabels[report.reportKind]} · v{report.version}
                     {report.latest ? " · 最新" : " · 历史"}
                   </small>
                 </span>
@@ -247,7 +315,8 @@ export function ProjectReportsPanel({
                       {detailQuery.data.reportDate}
                     </h3>
                     <p>
-                      v{detailQuery.data.version} · 生成于{" "}
+                      {reportKindLabels[detailQuery.data.reportKind]} · v
+                      {detailQuery.data.version} · 生成于{" "}
                       {formatDateTime(detailQuery.data.generatedAt)}
                     </p>
                   </div>

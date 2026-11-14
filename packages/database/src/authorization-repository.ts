@@ -11,6 +11,7 @@ export const AUTHORIZATION_PERMISSIONS = [
   "manage_roles",
   "platform.access",
   "platform.manage",
+  "manage_workflow_templates",
 ] as const;
 
 const PROJECT_OWNER_PERMISSIONS = [
@@ -25,7 +26,7 @@ export type AuthorizationPermission =
   (typeof AUTHORIZATION_PERMISSIONS)[number];
 export type ScopedAuthorizationPermission = Exclude<
   AuthorizationPermission,
-  "platform.access" | "platform.manage"
+  "platform.access" | "platform.manage" | "manage_workflow_templates"
 >;
 
 export type AuthorizationDenialReason =
@@ -524,19 +525,14 @@ export class AuthorizationRepository {
       "platform",
     );
     const admin = grants.find((grant) => grant.role_key === "ADMIN");
-    const memberAccess =
-      permission === "platform.access"
-        ? grants.find(
-            (grant) =>
-              grant.role_key === "MEMBER" &&
-              grant.permissions.includes("platform.access"),
-          )
-        : undefined;
-    const matching = admin ?? memberAccess;
+    const permissionGrant = grants.find((grant) =>
+      grant.permissions.includes(permission),
+    );
+    const matching = admin ?? permissionGrant;
     const effectivePermissions =
       admin === undefined
         ? [...new Set(grants.flatMap((grant) => grant.permissions))]
-        : ["platform.access", "platform.manage"];
+        : ["platform.access", "platform.manage", "manage_workflow_templates"];
     return {
       allowed: matching !== undefined,
       ...(matching === undefined

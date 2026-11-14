@@ -48,6 +48,7 @@ export const teammateTemplateSchema = z.object({
   scope: teammateTemplateScopeSchema,
   ownerPrincipalId: idSchema.nullable(),
   status: teammateTemplateStatusSchema,
+  protected: z.boolean().default(false),
   currentVersion: z.number().int().positive(),
   definition: teammateDefinitionSchema,
   createdBy: idSchema,

@@ -42,6 +42,20 @@ integration("external runtime execution", () => {
     database = new Database(databaseUrl!);
     await migrate(database);
     repositories = new PlatformRepositories(database);
+    await repositories.featureFlags.set({
+      flagKey: "workflow.assignment_bindings",
+      scopeType: "platform",
+      scopeId: "platform",
+      mode: "on",
+      updatedBy: "test",
+    });
+    await repositories.featureFlags.set({
+      flagKey: "workflow.platform_templates",
+      scopeType: "platform",
+      scopeId: "platform",
+      mode: "on",
+      updatedBy: "test",
+    });
     const root = join(process.cwd(), ".tmp");
     await mkdir(root, { recursive: true });
     const fileStoreRoot = await mkdtemp(
@@ -410,6 +424,20 @@ integration("external runtime execution", () => {
       steps: Array<{ taskId: string | null; runId: string | null }>;
     }>("POST", `/api/v1/workflows/${workflow.body.id}/start`, {
       title: `External workflow run ${randomUUID().slice(0, 8)}`,
+      bindingOverrides: [
+        {
+          nodeId: "execute",
+          dispatchMode: "assigned",
+          primaryPrincipalId:
+            (member.body as { principalId?: string }).principalId ??
+            agent.id,
+          candidatePrincipalIds: [
+            (member.body as { principalId?: string }).principalId ?? agent.id,
+          ],
+          approverPrincipalIds: [],
+          sourceChangeReason: "external runtime workflow fixture",
+        },
+      ],
     });
     expect(started.statusCode).toBe(201);
     const taskId = started.body.steps[0]?.taskId;

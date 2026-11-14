@@ -151,6 +151,7 @@ describe("identity principal contracts", () => {
     expect(platformPermissionsForRole("ADMIN")).toEqual([
       "platform.access",
       "platform.manage",
+      "manage_workflow_templates",
     ]);
     expect(platformPermissionsForRole("MEMBER")).toEqual(["platform.access"]);
     expect(workspacePermissionsForRole("ADMIN")).toEqual([

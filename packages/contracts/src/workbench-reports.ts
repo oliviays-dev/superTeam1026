@@ -6,11 +6,26 @@ export const reportDateSchema = z
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Expected a YYYY-MM-DD date");
 export type ReportDate = z.infer<typeof reportDateSchema>;
 
+export const projectReportKindSchema = z.enum(["daily", "weekly", "progress"]);
+export type ProjectReportKind = z.infer<typeof projectReportKindSchema>;
+
+export const projectReportTriggerSourceSchema = z.enum([
+  "manual",
+  "schedule",
+  "api",
+  "system",
+  "legacy",
+]);
+export type ProjectReportTriggerSource = z.infer<
+  typeof projectReportTriggerSourceSchema
+>;
+
 export const workbenchSourceKindSchema = z.enum([
   "project",
   "task",
   "run",
   "review",
+  "artifact",
   "workflow",
   "meeting",
   "minutes-version",
@@ -44,6 +59,7 @@ export const workbenchSourceRefSchema = z.object({
   route: workbenchSourceRouteSchema,
   targetId: z.string().min(1).max(180),
   available: z.boolean().default(true),
+  cutoffAt: z.string().datetime({ offset: true }).optional(),
 });
 export type WorkbenchSourceRef = z.infer<typeof workbenchSourceRefSchema>;
 
@@ -71,16 +87,112 @@ export const projectReportCountsSchema = z.object({
   meetings: z.number().int().nonnegative(),
   actionItems: z.number().int().nonnegative(),
   memory: z.number().int().nonnegative(),
+  deliverables: z.number().int().nonnegative().optional(),
+  risks: z.number().int().nonnegative().optional(),
 });
 export type ProjectReportCounts = z.infer<typeof projectReportCountsSchema>;
+
+export const projectReportStatusCountSchema = z.object({
+  queued: z.number().int().nonnegative(),
+  in_progress: z.number().int().nonnegative(),
+  review: z.number().int().nonnegative(),
+  paused: z.number().int().nonnegative(),
+  blocked: z.number().int().nonnegative(),
+  needs_input: z.number().int().nonnegative(),
+  done: z.number().int().nonnegative(),
+  cancelled: z.number().int().nonnegative(),
+});
+export type ProjectReportStatusCount = z.infer<
+  typeof projectReportStatusCountSchema
+>;
+
+export const projectReportTaskFactSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  status: taskStatusSchema,
+  priority: z.string(),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type ProjectReportTaskFact = z.infer<
+  typeof projectReportTaskFactSchema
+>;
+
+export const projectReportWorkflowFactSchema = z.object({
+  id: z.string().uuid(),
+  title: z.string(),
+  status: z.string(),
+  failureReason: z.string().nullable(),
+  updatedAt: z.string().datetime({ offset: true }),
+});
+export type ProjectReportWorkflowFact = z.infer<
+  typeof projectReportWorkflowFactSchema
+>;
+
+export const projectReportDeliverableFactSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["task", "artifact", "review"]),
+  title: z.string(),
+  confirmedAt: z.string().datetime({ offset: true }),
+});
+export type ProjectReportDeliverableFact = z.infer<
+  typeof projectReportDeliverableFactSchema
+>;
+
+export const projectReportRiskFactSchema = z.object({
+  id: z.string(),
+  kind: z.enum([
+    "task",
+    "run",
+    "workflow",
+    "supply-exception",
+    "supplier-risk",
+  ]),
+  severity: z.enum(["watch", "risk"]),
+  title: z.string(),
+  detail: z.string(),
+});
+export type ProjectReportRiskFact = z.infer<
+  typeof projectReportRiskFactSchema
+>;
+
+export const projectReportFactsSchema = z.object({
+  project: z.object({
+    id: z.string().uuid(),
+    name: z.string(),
+    code: z.string(),
+    status: z.string(),
+    ownerPrincipalId: z.string().nullable(),
+    ownerName: z.string().nullable(),
+    startedAt: z.string().datetime({ offset: true }),
+    targetEndAt: z.string().datetime({ offset: true }).nullable(),
+  }),
+  progress: z.object({
+    percent: z.number().min(0).max(100),
+    tasksTotal: z.number().int().nonnegative(),
+    tasksDone: z.number().int().nonnegative(),
+    statusCounts: projectReportStatusCountSchema,
+  }),
+  tasks: z.array(projectReportTaskFactSchema),
+  workflows: z.array(projectReportWorkflowFactSchema),
+  deliverables: z.array(projectReportDeliverableFactSchema),
+  risks: z.array(projectReportRiskFactSchema),
+  sourceRefs: z.array(workbenchSourceRefSchema),
+  cutoffAt: z.string().datetime({ offset: true }),
+});
+export type ProjectReportFacts = z.infer<typeof projectReportFactsSchema>;
 
 export const projectReportSnapshotSchema = z.object({
   projectName: z.string(),
   projectCode: z.string(),
+  projectStatus: z.string().optional(),
+  projectOwner: z.string().nullable().optional(),
+  progressPercent: z.number().min(0).max(100).optional(),
   periodStart: z.string().datetime({ offset: true }),
   periodEnd: z.string().datetime({ offset: true }),
   counts: projectReportCountsSchema,
   items: z.array(projectReportItemSchema).max(500),
+  facts: projectReportFactsSchema.optional(),
+  sourceCutoffAt: z.string().datetime({ offset: true }).optional(),
 });
 export type ProjectReportSnapshot = z.infer<typeof projectReportSnapshotSchema>;
 
@@ -89,9 +201,20 @@ export const projectReportSummarySchema = z.object({
   projectId: z.string().uuid(),
   projectName: z.string(),
   reportDate: reportDateSchema,
+  reportKind: projectReportKindSchema.default("daily"),
+  periodStart: z.string().datetime({ offset: true }).nullable(),
+  periodEnd: z.string().datetime({ offset: true }).nullable(),
   version: z.number().int().positive(),
   generatedAt: z.string().datetime({ offset: true }),
   generatedBy: z.string(),
+  generatedByPrincipalId: z.string().nullable(),
+  runId: z.string().uuid().nullable(),
+  skillId: z.string().uuid().nullable(),
+  skillVersion: z.number().int().positive().nullable(),
+  skillDigest: z.string().length(64).nullable(),
+  triggerSource: projectReportTriggerSourceSchema.default("manual"),
+  sourceDigest: z.string().length(64).nullable(),
+  sourceCutoffAt: z.string().datetime({ offset: true }).nullable(),
   read: z.boolean(),
   readOnly: z.boolean(),
   canGenerate: z.boolean(),
@@ -116,8 +239,12 @@ export type ProjectReportGenerationResult = z.infer<
 
 export const generateProjectReportInputSchema = z.object({
   reportDate: reportDateSchema.optional(),
+  reportKind: projectReportKindSchema.optional(),
+  periodStart: z.string().datetime({ offset: true }).optional(),
+  periodEnd: z.string().datetime({ offset: true }).optional(),
+  triggerSource: projectReportTriggerSourceSchema.optional(),
 });
-export type GenerateProjectReportInput = z.infer<
+export type GenerateProjectReportInput = z.input<
   typeof generateProjectReportInputSchema
 >;
 
@@ -125,6 +252,7 @@ export const projectReportQuerySchema = z.object({
   from: reportDateSchema.optional(),
   to: reportDateSchema.optional(),
   query: z.string().trim().max(200).optional(),
+  reportKind: projectReportKindSchema.optional(),
 });
 export type ProjectReportQuery = z.infer<typeof projectReportQuerySchema>;
 

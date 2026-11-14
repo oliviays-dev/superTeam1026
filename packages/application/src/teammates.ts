@@ -403,6 +403,13 @@ export class TeammateApplicationService {
       input.actorPrincipalId,
       input.administrator,
     );
+    if (current.protected) {
+      throw new ApplicationError(
+        "teammate_template_protected",
+        "Protected Router templates cannot be edited",
+        409,
+      );
+    }
     if (current.status === "archived") {
       throw new ApplicationError(
         "teammate_template_archived",
@@ -451,11 +458,18 @@ export class TeammateApplicationService {
     readonly administrator: boolean;
     readonly expectedVersion: number;
   }): Promise<TeammateTemplate> {
-    await this.templateForManage(
+    const current = await this.templateForManage(
       input.templateId,
       input.actorPrincipalId,
       input.administrator,
     );
+    if (current.protected) {
+      throw new ApplicationError(
+        "teammate_template_protected",
+        "Protected Router templates cannot be archived",
+        409,
+      );
+    }
     const result = await this.repositories.teammates.transitionTemplate({
       templateId: input.templateId,
       expectedVersion: input.expectedVersion,

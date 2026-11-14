@@ -698,6 +698,7 @@ function PlatformGrants(props: { readonly platformAdministrator: boolean }) {
       createPlatformGrant({
         principalId: principalId.trim(),
         roleKey,
+        permissions: [],
         expiresAt: optionalDate(expiresAt),
       }),
     onSuccess: () => {

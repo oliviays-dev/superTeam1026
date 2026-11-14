@@ -8,7 +8,7 @@ interface AccountFixture {
 }
 
 interface Fixture {
-  readonly password: string;
+  readonly password?: string;
   readonly owner: AccountFixture;
 }
 
@@ -20,12 +20,16 @@ interface BrowserResponse {
 const fixture = JSON.parse(
   readFileSync(process.env.RBAC_E2E_FIXTURE_PATH!, "utf8"),
 ) as Fixture;
+const password = process.env.CORE_REGRESSION_PASSWORD ?? fixture.password;
+if (password === undefined) {
+  throw new Error("CORE_REGRESSION_PASSWORD missing");
+}
 
 async function login(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
   await page.goto("/");
   await page.getByLabel("登录 ID").fill(fixture.owner.loginId);
-  await page.getByLabel("密码").fill(fixture.password);
+  await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
   await expect
     .poll(async () =>
@@ -129,11 +133,7 @@ test("blocking Action Ticket Gate waits, resumes and completes across viewports"
       { expectedRevision: 0, policy: executionPolicy() },
     );
     expect(policy.status).toBe(200);
-    const dispatch = await api(
-      page,
-      "POST",
-      `/tasks/${task.body.id}/dispatch`,
-    );
+    const dispatch = await api(page, "POST", `/tasks/${task.body.id}/dispatch`);
     expect(dispatch.status).toBe(202);
     await page.reload();
 
@@ -147,11 +147,13 @@ test("blocking Action Ticket Gate waits, resumes and completes across viewports"
       .click();
     const runStatus = page.locator(".run-header .status-pill");
     await expect(runStatus).toHaveText("待审批");
-    await expect(page.getByText("Action Ticket", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Action Ticket", { exact: true }),
+    ).toBeVisible();
 
-    await page.getByLabel("Gate decision basis").fill(
-      "Playwright verified ticket scope and policy revision",
-    );
+    await page
+      .getByLabel("Gate decision basis")
+      .fill("Playwright verified ticket scope and policy revision");
     await page.getByRole("button", { name: "批准", exact: true }).click();
     await expect(page.getByText("approved", { exact: true })).toBeVisible();
     await expect(runStatus).toHaveText("已完成", {
@@ -164,15 +166,14 @@ test("blocking Action Ticket Gate waits, resumes and completes across viewports"
       { width: 390, height: 844 },
     ]) {
       await page.setViewportSize(viewport);
-      await expect(page.getByText("Action Ticket", { exact: true })).toBeVisible();
+      await expect(
+        page.getByText("Action Ticket", { exact: true }),
+      ).toBeVisible();
       await expect
-        .poll(
-          () =>
-            page.evaluate(
-              () =>
-                document.documentElement.scrollWidth <=
-                window.innerWidth + 1,
-            ),
+        .poll(() =>
+          page.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+          ),
         )
         .toBe(true);
       await page.screenshot({

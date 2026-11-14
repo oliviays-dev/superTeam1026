@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Database } from "./database.js";
-import { migrate } from "./migrate.js";
+import { LATEST_MIGRATION_VERSION, migrate } from "./migrate.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const integration = databaseUrl === undefined ? describe.skip : describe;
@@ -49,7 +49,7 @@ integration("identity principal migration", () => {
       const version = await isolated.query<{ version: number }>(
         "SELECT MAX(version) AS version FROM platform_migrations",
       );
-      expect(version.rows[0]?.version).toBe(32);
+      expect(version.rows[0]?.version).toBe(LATEST_MIGRATION_VERSION);
 
       const tables = await isolated.query<{ table_name: string }>(
         `SELECT table_name

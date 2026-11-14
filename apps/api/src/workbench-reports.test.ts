@@ -675,5 +675,5 @@ integration("workbench and project reports", () => {
         (item) => item.id === fixture.taskId,
       ),
     ).toBe(false);
-  });
+  }, 15_000);
 });

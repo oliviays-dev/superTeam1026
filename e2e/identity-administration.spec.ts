@@ -9,14 +9,24 @@ interface FixtureAccount {
 }
 
 interface IdentityFixture {
-  readonly password: string;
+  readonly password?: string;
   readonly admin: FixtureAccount;
   readonly owner: FixtureAccount;
   readonly member: FixtureAccount;
 }
 
+const password =
+  process.env.CORE_REGRESSION_PASSWORD ??
+  JSON.parse(await readFile(process.env.RBAC_E2E_FIXTURE_PATH!, "utf8"))
+    .password;
+if (password === undefined) {
+  throw new Error("CORE_REGRESSION_PASSWORD missing");
+}
+
 test("Identity Administration manages accounts, grants, workspaces and audit", async ({
+  browser,
   page,
+  request,
 }) => {
   const fixturePath = process.env.RBAC_E2E_FIXTURE_PATH;
   if (fixturePath === undefined)
@@ -33,7 +43,7 @@ test("Identity Administration manages accounts, grants, workspaces and audit", a
 
   await page.goto("/");
   await page.getByLabel("登录 ID").fill(fixture.admin.loginId);
-  await page.getByLabel("密码").fill(fixture.password);
+  await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
   await page.getByRole("button", { name: "账号与权限" }).click();
   await expect(page.getByRole("heading", { name: "账号与权限" })).toBeVisible();
@@ -51,6 +61,37 @@ test("Identity Administration manages accounts, grants, workspaces and audit", a
     (await activation.locator("code").textContent()) ?? "";
   expect(activationToken).toHaveLength(43);
   await expect(page.getByText("Identity UI Member").first()).toBeVisible();
+
+  const activationResponse = await request.post(
+    "/api/v1/auth/credential-activations",
+    {
+      data: {
+        token: activationToken,
+        password: "identity-ui-password",
+      },
+    },
+  );
+  expect(activationResponse.status()).toBe(204);
+  const inviteeContext = await browser.newContext();
+  try {
+    const inviteePage = await inviteeContext.newPage();
+    await inviteePage.goto("/");
+    await inviteePage.getByLabel("登录 ID").fill(loginId);
+    await inviteePage.getByLabel("密码").fill("identity-ui-password");
+    await inviteePage.getByRole("button", { name: "登录" }).click();
+    await expect
+      .poll(() =>
+        inviteePage.evaluate(() =>
+          sessionStorage.getItem("pluginmax.auth.token"),
+        ),
+      )
+      .not.toBeNull();
+    await expect(
+      inviteePage.getByText("Identity UI Member").first(),
+    ).toBeVisible();
+  } finally {
+    await inviteeContext.close();
+  }
 
   await page.getByRole("button", { name: "平台 Grant" }).click();
   await page.getByLabel("Principal ID").fill(fixture.owner.principalId);
@@ -117,7 +158,7 @@ test("non-administrators only see permitted identity surfaces", async ({
   ) as IdentityFixture;
   await page.goto("/");
   await page.getByLabel("登录 ID").fill(fixture.member.loginId);
-  await page.getByLabel("密码").fill(fixture.password);
+  await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
   await page.getByRole("button", { name: "账号与权限" }).click();
   await expect(

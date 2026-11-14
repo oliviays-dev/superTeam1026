@@ -80,7 +80,7 @@ INSERT INTO role_grants (
   NOW(), NOW()
 );
 "
-DATABASE_URL="$UPGRADE_URL" MIGRATION_TARGET_VERSION=32 \
+DATABASE_URL="$UPGRADE_URL" MIGRATION_TARGET_VERSION=33 \
   node_modules/.bin/tsx packages/database/src/migrate-cli.ts >/dev/null
 upgrade_version="$(psql_database "$UPGRADE_DATABASE" \
   "SELECT MAX(version) FROM platform_migrations;")"
@@ -88,17 +88,17 @@ upgrade_workspace="$(psql_database "$UPGRADE_DATABASE" \
   "SELECT id || '|' || display_name || '|' || status FROM workspaces WHERE id = 'workspace-upgrade';")"
 upgrade_member_version="$(psql_database "$UPGRADE_DATABASE" \
   "SELECT version FROM workspace_members WHERE id = '00000000-0000-4000-8000-000000002001';")"
-[[ "$upgrade_version" == "32" ]]
+[[ "$upgrade_version" == "33" ]]
 [[ "$upgrade_workspace" == "workspace-upgrade|workspace-upgrade|active" ]]
 [[ "$upgrade_member_version" == "1" ]]
 
-DATABASE_URL="$FRESH_URL" MIGRATION_TARGET_VERSION=32 \
+DATABASE_URL="$FRESH_URL" MIGRATION_TARGET_VERSION=33 \
   node_modules/.bin/tsx packages/database/src/migrate-cli.ts >/dev/null
 fresh_version="$(psql_database "$FRESH_DATABASE" \
   "SELECT MAX(version) FROM platform_migrations;")"
 fresh_tables="$(psql_database "$FRESH_DATABASE" \
   "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'workspaces';")"
-[[ "$fresh_version" == "32" ]]
+[[ "$fresh_version" == "33" ]]
 [[ "$fresh_tables" == "1" ]]
 
 TEST_DATABASE_URL="$FRESH_URL" DSH_HOME="$TMP_ROOT/dsh-home" \

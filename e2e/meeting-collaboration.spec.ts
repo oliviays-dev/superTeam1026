@@ -4,10 +4,11 @@ import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 interface AccountFixture {
   readonly principalId: string;
   readonly loginId: string;
+  readonly displayName?: string;
 }
 
 interface Fixture {
-  readonly password: string;
+  readonly password?: string;
   readonly owner: AccountFixture;
 }
 
@@ -19,12 +20,16 @@ interface BrowserResponse {
 const fixture = JSON.parse(
   readFileSync(process.env.RBAC_E2E_FIXTURE_PATH!, "utf8"),
 ) as Fixture;
+const password = process.env.CORE_REGRESSION_PASSWORD ?? fixture.password;
+if (password === undefined) {
+  throw new Error("CORE_REGRESSION_PASSWORD missing");
+}
 
 async function login(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
   await page.goto("/");
   await page.getByLabel("登录 ID").fill(fixture.owner.loginId);
-  await page.getByLabel("密码").fill(fixture.password);
+  await page.getByLabel("密码").fill(password);
   await page.getByRole("button", { name: "登录" }).click();
   await expect
     .poll(() =>
@@ -124,7 +129,9 @@ test("meeting collaboration governance, private briefings, files, minutes, tasks
 
     const panel = page.getByTestId("meeting-collaboration");
     await expect(panel).toBeVisible();
-    await expect(panel).toContainText("owner E2E Principal");
+    await expect(panel).toContainText(
+      fixture.owner.displayName ?? "owner E2E Principal",
+    );
 
     await panel.getByLabel("代表类型").selectOption("agent");
     await panel

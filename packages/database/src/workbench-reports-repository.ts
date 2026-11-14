@@ -4,11 +4,14 @@ import type {
   CreateSupplierRiskInput,
   ProjectReportCounts,
   ProjectReportDetail,
+  ProjectReportFacts,
   ProjectReportGenerationResult,
   ProjectReportItem,
+  ProjectReportKind,
   ProjectReportQuery,
   ProjectReportSnapshot,
   ProjectReportSummary,
+  ProjectReportTriggerSource,
   ReportDate,
   SetWorkbenchFollowInput,
   SupplyException,
@@ -27,18 +30,31 @@ import type {
   WorkbenchTodo,
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
+import { appendAuditEventWithClient } from "./audit-event-repository.js";
 import type { AuthorizationRepository } from "./authorization-repository.js";
 import type { Database } from "./database.js";
+import { captureRunSkillSnapshotWithClient } from "./skill-repository.js";
 
 interface ProjectReportRow {
   id: string;
   project_id: string;
   project_name: string;
   report_date: string | Date;
+  report_kind: ProjectReportKind;
+  period_start: Date | null;
+  period_end: Date | null;
   version: number;
   content_hash: string;
   snapshot: ProjectReportSnapshot;
   generated_by: string;
+  generated_by_principal_id: string | null;
+  run_id: string | null;
+  skill_id: string | null;
+  skill_version: number | null;
+  skill_digest: string | null;
+  trigger_source: ProjectReportTriggerSource;
+  source_digest: string | null;
+  source_cutoff_at: Date;
   generated_at: Date;
   read: boolean;
   latest: boolean;
@@ -52,6 +68,7 @@ interface ProjectReportSourceRow {
   route: WorkbenchSourceRef["route"];
   target_id: string;
   metadata: Record<string, unknown>;
+  cutoff_at: Date | null;
   position: number;
 }
 
@@ -129,6 +146,43 @@ interface TaskFactRow {
   title: string;
   status: WorkbenchTodo["status"];
   updated_at: Date;
+}
+
+interface ReportTaskFactRow extends TaskFactRow {
+  priority: string;
+}
+
+interface ReportProjectFactRow {
+  name: string;
+  code: string;
+  status: string;
+  created_at: Date;
+  owner_principal_id: string | null;
+  owner_name: string | null;
+}
+
+interface ArtifactFactRow {
+  id: string;
+  name: string;
+  run_id: string;
+  task_id: string | null;
+  project_id: string;
+  created_at: Date;
+}
+
+interface SupplyRiskFactRow {
+  id: string;
+  title: string;
+  severity: string;
+  suggested_action: string;
+}
+
+interface SupplierRiskFactRow {
+  id: string;
+  supplier_name: string;
+  risk_type: string;
+  risk_score: number;
+  suggested_action: string;
 }
 
 interface RunFactRow {
@@ -244,6 +298,49 @@ function dayBounds(reportDate: ReportDate): {
   };
 }
 
+function reportPeriodBounds(input: {
+  readonly reportDate: ReportDate;
+  readonly reportKind: ProjectReportKind;
+  readonly periodStart?: string;
+  readonly periodEnd?: string;
+}): { readonly start: Date; readonly end: Date } {
+  if (input.periodStart !== undefined || input.periodEnd !== undefined) {
+    if (input.periodStart === undefined || input.periodEnd === undefined) {
+      throw new Error("report periodStart and periodEnd must be provided together");
+    }
+    const start = new Date(input.periodStart);
+    const end = new Date(input.periodEnd);
+    if (
+      Number.isNaN(start.getTime()) ||
+      Number.isNaN(end.getTime()) ||
+      end <= start
+    ) {
+      throw new Error("invalid report period");
+    }
+    return { start, end };
+  }
+  const daily = dayBounds(input.reportDate);
+  if (input.reportKind === "daily") return daily;
+  if (input.reportKind === "weekly") {
+    const anchor = new Date(`${input.reportDate}T00:00:00.000Z`);
+    const day = anchor.getUTCDay();
+    const offset = day === 0 ? -6 : 1 - day;
+    anchor.setUTCDate(anchor.getUTCDate() + offset);
+    const startText = anchor.toISOString().slice(0, 10);
+    const start = new Date(`${startText}T00:00:00+08:00`);
+    const end = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1_000);
+    return { start, end };
+  }
+  const start = new Date("1970-01-01T00:00:00.000Z");
+  return { start, end: daily.end };
+}
+
+function reportKindLabel(kind: ProjectReportKind): string {
+  if (kind === "weekly") return "项目周报";
+  if (kind === "progress") return "项目进度报告";
+  return "项目日报";
+}
+
 function sourceRef(input: {
   readonly kind: WorkbenchSourceKind;
   readonly id: string;
@@ -252,6 +349,7 @@ function sourceRef(input: {
   readonly route: WorkbenchSourceRef["route"];
   readonly targetId: string;
   readonly available?: boolean;
+  readonly cutoffAt?: string;
 }): WorkbenchSourceRef {
   return {
     kind: input.kind,
@@ -261,6 +359,7 @@ function sourceRef(input: {
     route: input.route,
     targetId: input.targetId,
     available: input.available ?? true,
+    ...(input.cutoffAt === undefined ? {} : { cutoffAt: input.cutoffAt }),
   };
 }
 
@@ -280,9 +379,20 @@ function reportSummary(row: ProjectReportRow): ProjectReportSummary {
     projectId: row.project_id,
     projectName: row.project_name,
     reportDate: dateOnly(row.report_date),
+    reportKind: row.report_kind,
+    periodStart: row.period_start?.toISOString() ?? null,
+    periodEnd: row.period_end?.toISOString() ?? null,
     version: row.version,
     generatedAt: row.generated_at.toISOString(),
     generatedBy: row.generated_by,
+    generatedByPrincipalId: row.generated_by_principal_id,
+    runId: row.run_id,
+    skillId: row.skill_id,
+    skillVersion: row.skill_version,
+    skillDigest: row.skill_digest,
+    triggerSource: row.trigger_source,
+    sourceDigest: row.source_digest,
+    sourceCutoffAt: row.source_cutoff_at.toISOString(),
     read: row.read,
     readOnly: false,
     canGenerate: false,
@@ -299,8 +409,22 @@ export class WorkbenchReportsRepository {
   async generateProjectReport(input: {
     readonly projectId: string;
     readonly reportDate: ReportDate;
+    readonly reportKind?: ProjectReportKind;
+    readonly periodStart?: string;
+    readonly periodEnd?: string;
+    readonly triggerSource?: ProjectReportTriggerSource;
     readonly actorId: string;
   }): Promise<ProjectReportGenerationResult> {
+    const reportKind = input.reportKind ?? "daily";
+    const triggerSource = input.triggerSource ?? "manual";
+    const { start, end } = reportPeriodBounds({
+      reportDate: input.reportDate,
+      reportKind,
+      ...(input.periodStart === undefined
+        ? {}
+        : { periodStart: input.periodStart }),
+      ...(input.periodEnd === undefined ? {} : { periodEnd: input.periodEnd }),
+    });
     const generation = await this.database.transaction(async (client) => {
       const project = await client.query<{
         id: string;
@@ -318,11 +442,17 @@ export class WorkbenchReportsRepository {
         projectRow.name,
         projectRow.code,
         input.reportDate,
+        reportKind,
+        start,
+        end,
       );
       const hash = contentHash(snapshot);
+      const sourceDigest = contentHash(snapshot.facts ?? snapshot);
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        [`project-report:${input.projectId}:${input.reportDate}`],
+        [
+          `project-report:${input.projectId}:${reportKind}:${input.reportDate}`,
+        ],
       );
       const existing = await client.query<ProjectReportRow>(
         `SELECT
@@ -334,8 +464,9 @@ export class WorkbenchReportsRepository {
          JOIN projects AS project ON project.id = report.project_id
          WHERE report.project_id = $1
            AND report.report_date = $2
-           AND report.content_hash = $3`,
-        [input.projectId, input.reportDate, hash],
+           AND report.report_kind = $3
+           AND report.content_hash = $4`,
+        [input.projectId, input.reportDate, reportKind, hash],
       );
       const existingRow = existing.rows[0];
       if (existingRow !== undefined) {
@@ -349,23 +480,55 @@ export class WorkbenchReportsRepository {
       const next = await client.query<{ version: number }>(
         `SELECT COALESCE(MAX(version), 0)::integer + 1 AS version
          FROM project_reports
-         WHERE project_id = $1 AND report_date = $2`,
-        [input.projectId, input.reportDate],
+         WHERE project_id = $1
+           AND report_date = $2
+           AND report_kind = $3`,
+        [input.projectId, input.reportDate, reportKind],
       );
+      const tracing = await this.createProjectReportRun(client, {
+        projectId: input.projectId,
+        projectName: projectRow.name,
+        reportDate: input.reportDate,
+        reportKind,
+        periodStart: start,
+        periodEnd: end,
+        triggerSource,
+        sourceDigest,
+        sourceCutoffAt: end,
+        snapshot,
+        actorId: input.actorId,
+      });
       const reportId = randomUUID();
       await client.query(
         `INSERT INTO project_reports (
-           id, project_id, report_date, version, content_hash, snapshot,
-           generated_by, generated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW())`,
+           id, project_id, report_date, report_kind, period_start,
+           period_end, version, content_hash, snapshot, generated_by,
+           generated_by_principal_id, run_id, skill_id, skill_version,
+           skill_digest, trigger_source, source_digest, source_cutoff_at,
+           generated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12,
+           $13, $14, $15, $16, $17, $18, NOW()
+         )`,
         [
           reportId,
           input.projectId,
           input.reportDate,
+          reportKind,
+          start,
+          end,
           next.rows[0]!.version,
           hash,
           JSON.stringify(snapshot),
           input.actorId,
+          tracing.generatedByPrincipalId,
+          tracing.runId,
+          tracing.skillId,
+          tracing.skillVersion,
+          tracing.skillDigest,
+          triggerSource,
+          sourceDigest,
+          end,
         ],
       );
       const sources = dedupeSources(
@@ -375,8 +538,8 @@ export class WorkbenchReportsRepository {
         await client.query(
           `INSERT INTO project_report_sources (
              report_id, source_kind, source_id, project_id, label,
-             route, target_id, metadata, position
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb, $8)
+             route, target_id, metadata, cutoff_at, position
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, '{}'::jsonb, $8, $9)
            ON CONFLICT (report_id, source_kind, source_id) DO NOTHING`,
           [
             reportId,
@@ -386,10 +549,30 @@ export class WorkbenchReportsRepository {
             source.label,
             source.route,
             source.targetId,
+            source.cutoffAt ?? end.toISOString(),
             position,
           ],
         );
       }
+      await appendAuditEventWithClient(client, {
+        action: "project.report.generated",
+        actorPrincipalId: input.actorId,
+        subjectPrincipalId: tracing.generatedByPrincipalId,
+        metadata: {
+          projectId: input.projectId,
+          reportId,
+          reportKind,
+          reportDate: input.reportDate,
+          version: next.rows[0]!.version,
+          runId: tracing.runId,
+          skillId: tracing.skillId,
+          skillVersion: tracing.skillVersion,
+          skillDigest: tracing.skillDigest,
+          sourceDigest,
+          sourceCutoffAt: end.toISOString(),
+          triggerSource,
+        },
+      });
       return { reportId, created: true, reused: false };
     });
     const report = await this.getProjectReport(
@@ -402,6 +585,176 @@ export class WorkbenchReportsRepository {
       report,
       created: generation.created,
       reused: generation.reused,
+    };
+  }
+
+  private async createProjectReportRun(
+    client: PoolClient,
+    input: {
+      readonly projectId: string;
+      readonly projectName: string;
+      readonly reportDate: ReportDate;
+      readonly reportKind: ProjectReportKind;
+      readonly periodStart: Date;
+      readonly periodEnd: Date;
+      readonly triggerSource: ProjectReportTriggerSource;
+      readonly sourceDigest: string;
+      readonly sourceCutoffAt: Date;
+      readonly snapshot: ProjectReportSnapshot;
+      readonly actorId: string;
+    },
+  ): Promise<{
+    readonly runId: string | null;
+    readonly generatedByPrincipalId: string | null;
+    readonly skillId: string | null;
+    readonly skillVersion: number | null;
+    readonly skillDigest: string | null;
+  }> {
+    const flag = await client.query<{ mode: string }>(
+      `SELECT mode
+       FROM feature_flag_settings
+       WHERE flag_key = 'project.ai_pm'
+         AND (
+           (scope_type = 'project' AND scope_id = $1)
+           OR (scope_type = 'platform' AND scope_id = 'platform')
+         )
+       ORDER BY CASE scope_type WHEN 'project' THEN 0 ELSE 1 END
+       LIMIT 1`,
+      [input.projectId],
+    );
+    if (!["on", "enforce"].includes(flag.rows[0]?.mode ?? "off")) {
+      return {
+        runId: null,
+        generatedByPrincipalId: null,
+        skillId: null,
+        skillVersion: null,
+        skillDigest: null,
+      };
+    }
+    const manager = await client.query<{
+      agent_id: string;
+      agent_principal_id: string;
+      teammate_id: string;
+      skill_id: string;
+      runtime_kind: "fake" | "dsh-sdk" | "codex-jsonl" | "plain-text";
+    }>(
+      `SELECT
+         manager.agent_id,
+         manager.agent_principal_id,
+         manager.teammate_id,
+         manager.skill_id,
+         agent.runtime_kind
+       FROM project_ai_pms AS manager
+       JOIN agents AS agent ON agent.id = manager.agent_id
+       WHERE manager.project_id = $1 AND manager.status = 'ready'`,
+      [input.projectId],
+    );
+    const row = manager.rows[0];
+    if (row === undefined) {
+      throw new Error("project AI PM is not ready for report generation");
+    }
+    const runId = randomUUID();
+    const traceId = createHash("md5")
+      .update(`project-report-run:${runId}`)
+      .digest("hex");
+    const traceRootSpanId = createHash("md5")
+      .update(`project-report-root:${runId}`)
+      .digest("hex")
+      .slice(0, 16);
+    const idempotencyKey =
+      `project-report-run:${input.projectId}:${input.reportKind}:` +
+      `${input.reportDate}:${input.sourceDigest}`;
+    await client.query(
+      `INSERT INTO runs (
+         id, project_id, task_id, agent_id, status, input_snapshot,
+         output, observability, attempt, idempotency_key,
+         agent_principal_id, initiated_by_principal_id, trace_id,
+         trace_root_span_id, started_at, ended_at, created_at, updated_at
+       ) VALUES (
+         $1, $2, NULL, $3, 'completed', $4::jsonb, $5, $6::jsonb,
+         1, $7, $8, $9, $10, $11, NOW(), NOW(), NOW(), NOW()
+       )`,
+      [
+        runId,
+        input.projectId,
+        row.agent_id,
+        JSON.stringify({
+          taskTitle: `AI PM · ${reportKindLabel(input.reportKind)}`,
+          taskDescription: "基于项目事实包生成不可变项目报告",
+          acceptance: [
+            "项目状态、进度、任务、Workflow、交付物和风险均来自事实包",
+            "所有结论保留 source refs 和 cutoff",
+          ],
+          instruction: "生成项目运营报告，不编造数字、日期或负责人。",
+          agentName: "Project AI PM",
+          runtimeKind: row.runtime_kind,
+          projectReport: {
+            reportKind: input.reportKind,
+            reportDate: input.reportDate,
+            periodStart: input.periodStart.toISOString(),
+            periodEnd: input.periodEnd.toISOString(),
+            sourceDigest: input.sourceDigest,
+            sourceCutoffAt: input.sourceCutoffAt.toISOString(),
+            triggerSource: input.triggerSource,
+          },
+        }),
+        JSON.stringify(input.snapshot),
+        JSON.stringify({
+          planVisibility: "structured",
+          toolEventCompleteness: "complete",
+          textStreaming: "final-only",
+          subagentVisibility: "none",
+        }),
+        idempotencyKey,
+        row.agent_principal_id,
+        input.actorId,
+        traceId,
+        traceRootSpanId,
+      ],
+    );
+    const runSkillSnapshot = await captureRunSkillSnapshotWithClient(
+      client,
+      runId,
+    );
+    const reportingSkill = runSkillSnapshot.skills.find(
+      (skill) => skill.key === "project-reporting",
+    );
+    if (
+      reportingSkill === undefined ||
+      reportingSkill.skillId !== row.skill_id
+    ) {
+      throw new Error("Project Reporting Skill snapshot is missing");
+    }
+    await client.query(
+      `INSERT INTO run_events (
+         id, run_id, seq, type, visibility, summary, data,
+         trace_id, span_id, parent_span_id, created_at
+       ) VALUES (
+         $1, $2, 1, 'run.completed', 'public', $3, $4::jsonb,
+         $5, $6, $7, NOW()
+       )`,
+      [
+        randomUUID(),
+        runId,
+        `${reportKindLabel(input.reportKind)}已生成`,
+        JSON.stringify({
+          projectId: input.projectId,
+          reportKind: input.reportKind,
+          sourceDigest: input.sourceDigest,
+          skillVersion: reportingSkill.version,
+          skillDigest: reportingSkill.digest,
+        }),
+        traceId,
+        createHash("md5").update(`project-report-event:${runId}`).digest("hex").slice(0, 16),
+        traceRootSpanId,
+      ],
+    );
+    return {
+      runId,
+      generatedByPrincipalId: row.agent_principal_id,
+      skillId: reportingSkill.skillId,
+      skillVersion: reportingSkill.version,
+      skillDigest: reportingSkill.digest,
     };
   }
 
@@ -418,7 +771,7 @@ export class WorkbenchReportsRepository {
          project.name AS project_name,
          (read.actor_id IS NOT NULL) AS read,
          report.version = MAX(report.version) OVER (
-           PARTITION BY report.report_date
+           PARTITION BY report.report_kind, report.report_date
          ) AS latest
        FROM project_reports AS report
        JOIN projects AS project ON project.id = report.project_id
@@ -429,13 +782,15 @@ export class WorkbenchReportsRepository {
          AND ($3::date IS NULL OR report.report_date >= $3)
          AND ($4::date IS NULL OR report.report_date <= $4)
          AND ($5::text IS NULL OR report.snapshot::text ILIKE '%' || $5 || '%')
-       ORDER BY report.report_date DESC, report.version DESC`,
+         AND ($6::text IS NULL OR report.report_kind = $6)
+       ORDER BY report.report_date DESC, report.report_kind, report.version DESC`,
       [
         input.projectId,
         input.actorId,
         input.query.from ?? null,
         input.query.to ?? null,
         input.query.query?.trim() || null,
+        input.query.reportKind ?? null,
       ],
     );
     return result.rows.map((row) => ({
@@ -460,6 +815,7 @@ export class WorkbenchReportsRepository {
            FROM project_reports AS latest
            WHERE latest.project_id = report.project_id
              AND latest.report_date = report.report_date
+             AND latest.report_kind = report.report_kind
          ) AS latest
        FROM project_reports AS report
        JOIN projects AS project ON project.id = report.project_id
@@ -474,7 +830,7 @@ export class WorkbenchReportsRepository {
     const sourceResult = await this.database.query<ProjectReportSourceRow>(
       `SELECT
          source_kind, source_id, project_id, label, route,
-         target_id, metadata, position
+         target_id, metadata, cutoff_at, position
        FROM project_report_sources
        WHERE report_id = $1
        ORDER BY position, source_kind, source_id`,
@@ -490,6 +846,9 @@ export class WorkbenchReportsRepository {
         route: source.route,
         targetId: source.target_id,
         available: true,
+        ...(source.cutoff_at === null
+          ? {}
+          : { cutoffAt: source.cutoff_at.toISOString() }),
       })),
     );
     const availability = new Map(
@@ -930,12 +1289,36 @@ export class WorkbenchReportsRepository {
     projectName: string,
     projectCode: string,
     reportDate: ReportDate,
+    reportKind: ProjectReportKind,
+    start: Date,
+    end: Date,
   ): Promise<ProjectReportSnapshot> {
-    const { start, end } = dayBounds(reportDate);
-    const tasksResult = await client.query<TaskFactRow>(
+    void reportDate;
+    const projectFactResult = await client.query<ReportProjectFactRow>(
+      `SELECT
+         project.name,
+         project.code,
+         project.status,
+         project.created_at,
+         member.principal_id AS owner_principal_id,
+         principal.display_name AS owner_name
+       FROM projects AS project
+       LEFT JOIN project_members AS member
+         ON member.project_id = project.id
+        AND member.is_owner = TRUE
+        AND member.status = 'active'
+       LEFT JOIN principals AS principal
+         ON principal.id = member.principal_id
+       WHERE project.id = $1
+       ORDER BY member.created_at
+       LIMIT 1`,
+      [projectId],
+    );
+    const projectFact = projectFactResult.rows[0];
+    const tasksResult = await client.query<ReportTaskFactRow>(
       `SELECT
            task.id, task.project_id, project.name AS project_name,
-           task.title, task.status, task.updated_at
+           task.title, task.status, task.priority, task.updated_at
          FROM tasks AS task
          JOIN projects AS project ON project.id = task.project_id
          WHERE task.project_id = $1
@@ -1025,6 +1408,38 @@ export class WorkbenchReportsRepository {
            AND truth.created_at < $3
          ORDER BY truth.created_at DESC, truth.id`,
       [projectId, start, end],
+    );
+    const artifactsResult = await client.query<ArtifactFactRow>(
+      `SELECT
+         artifact.id,
+         artifact.name,
+         artifact.run_id,
+         run.task_id,
+         artifact.project_id,
+         artifact.created_at
+       FROM artifacts AS artifact
+       LEFT JOIN runs AS run ON run.id = artifact.run_id
+       WHERE artifact.project_id = $1
+         AND artifact.created_at >= $2
+         AND artifact.created_at < $3
+       ORDER BY artifact.created_at DESC, artifact.id`,
+      [projectId, start, end],
+    );
+    const supplyRisksResult = await client.query<SupplyRiskFactRow>(
+      `SELECT id, title, severity, suggested_action
+       FROM supply_exceptions
+       WHERE project_id = $1
+         AND status <> 'resolved'
+       ORDER BY created_at DESC, id`,
+      [projectId],
+    );
+    const supplierRisksResult = await client.query<SupplierRiskFactRow>(
+      `SELECT id, supplier_name, risk_type, risk_score, suggested_action
+       FROM supplier_risks
+       WHERE project_id = $1
+         AND status <> 'closed'
+       ORDER BY risk_score DESC, data_updated_at DESC, id`,
+      [projectId],
     );
 
     const items: ProjectReportItem[] = [];
@@ -1137,6 +1552,23 @@ export class WorkbenchReportsRepository {
         ],
       });
     }
+    for (const artifact of artifactsResult.rows) {
+      items.push({
+        id: `artifact:${artifact.id}:deliverable`,
+        section: "progress",
+        text: `交付物「${artifact.name}」已生成。`,
+        sourceRefs: [
+          sourceRef({
+            kind: "artifact",
+            id: artifact.id,
+            projectId,
+            label: artifact.name,
+            route: artifact.task_id === null ? "run" : "task",
+            targetId: artifact.task_id ?? artifact.run_id,
+          }),
+        ],
+      });
+    }
     for (const task of tasksResult.rows) {
       if (task.status !== "review") continue;
       items.push({
@@ -1189,6 +1621,40 @@ export class WorkbenchReportsRepository {
             label: workflow.title,
             route: "workflow",
             targetId: workflow.id,
+          }),
+        ],
+      });
+    }
+    for (const risk of supplyRisksResult.rows) {
+      items.push({
+        id: `supply-exception:${risk.id}:risk`,
+        section: "risk",
+        text: `供应异常「${risk.title}」：${risk.suggested_action}`,
+        sourceRefs: [
+          sourceRef({
+            kind: "supply-exception",
+            id: risk.id,
+            projectId,
+            label: risk.title,
+            route: "supply-exception",
+            targetId: risk.id,
+          }),
+        ],
+      });
+    }
+    for (const risk of supplierRisksResult.rows) {
+      items.push({
+        id: `supplier-risk:${risk.id}:risk`,
+        section: "risk",
+        text: `供应商风险「${risk.supplier_name} · ${risk.risk_type}」评分 ${risk.risk_score}：${risk.suggested_action}`,
+        sourceRefs: [
+          sourceRef({
+            kind: "supplier-risk",
+            id: risk.id,
+            projectId,
+            label: `${risk.supplier_name} · ${risk.risk_type}`,
+            route: "supplier-risk",
+            targetId: risk.id,
           }),
         ],
       });
@@ -1255,6 +1721,164 @@ export class WorkbenchReportsRepository {
         sourceRefs: [],
       });
     }
+    const sourceCutoffAt = end.toISOString();
+    const reportItems = items.map((item) => ({
+      ...item,
+      sourceRefs: item.sourceRefs.map((source) => ({
+        ...source,
+        cutoffAt: source.cutoffAt ?? sourceCutoffAt,
+      })),
+    }));
+    const statusCounts: ProjectReportFacts["progress"]["statusCounts"] = {
+      queued: 0,
+      in_progress: 0,
+      review: 0,
+      paused: 0,
+      blocked: 0,
+      needs_input: 0,
+      done: 0,
+      cancelled: 0,
+    };
+    for (const task of tasksResult.rows) {
+      statusCounts[task.status] += 1;
+    }
+    const tasksTotal = tasksResult.rows.filter(
+      (task) => task.status !== "cancelled",
+    ).length;
+    const progressPercent =
+      tasksTotal === 0
+        ? 0
+        : Math.round(
+            (statusCounts.done / tasksTotal) * 100 * 100,
+          ) / 100;
+    const deliverables: ProjectReportFacts["deliverables"] = [];
+    for (const task of tasksResult.rows) {
+      if (task.status !== "done") continue;
+      deliverables.push({
+        id: task.id,
+        kind: "task",
+        title: task.title,
+        confirmedAt: task.updated_at.toISOString(),
+      });
+    }
+    for (const review of reviewsResult.rows) {
+      if (review.decision !== "approve") continue;
+      deliverables.push({
+        id: review.id,
+        kind: "review",
+        title: `${review.task_title} · 验收通过`,
+        confirmedAt: review.created_at.toISOString(),
+      });
+    }
+    for (const artifact of artifactsResult.rows) {
+      deliverables.push({
+        id: artifact.id,
+        kind: "artifact",
+        title: artifact.name,
+        confirmedAt: artifact.created_at.toISOString(),
+      });
+    }
+    const risks: ProjectReportFacts["risks"] = [];
+    for (const task of tasksResult.rows) {
+      if (task.status !== "review") continue;
+      risks.push({
+        id: `task:${task.id}`,
+        kind: "task",
+        severity: "watch",
+        title: task.title,
+        detail: "任务等待验收",
+      });
+    }
+    for (const run of runsResult.rows) {
+      if (!["failed", "timeout", "interrupted"].includes(run.status)) continue;
+      risks.push({
+        id: `run:${run.id}`,
+        kind: "run",
+        severity: "risk",
+        title: run.title,
+        detail: run.error ?? `Run ${run.status}`,
+      });
+    }
+    for (const workflow of workflowsResult.rows) {
+      if (workflow.status === "completed" || workflow.failure_reason === null) {
+        continue;
+      }
+      risks.push({
+        id: `workflow:${workflow.id}`,
+        kind: "workflow",
+        severity: "risk",
+        title: workflow.title,
+        detail: workflow.failure_reason,
+      });
+    }
+    for (const risk of supplyRisksResult.rows) {
+      risks.push({
+        id: `supply-exception:${risk.id}`,
+        kind: "supply-exception",
+        severity: risk.severity === "high" ? "risk" : "watch",
+        title: risk.title,
+        detail: risk.suggested_action,
+      });
+    }
+    for (const risk of supplierRisksResult.rows) {
+      risks.push({
+        id: `supplier-risk:${risk.id}`,
+        kind: "supplier-risk",
+        severity: risk.risk_score >= 70 ? "risk" : "watch",
+        title: `${risk.supplier_name} · ${risk.risk_type}`,
+        detail: risk.suggested_action,
+      });
+    }
+    const facts: ProjectReportFacts = {
+      project: {
+        id: projectId,
+        name: projectFact?.name ?? projectName,
+        code: projectFact?.code ?? projectCode,
+        status: projectFact?.status ?? "active",
+        ownerPrincipalId: projectFact?.owner_principal_id ?? null,
+        ownerName: projectFact?.owner_name ?? null,
+        startedAt: (
+          projectFact?.created_at ?? new Date(0)
+        ).toISOString(),
+        targetEndAt: null,
+      },
+      progress: {
+        percent: progressPercent,
+        tasksTotal,
+        tasksDone: statusCounts.done,
+        statusCounts,
+      },
+      tasks: tasksResult.rows.map((task) => ({
+        id: task.id,
+        title: task.title,
+        status: task.status,
+        priority: task.priority,
+        updatedAt: task.updated_at.toISOString(),
+      })),
+      workflows: workflowsResult.rows.map((workflow) => ({
+        id: workflow.id,
+        title: workflow.title,
+        status: workflow.status,
+        failureReason: workflow.failure_reason,
+        updatedAt: workflow.updated_at.toISOString(),
+      })),
+      deliverables,
+      risks,
+      sourceRefs: [],
+      cutoffAt: sourceCutoffAt,
+    };
+    facts.sourceRefs = dedupeSources([
+      sourceRef({
+        kind: "project",
+        id: projectId,
+        projectId,
+        label: projectFact?.name ?? projectName,
+        route: "project",
+        targetId: projectId,
+        cutoffAt: sourceCutoffAt,
+      }),
+      ...reportItems.flatMap((item) => item.sourceRefs),
+    ]);
     const counts: ProjectReportCounts = {
       tasks: tasksResult.rows.length,
       runs: runsResult.rows.length,
@@ -1263,14 +1887,21 @@ export class WorkbenchReportsRepository {
       meetings: meetingsResult.rows.length,
       actionItems: actionsResult.rows.length,
       memory: memoryResult.rows.length,
+      deliverables: deliverables.length,
+      risks: risks.length,
     };
     return {
       projectName,
       projectCode,
+      projectStatus: facts.project.status,
+      projectOwner: facts.project.ownerName,
+      progressPercent,
       periodStart: start.toISOString(),
       periodEnd: end.toISOString(),
       counts,
-      items,
+      items: reportItems,
+      facts,
+      sourceCutoffAt,
     };
   }
 
@@ -1314,7 +1945,7 @@ export class WorkbenchReportsRepository {
                 : item.section === "progress"
                   ? "progress"
                   : "conclusion",
-          title: `${report.projectName}项目日报`,
+          title: `${report.projectName}${reportKindLabel(report.reportKind)}`,
           body: item.text,
           severity: item.section === "risk" ? "watch" : "info",
           sourceRefs: [
@@ -1713,8 +2344,10 @@ export class WorkbenchReportsRepository {
            FROM project_reports AS latest
            WHERE latest.project_id = report.project_id
              AND latest.report_date = report.report_date
+             AND latest.report_kind = report.report_kind
          )
-       ORDER BY report.report_date DESC, report.generated_at DESC
+       ORDER BY report.report_date DESC, report.report_kind,
+         report.generated_at DESC
        LIMIT 30`,
       [[...projectIds], actorId],
     );
@@ -1762,6 +2395,9 @@ function sourceAvailabilitySql(kind: WorkbenchSourceKind): string | undefined {
               FROM task_reviews AS review
               JOIN tasks AS task ON task.id = review.task_id
               WHERE task.project_id = $1 AND review.id::text = ANY($2::text[])`;
+    case "artifact":
+      return `SELECT id::text AS id FROM artifacts
+              WHERE project_id = $1 AND id::text = ANY($2::text[])`;
     case "workflow":
       return `SELECT id::text AS id FROM workflow_instances
               WHERE project_id = $1 AND id::text = ANY($2::text[])`;

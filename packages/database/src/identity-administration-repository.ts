@@ -37,6 +37,14 @@ import {
   workspacePermissionsForRole,
 } from "@pluginmax/contracts";
 import type { Database } from "./database.js";
+import {
+  countOtherUsablePlatformAdmins,
+  countOtherUsableWorkspaceAdmins,
+  isUsablePlatformAdmin,
+  isUsableWorkspaceAdmin,
+  lockPlatformAdminMutations,
+  lockWorkspaceAdminMutations,
+} from "./identity-admin-guards.js";
 import { hashIdentityPassword } from "./identity-repository.js";
 
 const ACTIVATION_TOKEN_SCHEME = "activation-token-sha256";
@@ -454,6 +462,20 @@ export class IdentityAdministrationRepository {
         this.now(),
       ],
     );
+  }
+
+  async appendAuditEvent(input: {
+    readonly action: string;
+    readonly decision?: "allowed" | "denied";
+    readonly actorPrincipalId?: string | null;
+    readonly subjectPrincipalId?: string | null;
+    readonly accountId?: string | null;
+    readonly sessionId?: string | null;
+    readonly grantId?: string | null;
+    readonly reason?: string;
+    readonly metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    await this.audit(this.database, input);
   }
 
   private async accountRowById(
@@ -882,6 +904,7 @@ export class IdentityAdministrationRepository {
     const now = this.now();
     const expiresAt = new Date(now.getTime() + input.expiresInSeconds * 1_000);
     await this.database.transaction(async (client) => {
+      await lockPlatformAdminMutations(client);
       const account = await client.query<AccountForUpdateRow>(
         `SELECT
            a.id AS account_id, a.status AS account_status, a.login_id,
@@ -917,37 +940,13 @@ export class IdentityAdministrationRepository {
           409,
         );
       }
-      const ownAdmin = await client.query(
-        `SELECT 1
-         FROM role_grants
-         WHERE principal_id = $1
-           AND scope_type = 'platform'
-           AND scope_id = 'platform'
-           AND role_key = 'ADMIN'
-           AND status = 'active'
-           AND (expires_at IS NULL OR expires_at > $2)
-         LIMIT 1`,
-        [row.principal_id, now],
-      );
-      if ((ownAdmin.rowCount ?? 0) > 0) {
-        const otherAdmins = await client.query<{ count: number }>(
-          `SELECT COUNT(*)::int AS count
-           FROM role_grants AS grant_row
-           JOIN principals AS principal
-             ON principal.id = grant_row.principal_id
-           LEFT JOIN accounts AS account
-             ON account.principal_id = principal.id
-           WHERE grant_row.principal_id <> $1
-             AND grant_row.scope_type = 'platform'
-             AND grant_row.scope_id = 'platform'
-             AND grant_row.role_key = 'ADMIN'
-             AND grant_row.status = 'active'
-             AND (grant_row.expires_at IS NULL OR grant_row.expires_at > $2)
-             AND principal.status = 'active'
-             AND (principal.kind = 'ai' OR account.status = 'active')`,
-          [row.principal_id, now],
+      if (await isUsablePlatformAdmin(client, row.principal_id, now)) {
+        const otherAdmins = await countOtherUsablePlatformAdmins(
+          client,
+          row.principal_id,
+          now,
         );
-        if (Number(otherAdmins.rows[0]?.count ?? 0) === 0) {
+        if (otherAdmins === 0) {
           throw new IdentityAdministrationRepositoryError(
             "last_platform_admin",
             "The last active platform administrator credential cannot be reset",
@@ -1254,7 +1253,9 @@ export class IdentityAdministrationRepository {
 
   async createPlatformGrant(
     actorPrincipalId: string,
-    input: CreatePlatformGrantInput,
+    input: Omit<CreatePlatformGrantInput, "permissions"> & {
+      readonly permissions?: CreatePlatformGrantInput["permissions"];
+    },
   ): Promise<RoleGrant> {
     await this.expirePlatformGrants();
     const now = this.now();
@@ -1269,6 +1270,7 @@ export class IdentityAdministrationRepository {
       );
     }
     const grantId = randomUUID();
+    let resultGrantId: string = grantId;
     try {
       await this.database.transaction(async (client) => {
         const principal = await client.query<{
@@ -1291,34 +1293,78 @@ export class IdentityAdministrationRepository {
             409,
           );
         }
-        await client.query(
-          `INSERT INTO role_grants (
-             id, principal_id, scope_type, scope_id, role_key, permissions,
-             status, source_kind, source_ref, granted_by_principal_id,
-             revoked_by_principal_id, granted_at, expires_at, revoked_at,
-             version, created_at, updated_at
-           ) VALUES (
-             $1, $2, 'platform', 'platform', $3, $4::jsonb,
-             'active', 'platform-role', 'identity-administration:platform', $5,
-             NULL, $6, $7, NULL, 1, $6, $6
-           )`,
-          [
-            grantId,
-            input.principalId,
-            input.roleKey,
-            JSON.stringify(platformPermissionsForRole(input.roleKey)),
-            actorPrincipalId,
-            now,
-            input.expiresAt === null ? null : new Date(input.expiresAt),
-          ],
+        const existing = await client.query<{
+          id: string;
+          permissions: string[];
+        }>(
+          `SELECT id, permissions
+           FROM role_grants
+           WHERE principal_id = $1
+             AND scope_type = 'platform'
+             AND scope_id = 'platform'
+             AND role_key = $2
+             AND status = 'active'
+             AND (expires_at IS NULL OR expires_at > $3)
+           FOR UPDATE`,
+          [input.principalId, input.roleKey, now],
         );
+        const permissions = [
+          ...new Set([
+            ...platformPermissionsForRole(input.roleKey),
+            ...(input.permissions ?? []),
+            ...(existing.rows[0]?.permissions ?? []),
+          ]),
+        ];
+        if (existing.rows[0] === undefined) {
+          await client.query(
+            `INSERT INTO role_grants (
+               id, principal_id, scope_type, scope_id, role_key, permissions,
+               status, source_kind, source_ref, granted_by_principal_id,
+               revoked_by_principal_id, granted_at, expires_at, revoked_at,
+               version, created_at, updated_at
+             ) VALUES (
+               $1, $2, 'platform', 'platform', $3, $4::jsonb,
+               'active', 'platform-role', 'identity-administration:platform', $5,
+               NULL, $6, $7, NULL, 1, $6, $6
+             )`,
+            [
+              grantId,
+              input.principalId,
+              input.roleKey,
+              JSON.stringify(permissions),
+              actorPrincipalId,
+              now,
+              input.expiresAt === null ? null : new Date(input.expiresAt),
+            ],
+          );
+        } else {
+          resultGrantId = existing.rows[0].id;
+          await client.query(
+            `UPDATE role_grants
+             SET permissions = $2::jsonb,
+                 expires_at = $3,
+                 version = version + 1,
+                 updated_at = $4
+             WHERE id = $1`,
+            [
+              resultGrantId,
+              JSON.stringify(permissions),
+              input.expiresAt === null ? null : new Date(input.expiresAt),
+              now,
+            ],
+          );
+        }
         await this.audit(client, {
-          action: "identity.platform_grant.created",
+          action:
+            existing.rows[0] === undefined
+              ? "identity.platform_grant.created"
+              : "identity.platform_grant.permissions_extended",
           actorPrincipalId,
           subjectPrincipalId: input.principalId,
-          grantId,
+          grantId: resultGrantId,
           metadata: {
             roleKey: input.roleKey,
+            additionalPermissions: input.permissions ?? [],
             expiresAt: input.expiresAt,
           },
         });
@@ -1338,7 +1384,7 @@ export class IdentityAdministrationRepository {
     }
     const created = await this.database.query<RoleGrantRow>(
       "SELECT * FROM role_grants WHERE id = $1",
-      [grantId],
+      [resultGrantId],
     );
     return grantFromRow(created.rows[0]!);
   }
@@ -1421,7 +1467,9 @@ export class IdentityAdministrationRepository {
     input: RevokeGrantInput,
   ): Promise<RoleGrant> {
     await this.expirePlatformGrants();
+    const now = this.now();
     await this.database.transaction(async (client) => {
+      await lockPlatformAdminMutations(client);
       const result = await client.query<RoleGrantRow>(
         `SELECT * FROM role_grants
          WHERE id = $1 AND scope_type = 'platform' AND scope_id = 'platform'
@@ -1450,25 +1498,17 @@ export class IdentityAdministrationRepository {
           409,
         );
       }
-      if (grant.role_key === "ADMIN") {
-        const otherAdmins = await client.query<{ count: number }>(
-          `SELECT COUNT(*)::int AS count
-           FROM role_grants AS grant_row
-           JOIN principals AS principal
-             ON principal.id = grant_row.principal_id
-           LEFT JOIN accounts AS account
-             ON account.principal_id = principal.id
-           WHERE grant_row.id <> $1
-             AND grant_row.scope_type = 'platform'
-             AND grant_row.scope_id = 'platform'
-             AND grant_row.role_key = 'ADMIN'
-             AND grant_row.status = 'active'
-             AND (grant_row.expires_at IS NULL OR grant_row.expires_at > $2)
-             AND principal.status = 'active'
-             AND (principal.kind = 'ai' OR account.status = 'active')`,
-          [grantId, this.now()],
+      if (
+        grant.role_key === "ADMIN" &&
+        (await isUsablePlatformAdmin(client, grant.principal_id, now, grant.id))
+      ) {
+        const otherAdmins = await countOtherUsablePlatformAdmins(
+          client,
+          grant.principal_id,
+          now,
+          grant.id,
         );
-        if (numberValue(otherAdmins.rows[0]?.count ?? 0) === 0) {
+        if (otherAdmins === 0) {
           throw new IdentityAdministrationRepositoryError(
             "last_platform_admin",
             "The last active platform administrator Grant cannot be revoked",
@@ -1476,7 +1516,6 @@ export class IdentityAdministrationRepository {
           );
         }
       }
-      const now = this.now();
       await client.query(
         `UPDATE role_grants
          SET status = 'revoked', revoked_by_principal_id = $2,
@@ -1842,47 +1881,20 @@ export class IdentityAdministrationRepository {
     return workspace;
   }
 
-  private async hasWorkspaceAdminGrant(
-    client: PoolClient,
-    workspaceId: string,
-    principalId: string,
-  ): Promise<boolean> {
-    const result = await client.query(
-      `SELECT 1
-       FROM role_grants
-       WHERE principal_id = $1
-         AND scope_type = 'workspace'
-         AND scope_id = $2
-         AND role_key = 'ADMIN'
-         AND status = 'active'
-         AND (expires_at IS NULL OR expires_at > $3)
-       LIMIT 1`,
-      [principalId, workspaceId, this.now()],
-    );
-    return (result.rowCount ?? 0) > 0;
-  }
-
   private async assertNotLastWorkspaceAdmin(
     client: PoolClient,
     workspaceId: string,
     principalId: string,
+    grantId?: string,
   ): Promise<void> {
-    const others = await client.query<{ count: number }>(
-      `SELECT COUNT(*)::int AS count
-       FROM workspace_members AS member
-       JOIN role_grants AS grant_row
-         ON grant_row.principal_id = member.principal_id
-        AND grant_row.scope_type = 'workspace'
-        AND grant_row.scope_id = member.workspace_id
-       WHERE member.workspace_id = $1
-         AND member.principal_id <> $2
-         AND member.status = 'active'
-         AND grant_row.role_key = 'ADMIN'
-         AND grant_row.status = 'active'
-         AND (grant_row.expires_at IS NULL OR grant_row.expires_at > $3)`,
-      [workspaceId, principalId, this.now()],
+    const others = await countOtherUsableWorkspaceAdmins(
+      client,
+      workspaceId,
+      principalId,
+      this.now(),
+      grantId,
     );
-    if (numberValue(others.rows[0]?.count ?? 0) === 0) {
+    if (others === 0) {
       throw new IdentityAdministrationRepositoryError(
         "last_workspace_admin",
         "The last active Workspace administrator cannot be removed",
@@ -1898,6 +1910,9 @@ export class IdentityAdministrationRepository {
     input: UpdateWorkspaceMemberStatusInput,
   ): Promise<WorkspaceDetail> {
     await this.database.transaction(async (client) => {
+      if (input.status === "inactive") {
+        await lockWorkspaceAdminMutations(client, workspaceId);
+      }
       const result = await client.query<WorkspaceMemberRow>(
         `SELECT wm.id, wm.workspace_id, wm.principal_id, wm.status, wm.version,
                 wm.created_at, wm.updated_at,
@@ -1925,12 +1940,20 @@ export class IdentityAdministrationRepository {
         );
       }
       if (input.status === member.status) return;
+      if (input.status === "active" && member.principal_status !== "active") {
+        throw new IdentityAdministrationRepositoryError(
+          "principal_archived",
+          "An archived or suspended Principal cannot reactivate Workspace membership",
+          409,
+        );
+      }
       if (
         input.status === "inactive" &&
-        (await this.hasWorkspaceAdminGrant(
+        (await isUsableWorkspaceAdmin(
           client,
           workspaceId,
           member.principal_id,
+          this.now(),
         ))
       ) {
         await this.assertNotLastWorkspaceAdmin(
@@ -2032,10 +2055,13 @@ export class IdentityAdministrationRepository {
         }
         const membership = await client.query<{
           status: "active" | "inactive";
+          principal_status: "active" | "suspended" | "archived";
         }>(
-          `SELECT status FROM workspace_members
-           WHERE workspace_id = $1 AND principal_id = $2
-           FOR UPDATE`,
+          `SELECT member.status, principal.status AS principal_status
+           FROM workspace_members AS member
+           JOIN principals AS principal ON principal.id = member.principal_id
+           WHERE member.workspace_id = $1 AND member.principal_id = $2
+           FOR UPDATE OF member, principal`,
           [workspaceId, input.principalId],
         );
         if (membership.rows[0] === undefined) {
@@ -2049,6 +2075,13 @@ export class IdentityAdministrationRepository {
           throw new IdentityAdministrationRepositoryError(
             "membership_not_found",
             "An inactive Workspace member cannot receive a Grant",
+            409,
+          );
+        }
+        if (membership.rows[0].principal_status !== "active") {
+          throw new IdentityAdministrationRepositoryError(
+            "principal_archived",
+            "An archived or suspended Principal cannot receive a new Workspace Grant",
             409,
           );
         }
@@ -2208,7 +2241,9 @@ export class IdentityAdministrationRepository {
     grantId: string,
     input: RevokeGrantInput,
   ): Promise<RoleGrant> {
+    const now = this.now();
     await this.database.transaction(async (client) => {
+      await lockWorkspaceAdminMutations(client, workspaceId);
       const result = await client.query<RoleGrantRow>(
         `SELECT * FROM role_grants
          WHERE id = $1 AND scope_type = 'workspace' AND scope_id = $2
@@ -2237,14 +2272,23 @@ export class IdentityAdministrationRepository {
           409,
         );
       }
-      if (grant.role_key === "ADMIN") {
+      if (
+        grant.role_key === "ADMIN" &&
+        (await isUsableWorkspaceAdmin(
+          client,
+          workspaceId,
+          grant.principal_id,
+          now,
+          grant.id,
+        ))
+      ) {
         await this.assertNotLastWorkspaceAdmin(
           client,
           workspaceId,
           grant.principal_id,
+          grant.id,
         );
       }
-      const now = this.now();
       await client.query(
         `UPDATE role_grants
          SET status = 'revoked', revoked_by_principal_id = $2,

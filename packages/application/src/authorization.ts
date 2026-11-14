@@ -54,7 +54,27 @@ const SELF_WRITE_ROUTES = new Set([
   "POST /api/v1/workbench/brief/refresh",
   "POST /api/v1/workbench/brief/:briefId/read",
   "PATCH /api/v1/workbench/brief/settings",
+  "POST /api/v1/workbenches",
+  "PATCH /api/v1/workbenches/:workbenchId",
+  "POST /api/v1/workbenches/:workbenchId/layouts",
+  "PUT /api/v1/workbenches/:workbenchId/layouts/:layoutId",
+  "POST /api/v1/workbenches/:workbenchId/layouts/:layoutId/default",
+  "POST /api/v1/market/assets",
+  "POST /api/v1/market/assets/:assetId/versions",
+  "POST /api/v1/market/assets/:assetId/versions/:version/status",
+  "POST /api/v1/market/assets/:assetId/status",
+  "POST /api/v1/market/entitlements",
+  "DELETE /api/v1/market/entitlements/:entitlementId",
+  "POST /api/v1/market/installations",
+  "POST /api/v1/market/installations/rollback",
+  "DELETE /api/v1/market/installations/:assetId",
+  "POST /api/v1/market/templates/:templateId/copy",
+  "DELETE /api/v1/market/templates/:templateId/copy",
   "POST /api/v1/workflows/validate",
+  "POST /api/v1/skills",
+  "POST /api/v1/skills/:skillId/versions",
+  "POST /api/v1/skill-installations",
+  "DELETE /api/v1/skill-installations/:installationId",
 ]);
 
 const PLATFORM_ADMIN_WRITE_PREFIXES = [
@@ -207,6 +227,17 @@ function resourceRequirement(
       resourceType: "task",
       resourceId: parameter(params, "id"),
       permission: "approve",
+    };
+  }
+  if (
+    method === "GET" &&
+    (route === "/api/v1/tasks/:id/acceptance-evidence" ||
+      route === "/api/v1/tasks/:id/execution-health")
+  ) {
+    return {
+      resourceType: "task",
+      resourceId: parameter(params, "id"),
+      permission: "read",
     };
   }
   if (route.startsWith("/api/v1/tasks/:id/")) {
@@ -568,6 +599,57 @@ export class AuthorizationService {
     const action = actionFor(method, input.route);
     if (input.route === "/api/v1/auth/login") {
       return { required: false };
+    }
+    if (
+      input.route.startsWith(
+        "/api/v1/workspaces/:workspaceId/shared-space",
+      ) ||
+      input.route.startsWith("/api/v1/shared-space/")
+    ) {
+      // Shared Space applies path-level policy and Agent Ticket/Gate checks in
+      // its application service, where the generic route matcher cannot.
+      return { required: false };
+    }
+    if (
+      input.route.startsWith("/api/v1/data-fabric/") ||
+      input.route.startsWith("/api/v1/data-agent/")
+    ) {
+      // Data Fabric intersects Project, Workspace, Runtime Profile, dataset,
+      // row and column policy in its application service.
+      return { required: false };
+    }
+    if (
+      (method === "GET" &&
+        input.route === "/api/v1/workflows/:workflowId") ||
+      (method === "PATCH" &&
+        input.route === "/api/v1/workflows/:workflowId") ||
+      (method === "POST" &&
+        input.route === "/api/v1/workflows/:workflowId/start") ||
+      (method === "POST" &&
+        input.route ===
+          "/api/v1/workflows/:workflowId/instances/preflight")
+    ) {
+      // The target project can differ from the template owner project. The
+      // workflow application re-checks target project authorization.
+      return { required: false };
+    }
+    if (
+      method === "POST" &&
+      (input.route === "/api/v1/workflows/:workflowId/publish" ||
+        input.route === "/api/v1/workflows/:workflowId/unpublish")
+    ) {
+      const decision = await this.authorizePlatform({
+        principal: input.principal,
+        permission: "manage_workflow_templates",
+        action,
+        requestId: input.requestId,
+      });
+      return {
+        required: true,
+        allowed: decision.allowed,
+        decision,
+        ...(decision.reason === undefined ? {} : { reason: decision.reason }),
+      };
     }
 
     if (method === "GET" || method === "HEAD") {

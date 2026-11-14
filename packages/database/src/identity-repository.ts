@@ -16,6 +16,11 @@ import type {
 } from "@pluginmax/contracts";
 import { evaluateHumanSessionAccess } from "@pluginmax/contracts";
 import type { Database } from "./database.js";
+import {
+  countOtherUsablePlatformAdmins,
+  isUsablePlatformAdmin,
+  lockPlatformAdminMutations,
+} from "./identity-admin-guards.js";
 
 const PASSWORD_SCHEME = "scrypt";
 const PASSWORD_COST = 16_384;
@@ -562,6 +567,9 @@ export class IdentityRepository {
   ): Promise<AccountStatusResult> {
     const now = this.now();
     return this.database.transaction(async (client) => {
+      if (input.status === "disabled") {
+        await lockPlatformAdminMutations(client);
+      }
       const account = await client.query<AccountRow>(
         `SELECT
            a.id AS account_id,
@@ -611,37 +619,13 @@ export class IdentityRepository {
         );
       }
       if (input.status === "disabled") {
-        const ownAdmin = await client.query(
-          `SELECT 1
-           FROM role_grants
-           WHERE principal_id = $1
-             AND scope_type = 'platform'
-             AND scope_id = 'platform'
-             AND role_key = 'ADMIN'
-             AND status = 'active'
-             AND (expires_at IS NULL OR expires_at > $2)
-           LIMIT 1`,
-          [row.principal_id, now],
-        );
-        if ((ownAdmin.rowCount ?? 0) > 0) {
-          const otherAdmins = await client.query<{ count: number }>(
-            `SELECT COUNT(*)::int AS count
-             FROM role_grants AS grant_row
-             JOIN principals AS principal
-               ON principal.id = grant_row.principal_id
-             LEFT JOIN accounts AS account
-               ON account.principal_id = principal.id
-             WHERE grant_row.principal_id <> $1
-               AND grant_row.scope_type = 'platform'
-               AND grant_row.scope_id = 'platform'
-               AND grant_row.role_key = 'ADMIN'
-               AND grant_row.status = 'active'
-               AND (grant_row.expires_at IS NULL OR grant_row.expires_at > $2)
-               AND principal.status = 'active'
-               AND (principal.kind = 'ai' OR account.status = 'active')`,
-            [row.principal_id, now],
+        if (await isUsablePlatformAdmin(client, row.principal_id, now)) {
+          const otherAdmins = await countOtherUsablePlatformAdmins(
+            client,
+            row.principal_id,
+            now,
           );
-          if (Number(otherAdmins.rows[0]?.count ?? 0) === 0) {
+          if (otherAdmins === 0) {
             throw new IdentityRepositoryError(
               "last_platform_admin",
               "The last active platform administrator account cannot be disabled",

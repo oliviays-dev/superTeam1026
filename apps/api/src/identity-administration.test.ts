@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { Database, IdentityRepository, migrate } from "@pluginmax/database";
+import {
+  Database,
+  IdentityRepository,
+  LATEST_MIGRATION_VERSION,
+  migrate,
+} from "@pluginmax/database";
 import { buildApi } from "./app.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -45,7 +50,7 @@ integration("identity administration API", () => {
       fileStoreRoot,
       logger: false,
       authMode: "bearer",
-      expectedMigrationVersion: 32,
+      expectedMigrationVersion: LATEST_MIGRATION_VERSION,
     });
     app = built.app;
     await app.ready();
@@ -188,7 +193,8 @@ integration("identity administration API", () => {
          id, kind, display_name, status, status_authority, source,
          version, created_at, updated_at
        ) VALUES ($1, 'human', 'Existing Member', 'active', 'account',
-                 'account', 1, NOW(), NOW())`,
+                 'account', 1, NOW() - INTERVAL '1 second',
+                 NOW() - INTERVAL '1 second')`,
       [existingPrincipalId],
     );
     await database.query(
@@ -215,7 +221,7 @@ integration("identity administration API", () => {
         credential: { mode: "password", password: "existing-password" },
       },
     });
-    expect(existingAccount.statusCode).toBe(201);
+    expect(existingAccount.statusCode, existingAccount.body).toBe(201);
     const memberGrants = await database.query<{ count: number }>(
       `SELECT COUNT(*)::int AS count
        FROM role_grants
@@ -407,26 +413,37 @@ integration("identity administration API", () => {
       headers: auth(adminToken),
       payload: { principalId, roleKey: "ADMIN", expiresAt: null },
     });
-    expect(duplicate.statusCode).toBe(409);
-    expect(duplicate.json().code).toBe("grant_exists");
+    expect(duplicate.statusCode).toBe(201);
+    const extendedGrant = duplicate.json();
+    expect(extendedGrant).toMatchObject({
+      id: grantBody.id,
+      principalId,
+      roleKey: "ADMIN",
+      status: "active",
+      expiresAt: null,
+      version: 2,
+    });
 
     const renewedExpiry = new Date(Date.now() + 7_200_000).toISOString();
     const renewed = await app.inject({
       method: "PATCH",
       url: `/api/v1/admin/platform-grants/${grantBody.id}/expiry`,
       headers: auth(adminToken),
-      payload: { expiresAt: renewedExpiry, expectedVersion: 1 },
+      payload: {
+        expiresAt: renewedExpiry,
+        expectedVersion: extendedGrant.version,
+      },
     });
     expect(renewed.statusCode).toBe(200);
     expect(renewed.json()).toMatchObject({
       expiresAt: renewedExpiry,
-      version: 2,
+      version: extendedGrant.version + 1,
     });
     const staleRenewal = await app.inject({
       method: "PATCH",
       url: `/api/v1/admin/platform-grants/${grantBody.id}/expiry`,
       headers: auth(adminToken),
-      payload: { expiresAt: null, expectedVersion: 1 },
+      payload: { expiresAt: null, expectedVersion: extendedGrant.version },
     });
     expect(staleRenewal.statusCode).toBe(409);
     expect(staleRenewal.json().code).toBe("version_conflict");
@@ -435,15 +452,24 @@ integration("identity administration API", () => {
       method: "POST",
       url: `/api/v1/admin/platform-grants/${grantBody.id}/revoke`,
       headers: auth(adminToken),
-      payload: { expectedVersion: 2, reason: "test_cleanup" },
+      payload: {
+        expectedVersion: extendedGrant.version + 1,
+        reason: "test_cleanup",
+      },
     });
     expect(revoked.statusCode).toBe(200);
-    expect(revoked.json()).toMatchObject({ status: "revoked", version: 3 });
+    expect(revoked.json()).toMatchObject({
+      status: "revoked",
+      version: extendedGrant.version + 2,
+    });
     const repeated = await app.inject({
       method: "POST",
       url: `/api/v1/admin/platform-grants/${grantBody.id}/revoke`,
       headers: auth(adminToken),
-      payload: { expectedVersion: 3, reason: "repeat" },
+      payload: {
+        expectedVersion: extendedGrant.version + 2,
+        reason: "repeat",
+      },
     });
     expect(repeated.statusCode).toBe(409);
     expect(repeated.json().code).toBe("grant_not_active");
@@ -663,9 +689,12 @@ integration("identity administration API", () => {
         }),
       ),
     );
-    expect(grants.map((response) => response.statusCode).sort()).toEqual([
-      201, 409,
-    ]);
+    expect(grants.map((response) => response.statusCode)).toEqual([201, 201]);
+    const grantBodies = grants.map(
+      (response) => response.json() as { readonly id: string; readonly version: number },
+    );
+    expect(new Set(grantBodies.map((grant) => grant.id)).size).toBe(1);
+    expect(grantBodies.map((grant) => grant.version).sort()).toEqual([1, 2]);
   });
 
   it("fails closed for non-admin account administration", async () => {
