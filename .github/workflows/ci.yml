@@ -70,6 +70,10 @@ jobs:
 
   database:
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT: pluginmax-ci-database-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_FILE: docker-compose.batch8.yml
+      BATCH8_POSTGRES_VOLUME: pluginmax-ci-database-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -87,12 +91,12 @@ jobs:
         run: ./scripts/maintenance-effects-postgres-smoke.sh
       - name: Stop compatibility PostgreSQL
         if: always()
-        run: ./scripts/db-compose.sh -p pluginmax-batch8 -f docker-compose.batch8.yml down -v
+        run: ./scripts/db-compose.sh -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" down -v
       - name: Start isolated PostgreSQL
         run: |
-          ./scripts/db-compose.sh -p pluginmax-ci -f docker-compose.batch8.yml up -d postgres
+          ./scripts/db-compose.sh -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" up -d postgres
           for attempt in {1..60}; do
-            if ./scripts/db-compose.sh -p pluginmax-ci -f docker-compose.batch8.yml \
+            if ./scripts/db-compose.sh -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" \
               exec -T postgres pg_isready -U pluginmax -d pluginmax; then
               break
             fi
@@ -109,12 +113,17 @@ jobs:
       - name: PostgreSQL upgrade smoke
         env:
           DATABASE_URL: postgres://pluginmax:pluginmax@127.0.0.1:54389/pluginmax
-          COMPOSE_PROJECT: pluginmax-ci
-          COMPOSE_FILE: docker-compose.batch8.yml
         run: ./scripts/runtime-postgres-smoke.sh
+      - name: Stop isolated PostgreSQL
+        if: always()
+        run: ./scripts/db-compose.sh -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" down -v
 
   runtime-browser:
     runs-on: ubuntu-latest
+    env:
+      COMPOSE_PROJECT: pluginmax-ci-browser-${{ github.run_id }}-${{ github.run_attempt }}
+      COMPOSE_FILE: docker-compose.batch8.yml
+      BATCH8_POSTGRES_VOLUME: pluginmax-ci-browser-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -132,6 +141,9 @@ jobs:
         env:
           PLAYWRIGHT_USE_SYSTEM_CHROME: "true"
         run: pnpm test:ci
+      - name: Stop runtime PostgreSQL
+        if: always()
+        run: ./scripts/db-compose.sh -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" down -v
       - name: Upload runtime logs
         if: failure()
         uses: actions/upload-artifact@v4

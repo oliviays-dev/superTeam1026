@@ -17,4 +17,4 @@ services:
 
 volumes:
   pluginmax-batch8-postgres-data:
-    name: pluginmax-batch8-postgres-data
+    name: ${BATCH8_POSTGRES_VOLUME:-pluginmax-batch8-postgres-data}
