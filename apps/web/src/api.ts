@@ -25,12 +25,16 @@ import type {
   CreateMeetingActionItemInput,
   CreateMemoryClaimInput,
   CreateMemoryTopicInput,
+  CreateMarketAssetInput,
   CreateProjectMemberInput,
   CreateProjectRoleInput,
   CreateSupplyExceptionInput,
   CreateSupplierRiskInput,
   CreateTaskMessageInput,
+  CreateDelegationConfirmationInput,
+  CreateDelegationInput,
   CompleteWorkflowNodeInput,
+  DecideDelegationConfirmationInput,
   DecideWorkflowApprovalInput,
   ExecutionGateRecord,
   ArchiveTaskAttachmentInput,
@@ -49,6 +53,16 @@ import type {
   DirectChatThread,
   DirectChatThreadListItem,
   DirectChatTurn,
+  Delegation,
+  DelegationActionCheckInput,
+  DelegationActionCheckResult,
+  DelegationConfirmationRequest,
+  DelegationEvent,
+  DelegationNotification,
+  DelegationOverview,
+  DelegationPermissionPreview,
+  DelegationReport,
+  DelegationRun,
   CredentialActivationResult,
   ExternalRuntime,
   ExternalRuntimeCapabilitySnapshot,
@@ -102,6 +116,10 @@ import type {
   SceneContextSnapshot,
   ProjectReportDetail,
   ProjectReportGenerationResult,
+  GenerateProjectReportInput,
+  ProjectAiPm,
+  ProjectAiPmProvisionResult,
+  ProjectReportKind,
   ProjectReportSummary,
   PublishMemoryTruthInput,
   ReadinessResponse,
@@ -138,6 +156,7 @@ import type {
   UpdateTemplateRoleInput,
   UpdateWorkflowTemplateInput,
   UpdateTaskInput,
+  UpdateDelegationInput,
   UpdateWorkbenchBriefSettingsInput,
   UpdateWorkspaceInput,
   UpdateWorkspaceMemberStatusInput,
@@ -147,6 +166,28 @@ import type {
   WorkbenchBriefSettings,
   WorkbenchDashboard,
   WorkbenchFollow,
+  WorkbenchBootstrap,
+  WorkbenchDetail,
+  WorkbenchLayoutVersion,
+  WorkbenchPanelData,
+  MarketAsset,
+  MarketAssetDetail,
+  MarketAssetKind,
+  MarketEntitlement,
+  MarketInstallResult,
+  MarketInstallation,
+  MarketTemplate,
+  MarketTemplateCopy,
+  MarketTemplateCopyResult,
+  GrantMarketEntitlementInput,
+  PublishMarketAssetVersionInput,
+  SetMarketAssetStatusInput,
+  SetMarketAssetVersionStatusInput,
+  CreateWorkbenchInput,
+  CreateWorkbenchLayoutInput,
+  SaveWorkbenchLayoutInput,
+  SetDefaultWorkbenchLayoutInput,
+  InstallMarketAssetInput,
   WorkflowDefinition,
   WorkflowTemplate,
   TemplateRole,
@@ -184,6 +225,31 @@ import type {
   TeammateEvent,
   TeammateWeeklyReport,
   TransferTeammateInput,
+  AcquireSharedSpaceLockInput,
+  CreateSharedSpaceClaimInput,
+  CreateSharedSpaceDirectoryInput,
+  CreateSharedSpaceFileInput,
+  CreateSharedSpacePolicyInput,
+  CreateSharedSpaceWriteRequestInput,
+  DecideSharedSpaceWriteRequestInput,
+  GenerateSharedSpaceDigestInput,
+  SharedSpaceAuditPage,
+  SharedSpaceAuditQuery,
+  SharedSpaceClaim,
+  SharedSpaceDigest,
+  SharedSpaceEntry,
+  SharedSpaceFileContent,
+  SharedSpaceFileList,
+  SharedSpaceLock,
+  SharedSpacePermissionPreview,
+  SharedSpacePolicy,
+  SharedSpaceRoot,
+  SharedSpaceVersion,
+  SharedSpaceWorkspace,
+  SharedSpaceWriteRequest,
+  UpdateSharedSpaceFileInput,
+  UpdateSharedSpacePolicyInput,
+  UpdateSharedSpaceRootInput,
 } from "@pluginmax/contracts";
 
 const API_BASE = "/api/v1";
@@ -498,6 +564,336 @@ export function revokeWorkspaceGrant(
     {
       method: "POST",
       body: JSON.stringify({ expectedVersion, reason }),
+    },
+  );
+}
+
+export function getSharedSpaceWorkspace(
+  workspaceId: string,
+): Promise<SharedSpaceWorkspace> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space`,
+  );
+}
+
+export function updateSharedSpaceRoot(
+  workspaceId: string,
+  input: UpdateSharedSpaceRootInput,
+): Promise<SharedSpaceRoot> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function listSharedSpacePolicies(
+  workspaceId: string,
+): Promise<SharedSpacePolicy[]> {
+  return (
+    await request<{ items: SharedSpacePolicy[] }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/policies`,
+    )
+  ).items;
+}
+
+export function createSharedSpacePolicy(
+  workspaceId: string,
+  input: CreateSharedSpacePolicyInput,
+): Promise<SharedSpacePolicy> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/policies`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function updateSharedSpacePolicy(
+  workspaceId: string,
+  policyId: string,
+  input: UpdateSharedSpacePolicyInput,
+): Promise<SharedSpacePolicy> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/policies/${encodeURIComponent(policyId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function revokeSharedSpacePolicy(
+  workspaceId: string,
+  policyId: string,
+  expectedVersion: number,
+): Promise<SharedSpacePolicy> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/policies/${encodeURIComponent(policyId)}`,
+    {
+      method: "DELETE",
+      body: JSON.stringify({ expectedVersion }),
+    },
+  );
+}
+
+export function previewSharedSpacePolicy(input: {
+  readonly workspaceId: string;
+  readonly principalId: string;
+  readonly path: string;
+}): Promise<SharedSpacePermissionPreview> {
+  return request(
+    `/workspaces/${encodeURIComponent(input.workspaceId)}/shared-space/policy-preview`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        principalId: input.principalId,
+        path: input.path,
+      }),
+    },
+  );
+}
+
+export function listSharedSpaceFiles(input: {
+  readonly workspaceId: string;
+  readonly path: string;
+}): Promise<SharedSpaceFileList> {
+  const params = new URLSearchParams({ path: input.path });
+  return request(
+    `/workspaces/${encodeURIComponent(input.workspaceId)}/shared-space/files?${params.toString()}`,
+  );
+}
+
+export function createSharedSpaceDirectory(
+  workspaceId: string,
+  input: CreateSharedSpaceDirectoryInput,
+): Promise<SharedSpaceEntry> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/directories`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function uploadSharedSpaceFile(
+  workspaceId: string,
+  input: CreateSharedSpaceFileInput,
+): Promise<SharedSpaceEntry> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/files`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function updateSharedSpaceFile(
+  workspaceId: string,
+  entryId: string,
+  input: UpdateSharedSpaceFileInput,
+): Promise<SharedSpaceEntry> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/files/${encodeURIComponent(entryId)}/content`,
+    {
+      method: "PUT",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function archiveSharedSpaceFile(
+  workspaceId: string,
+  entryId: string,
+  expectedVersion: number,
+): Promise<SharedSpaceEntry> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/files/${encodeURIComponent(entryId)}/archive`,
+    {
+      method: "POST",
+      body: JSON.stringify({ expectedVersion }),
+    },
+  );
+}
+
+export function readSharedSpaceFile(
+  workspaceId: string,
+  entryId: string,
+): Promise<SharedSpaceFileContent> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/files/${encodeURIComponent(entryId)}/content`,
+  );
+}
+
+export function listSharedSpaceVersions(
+  workspaceId: string,
+  entryId: string,
+): Promise<SharedSpaceVersion[]> {
+  return request<{ items: SharedSpaceVersion[] }>(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/files/${encodeURIComponent(entryId)}/versions`,
+  ).then((result) => result.items);
+}
+
+export async function downloadSharedSpaceFile(
+  workspaceId: string,
+  entry: Pick<SharedSpaceEntry, "id" | "name">,
+): Promise<void> {
+  const headers = new Headers();
+  const token = authToken();
+  if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
+  const response = await fetch(
+    `${API_BASE}/workspaces/${encodeURIComponent(workspaceId)}/shared-space/files/${encodeURIComponent(entry.id)}/download`,
+    { headers },
+  );
+  if (!response.ok) {
+    if (response.status === 401) clearAuthToken();
+    throw new ApiRequestError(
+      "Shared Space file download failed",
+      "request_failed",
+      response.status,
+    );
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = entry.name;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function listSharedSpaceLocks(
+  workspaceId: string,
+): Promise<SharedSpaceLock[]> {
+  return (
+    await request<{ items: SharedSpaceLock[] }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/locks`,
+    )
+  ).items;
+}
+
+export function acquireSharedSpaceLock(
+  workspaceId: string,
+  input: AcquireSharedSpaceLockInput,
+): Promise<SharedSpaceLock> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/locks`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function releaseSharedSpaceLock(
+  workspaceId: string,
+  lockId: string,
+): Promise<{ released: boolean }> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/locks/${encodeURIComponent(lockId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function listSharedSpaceClaims(
+  workspaceId: string,
+): Promise<SharedSpaceClaim[]> {
+  return (
+    await request<{ items: SharedSpaceClaim[] }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/claims`,
+    )
+  ).items;
+}
+
+export function createSharedSpaceClaim(
+  workspaceId: string,
+  input: CreateSharedSpaceClaimInput,
+): Promise<SharedSpaceClaim> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/claims`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function listSharedSpaceWriteRequests(
+  workspaceId: string,
+  scope?: "workspace" | "global",
+): Promise<SharedSpaceWriteRequest[]> {
+  const params = new URLSearchParams();
+  if (scope !== undefined) params.set("scope", scope);
+  return (
+    await request<{ items: SharedSpaceWriteRequest[] }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/write-requests?${params.toString()}`,
+    )
+  ).items;
+}
+
+export function createGlobalWriteRequest(
+  workspaceId: string,
+  input: CreateSharedSpaceWriteRequestInput,
+): Promise<{ request: SharedSpaceWriteRequest }> {
+  return request("/shared-space/global-write-requests", {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({ ...input, workspaceId }),
+  });
+}
+
+export function decideSharedSpaceWriteRequest(
+  workspaceId: string,
+  requestId: string,
+  input: DecideSharedSpaceWriteRequestInput,
+): Promise<SharedSpaceWriteRequest> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/write-requests/${encodeURIComponent(requestId)}/decision`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function listSharedSpaceAudit(
+  workspaceId: string,
+  query: SharedSpaceAuditQuery,
+): Promise<SharedSpaceAuditPage> {
+  const params = new URLSearchParams();
+  if (query.action !== undefined) params.set("action", query.action);
+  if (query.decision !== undefined) params.set("decision", query.decision);
+  if (query.cursor !== undefined) params.set("cursor", query.cursor);
+  params.set("limit", String(query.limit));
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/audit?${params.toString()}`,
+  );
+}
+
+export async function listSharedSpaceDigests(
+  workspaceId: string,
+): Promise<SharedSpaceDigest[]> {
+  return (
+    await request<{ items: SharedSpaceDigest[] }>(
+      `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/digests`,
+    )
+  ).items;
+}
+
+export function generateSharedSpaceDigest(
+  workspaceId: string,
+  input: GenerateSharedSpaceDigestInput,
+): Promise<SharedSpaceDigest> {
+  return request(
+    `/workspaces/${encodeURIComponent(workspaceId)}/shared-space/digests`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
     },
   );
 }
@@ -1593,6 +1989,214 @@ export function getWorkbenchDashboard(): Promise<WorkbenchDashboard> {
   return request("/workbench/dashboard");
 }
 
+export function getWorkbenchBootstrap(): Promise<WorkbenchBootstrap> {
+  return request("/workbenches");
+}
+
+export function getWorkbenchDetail(
+  workbenchId: string,
+): Promise<WorkbenchDetail> {
+  return request(`/workbenches/${workbenchId}`);
+}
+
+export async function listWorkbenchLayoutVersions(
+  workbenchId: string,
+  layoutId: string,
+): Promise<WorkbenchLayoutVersion[]> {
+  return (
+    await request<{ items: WorkbenchLayoutVersion[] }>(
+      `/workbenches/${workbenchId}/layouts/${layoutId}/versions`,
+    )
+  ).items;
+}
+
+export function createWorkbench(
+  input: CreateWorkbenchInput,
+): Promise<WorkbenchDetail> {
+  return request("/workbenches", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function createWorkbenchLayout(
+  workbenchId: string,
+  input: CreateWorkbenchLayoutInput,
+): Promise<WorkbenchDetail> {
+  return request(`/workbenches/${workbenchId}/layouts`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function saveWorkbenchLayout(
+  workbenchId: string,
+  layoutId: string,
+  input: SaveWorkbenchLayoutInput,
+): Promise<WorkbenchDetail> {
+  return request(`/workbenches/${workbenchId}/layouts/${layoutId}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export function setDefaultWorkbenchLayout(
+  workbenchId: string,
+  layoutId: string,
+  input: SetDefaultWorkbenchLayoutInput,
+): Promise<WorkbenchDetail> {
+  return request(
+    `/workbenches/${workbenchId}/layouts/${layoutId}/default`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function getWorkbenchPanelData(
+  workbenchId: string,
+  panelInstanceId: string,
+  projectId?: string,
+): Promise<WorkbenchPanelData> {
+  const params = new URLSearchParams();
+  if (projectId !== undefined) params.set("projectId", projectId);
+  const suffix = params.size === 0 ? "" : `?${params.toString()}`;
+  return request(
+    `/workbenches/${workbenchId}/panels/${panelInstanceId}/data${suffix}`,
+  );
+}
+
+export async function listMarketAssets(
+  kind?: MarketAssetKind,
+): Promise<MarketAsset[]> {
+  const suffix =
+    kind === undefined ? "" : `?kind=${encodeURIComponent(kind)}`;
+  return (
+    await request<{ items: MarketAsset[] }>(`/market/assets${suffix}`)
+  ).items;
+}
+
+export function getMarketAsset(assetId: string): Promise<MarketAssetDetail> {
+  return request(`/market/assets/${assetId}`);
+}
+
+export function createMarketAsset(
+  input: CreateMarketAssetInput,
+): Promise<MarketAssetDetail> {
+  return request("/market/assets", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function publishMarketAssetVersion(
+  assetId: string,
+  input: PublishMarketAssetVersionInput,
+): Promise<MarketAssetDetail["versions"][number]> {
+  return request(`/market/assets/${assetId}/versions`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function setMarketAssetStatus(
+  assetId: string,
+  input: SetMarketAssetStatusInput,
+): Promise<MarketAsset> {
+  return request(`/market/assets/${assetId}/status`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function setMarketAssetVersionStatus(
+  assetId: string,
+  version: number,
+  input: SetMarketAssetVersionStatusInput,
+): Promise<MarketAssetDetail["versions"][number]> {
+  return request(`/market/assets/${assetId}/versions/${version}/status`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function grantMarketEntitlement(
+  input: GrantMarketEntitlementInput,
+): Promise<MarketEntitlement> {
+  return request("/market/entitlements", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function revokeMarketEntitlement(
+  entitlementId: string,
+): Promise<MarketEntitlement> {
+  return request(`/market/entitlements/${entitlementId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listMarketEntitlements(
+  all = false,
+): Promise<MarketEntitlement[]> {
+  return (
+    await request<{ items: MarketEntitlement[] }>(
+      `/market/entitlements${all ? "?all=1" : ""}`,
+    )
+  ).items;
+}
+
+export async function listMarketInstallations(): Promise<MarketInstallation[]> {
+  return (
+    await request<{ items: MarketInstallation[] }>("/market/installations")
+  ).items;
+}
+
+export function installMarketAsset(
+  input: InstallMarketAssetInput,
+): Promise<MarketInstallResult> {
+  return request("/market/installations", {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function uninstallMarketAsset(
+  assetId: string,
+): Promise<MarketInstallation> {
+  return request(`/market/installations/${assetId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listMarketTemplates(): Promise<MarketTemplate[]> {
+  return (
+    await request<{ items: MarketTemplate[] }>("/market/templates")
+  ).items;
+}
+
+export function copyMarketTemplate(
+  templateId: string,
+  input: { readonly version: number; readonly name: string },
+): Promise<MarketTemplateCopyResult> {
+  return request(`/market/templates/${templateId}/copy`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+}
+
+export function uninstallMarketTemplateCopy(
+  templateId: string,
+): Promise<MarketTemplateCopy> {
+  return request(`/market/templates/${templateId}/copy`, {
+    method: "DELETE",
+  });
+}
+
 export function refreshWorkbenchBrief(
   briefDate?: string,
 ): Promise<WorkbenchBriefGenerationResult> {
@@ -1646,13 +2250,21 @@ export function setWorkbenchFollow(input: {
 
 export async function listProjectReports(
   projectId: string,
-  query: { from?: string; to?: string; query?: string } = {},
+  query: {
+    from?: string;
+    to?: string;
+    query?: string;
+    reportKind?: ProjectReportKind;
+  } = {},
 ): Promise<ProjectReportSummary[]> {
   const params = new URLSearchParams();
   if (query.from !== undefined) params.set("from", query.from);
   if (query.to !== undefined) params.set("to", query.to);
   if (query.query !== undefined && query.query.trim() !== "") {
     params.set("query", query.query.trim());
+  }
+  if (query.reportKind !== undefined) {
+    params.set("reportKind", query.reportKind);
   }
   const suffix = params.size === 0 ? "" : `?${params.toString()}`;
   return (
@@ -1664,12 +2276,26 @@ export async function listProjectReports(
 
 export function generateProjectReport(
   projectId: string,
-  reportDate?: string,
+  input: GenerateProjectReportInput = {},
 ): Promise<ProjectReportGenerationResult> {
   return request(`/projects/${projectId}/reports/generate`, {
     method: "POST",
     headers: { "idempotency-key": crypto.randomUUID() },
-    body: JSON.stringify(reportDate === undefined ? {} : { reportDate }),
+    body: JSON.stringify(input),
+  });
+}
+
+export function getProjectAiPm(projectId: string): Promise<ProjectAiPm> {
+  return request(`/projects/${projectId}/ai-pm`);
+}
+
+export function provisionProjectAiPm(
+  projectId: string,
+): Promise<ProjectAiPmProvisionResult> {
+  return request(`/projects/${projectId}/ai-pm`, {
+    method: "POST",
+    headers: { "idempotency-key": crypto.randomUUID() },
+    body: JSON.stringify({}),
   });
 }
 
@@ -2454,6 +3080,155 @@ export function restoreMeeting(
   return request(`/meetings/${meetingId}/restore`, {
     method: "POST",
     body: JSON.stringify({ expectedRevision }),
+  });
+}
+
+export function listDelegations(): Promise<DelegationOverview> {
+  return request("/delegations");
+}
+
+export function getDelegation(id: string): Promise<Delegation> {
+  return request(`/delegations/${id}`);
+}
+
+export function createDelegation(
+  input: CreateDelegationInput,
+): Promise<Delegation> {
+  return request("/delegations", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateDelegation(
+  id: string,
+  input: UpdateDelegationInput,
+): Promise<Delegation> {
+  return request(`/delegations/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
+export function transitionDelegation(
+  id: string,
+  action: "activate" | "pause" | "resume" | "complete" | "revoke",
+  expectedRevision: number,
+  reason: string,
+): Promise<Delegation> {
+  return request(`/delegations/${id}/${action}`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision, reason }),
+  });
+}
+
+export function extendDelegation(
+  id: string,
+  input: { expectedRevision: number; reason: string; expiresAt: string },
+): Promise<Delegation> {
+  return request(`/delegations/${id}/extend`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getDelegationPreview(
+  id: string,
+): Promise<DelegationPermissionPreview> {
+  return request(`/delegations/${id}/preview`);
+}
+
+export function checkDelegationAction(
+  id: string,
+  input: DelegationActionCheckInput,
+): Promise<DelegationActionCheckResult> {
+  return request(`/delegations/${id}/action-check`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function dispatchDelegation(
+  id: string,
+): Promise<{ runId: string; taskId: string; contextType: string }> {
+  return request(`/delegations/${id}/dispatch`, { method: "POST" });
+}
+
+export async function listDelegationEvents(
+  id: string,
+): Promise<DelegationEvent[]> {
+  const result = await request<{ items: DelegationEvent[] }>(
+    `/delegations/${id}/events`,
+  );
+  return result.items;
+}
+
+export async function listDelegationRuns(
+  id: string,
+): Promise<DelegationRun[]> {
+  const result = await request<{ items: DelegationRun[] }>(
+    `/delegations/${id}/runs`,
+  );
+  return result.items;
+}
+
+export async function listDelegationReports(
+  id: string,
+): Promise<DelegationReport[]> {
+  const result = await request<{ items: DelegationReport[] }>(
+    `/delegations/${id}/reports`,
+  );
+  return result.items;
+}
+
+export function generateDelegationReport(
+  id: string,
+): Promise<DelegationReport> {
+  return request(`/delegations/${id}/reports/generate`, { method: "POST" });
+}
+
+export function retryDelegationReport(
+  id: string,
+): Promise<DelegationReport> {
+  return request(`/delegations/${id}/reports/retry`, { method: "POST" });
+}
+
+export async function listDelegationNotifications(
+  id: string,
+): Promise<DelegationNotification[]> {
+  const result = await request<{ items: DelegationNotification[] }>(
+    `/delegations/${id}/notifications`,
+  );
+  return result.items;
+}
+
+export async function listDelegationConfirmations(
+  id: string,
+): Promise<DelegationConfirmationRequest[]> {
+  const result = await request<{ items: DelegationConfirmationRequest[] }>(
+    `/delegations/${id}/confirmations`,
+  );
+  return result.items;
+}
+
+export function createDelegationConfirmation(
+  id: string,
+  input: CreateDelegationConfirmationInput,
+): Promise<DelegationConfirmationRequest> {
+  return request(`/delegations/${id}/confirmations`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function decideDelegationConfirmation(
+  id: string,
+  requestId: string,
+  input: DecideDelegationConfirmationInput,
+): Promise<DelegationConfirmationRequest> {
+  return request(`/delegations/${id}/confirmations/${requestId}/decision`, {
+    method: "POST",
+    body: JSON.stringify(input),
   });
 }
 

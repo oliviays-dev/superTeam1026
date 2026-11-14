@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   FolderKanban,
+  FolderOpen,
   LayoutDashboard,
   ListTodo,
   LoaderCircle,
@@ -15,6 +16,7 @@ import {
   SquareTerminal,
   Sun,
   UsersRound,
+  UserRoundCheck,
   Workflow as WorkflowIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
@@ -40,6 +42,8 @@ import {
 import type { WorkbenchSourceRef } from "@pluginmax/contracts";
 import { LoginView } from "./LoginView.js";
 import { IdentityAdministrationView } from "./IdentityAdministrationView.js";
+import { SharedSpaceView } from "./SharedSpaceView.js";
+import { DelegationsView } from "./DelegationsView.js";
 
 type AppView =
   | "workbench"
@@ -52,6 +56,8 @@ type AppView =
   | "runtimes"
   | "operations"
   | "identity"
+  | "shared-space"
+  | "delegations"
   | "project-templates";
 
 type Theme = "dark" | "light";
@@ -64,9 +70,11 @@ const navItems = [
   { key: "meetings", label: "沟通", icon: MessagesSquare },
   { key: "agents", label: "AI伙伴", icon: Bot },
   { key: "teammates", label: "AI Teammate", icon: UsersRound },
+  { key: "delegations", label: "委托中心", icon: UserRoundCheck },
   { key: "runtimes", label: "运行时", icon: SquareTerminal },
   { key: "operations", label: "运维", icon: Activity },
   { key: "identity", label: "账号与权限", icon: ShieldCheck },
+  { key: "shared-space", label: "共享空间", icon: FolderOpen },
 ] as const satisfies ReadonlyArray<{
   key: AppView;
   label: string;
@@ -411,6 +419,12 @@ export function App() {
             projects={projectsQuery.data ?? []}
             agents={agentsQuery.data ?? []}
             projectId={selectedProjectId}
+            platformAdministrator={
+              viewerQuery.data.platformAdministrator
+            }
+            viewerPrincipalId={
+              viewerQuery.data.principalId ?? viewerQuery.data.actorId
+            }
             onProjectChange={(nextProjectId) => {
               setProjectId(nextProjectId);
               setTaskId("");
@@ -508,6 +522,15 @@ export function App() {
         {view === "runtimes" && (
           <RuntimesView workspaceId={selectedProjectId} />
         )}
+        {view === "delegations" && (
+          <DelegationsView
+            projects={projectsQuery.data ?? []}
+            agents={agentsQuery.data ?? []}
+            viewerPrincipalId={
+              viewerQuery.data.principalId ?? viewerQuery.data.actorId
+            }
+          />
+        )}
         {view === "operations" && <OperationsDashboardView />}
         {view === "identity" && (
           <IdentityAdministrationView
@@ -516,6 +539,16 @@ export function App() {
             }
             viewerPrincipalId={
               viewerQuery.data.principalId ?? viewerQuery.data.actorId
+            }
+          />
+        )}
+        {view === "shared-space" && (
+          <SharedSpaceView
+            viewerPrincipalId={
+              viewerQuery.data.principalId ?? viewerQuery.data.actorId
+            }
+            platformAdministrator={
+              viewerQuery.data.platformAdministrator ?? false
             }
           />
         )}

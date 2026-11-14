@@ -7,6 +7,7 @@ import type {
   Project,
   ProjectCapability,
   WorkbenchSourceRef,
+  WorkbenchPanelResolution,
   WorkflowDefinition,
   WorkflowInstanceDetail,
   WorkflowRuntimeNode,
@@ -32,7 +33,13 @@ import {
   TriangleAlert,
   Workflow,
 } from "lucide-react";
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   closeMeeting,
   completeWorkflowNode,
@@ -47,6 +54,7 @@ import {
   getMeeting,
   getMeetingAiPolicy,
   getWorkbenchDashboard,
+  getWorkbenchPanelData,
   listMeetings,
   listDirectChats,
   listProjectMembers,
@@ -73,6 +81,7 @@ import {
 import { MeetingDecisionsPanel } from "./MeetingDecisionsPanel.js";
 import { WorkflowRuntimePanel } from "./WorkflowRuntimePanel.js";
 import { DirectChatRoom } from "./DirectChatRoom.js";
+import { WorkbenchConfigurationPanel } from "./WorkbenchConfigurationPanel.js";
 
 interface ProjectViewProps {
   readonly projects: Project[];
@@ -99,20 +108,61 @@ function WorkbenchCard({
   title,
   meta,
   actions,
+  placement,
+  workbenchId,
+  projectId,
   children,
 }: {
-  module: keyof typeof workbenchModuleMeta;
+  module: string;
   title: string;
   meta?: string;
   actions?: ReactNode;
+  placement?: WorkbenchPanelResolution | undefined;
+  workbenchId?: string | undefined;
+  projectId?: string | undefined;
   children: ReactNode;
 }) {
+  const panelQuery = useQuery({
+    queryKey: [
+      "workbench-panel-data",
+      workbenchId,
+      placement?.instanceId,
+      projectId,
+    ],
+    queryFn: () =>
+      getWorkbenchPanelData(
+        workbenchId!,
+        placement!.instanceId,
+        projectId === "" ? undefined : projectId,
+      ),
+    enabled:
+      workbenchId !== undefined &&
+      placement?.instanceId !== undefined &&
+      placement.state === "ready",
+    staleTime: 0,
+  });
+  const moduleState = panelQuery.data?.state ?? placement?.state;
+  const unavailable =
+    placement !== undefined && moduleState !== "ready";
   return (
     <section
       className={`workbench-card module-${module}`}
+      data-workbench-module={module}
+      data-module-state={moduleState ?? "unmanaged"}
+      data-module-updated-at={
+        panelQuery.data?.state === "ready"
+          ? panelQuery.data.updatedAt
+          : undefined
+      }
       style={
         {
-          "--workbench-cols": workbenchModuleMeta[module],
+          "--workbench-cols":
+            placement?.width ??
+            workbenchModuleMeta[
+              module as keyof typeof workbenchModuleMeta
+            ] ??
+            2,
+          order: placement?.position ?? 0,
         } as CSSProperties
       }
     >
@@ -124,8 +174,50 @@ function WorkbenchCard({
         {actions !== undefined && (
           <div className="workbench-card-actions">{actions}</div>
         )}
+        {placement?.refreshable && moduleState === "ready" && (
+          <button
+            className="pm-icon-btn workbench-module-refresh"
+            type="button"
+            title={`刷新${title}`}
+            aria-label={`刷新${title}`}
+            disabled={panelQuery.isFetching}
+            onClick={() => void panelQuery.refetch()}
+          >
+            <RefreshCw
+              size={13}
+              className={panelQuery.isFetching ? "spin" : undefined}
+            />
+          </button>
+        )}
       </header>
-      <div className="workbench-card-body">{children}</div>
+      <div className="workbench-card-body">
+        {unavailable ? (
+          <div className="workbench-panel-fallback">
+            <TriangleAlert size={15} />
+            <span>
+              {panelQuery.data?.state !== "ready" &&
+              panelQuery.data?.fallbackMessage !== undefined
+                ? panelQuery.data.fallbackMessage
+                : placement.fallbackMessage ??
+                "面板暂不可用，页面其他区域不受影响"}
+            </span>
+          </div>
+        ) : panelQuery.error !== null ? (
+          <div className="workbench-panel-fallback">
+            <TriangleAlert size={15} />
+            <span>面板独立刷新失败，已保留上次成功内容</span>
+            <button
+              className="pm-btn secondary"
+              type="button"
+              onClick={() => void panelQuery.refetch()}
+            >
+              重试
+            </button>
+          </div>
+        ) : (
+          children
+        )}
+      </div>
     </section>
   );
 }
@@ -135,12 +227,28 @@ function isNavigableSource(source: WorkbenchSourceRef): boolean {
 }
 
 export function WorkbenchView({
+  projectId,
   onOpenSource,
+  platformAdministrator,
+  viewerPrincipalId,
 }: ProjectViewProps & {
   onOpenSource: (source: WorkbenchSourceRef) => void;
+  platformAdministrator: boolean;
+  viewerPrincipalId: string;
 }) {
   const queryClient = useQueryClient();
   const [mode, setMode] = useState<"personal" | "cockpit">("personal");
+  const [workbenchId, setWorkbenchId] = useState<string>();
+  const [resolvedPanels, setResolvedPanels] = useState<
+    readonly WorkbenchPanelResolution[]
+  >([]);
+  const handleLayout = useCallback(
+    (nextWorkbenchId: string, panels: readonly WorkbenchPanelResolution[]) => {
+      setWorkbenchId(nextWorkbenchId);
+      setResolvedPanels(panels);
+    },
+    [],
+  );
   const dashboardQuery = useQuery({
     queryKey: ["workbench-dashboard"],
     queryFn: getWorkbenchDashboard,
@@ -211,6 +319,10 @@ export function WorkbenchView({
   });
   const busy = dashboardQuery.isFetching || refreshMutation.isPending;
   const error = dashboardQuery.error ?? refreshMutation.error;
+  const placementFor = (
+    pluginId: string,
+  ): WorkbenchPanelResolution | undefined =>
+    resolvedPanels.find((panel) => panel.pluginId === pluginId);
 
   return (
     <main className="pm-page workbench-page">
@@ -252,6 +364,14 @@ export function WorkbenchView({
         </div>
       </header>
 
+      {mode === "personal" && (
+        <WorkbenchConfigurationPanel
+          platformAdministrator={platformAdministrator}
+          viewerPrincipalId={viewerPrincipalId}
+          onLayout={handleLayout}
+        />
+      )}
+
       {mode === "cockpit" ? (
         <section className="workbench-cockpit-placeholder">
           <strong>管理驾驶舱</strong>
@@ -285,6 +405,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="brief"
                 title="每日简报"
+                placement={placementFor("brief")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={
                   dashboard.brief === null
                     ? "尚未生成"
@@ -352,6 +475,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="todo"
                 title="我的待办"
+                placement={placementFor("todo")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={`${dashboard.todos.length} 项`}
               >
                 <div className="workbench-list">
@@ -396,6 +522,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="focus"
                 title="重点关注"
+                placement={placementFor("focus")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={`${dashboard.focus.length} 项`}
               >
                 <div className="workbench-list">
@@ -454,6 +583,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="meeting-minutes"
                 title="会议结论"
+                placement={placementFor("meeting-minutes")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={`${dashboard.meetingConclusions.length} 场`}
               >
                 <div className="workbench-list">
@@ -490,6 +622,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="control"
                 title="运行异常"
+                placement={placementFor("control")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={`${dashboard.runExceptions.length} 个`}
               >
                 <div className="workbench-list">
@@ -527,6 +662,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="supply"
                 title="供给例外"
+                placement={placementFor("supply")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={`${dashboard.supplyExceptions.length} 项`}
               >
                 <div className="workbench-list">
@@ -558,6 +696,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="supplier"
                 title="供应商风险"
+                placement={placementFor("supplier")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={`${dashboard.supplierRisks.length} 项`}
               >
                 <div className="workbench-list">
@@ -586,6 +727,9 @@ export function WorkbenchView({
               <WorkbenchCard
                 module="reports"
                 title="项目日报"
+                placement={placementFor("reports")}
+                workbenchId={workbenchId}
+                projectId={projectId}
                 meta={`${dashboard.projectReports.length} 份`}
               >
                 <div className="workbench-report-grid">
@@ -623,6 +767,29 @@ export function WorkbenchView({
                   )}
                 </div>
               </WorkbenchCard>
+              {resolvedPanels
+                .filter(
+                  (panel) =>
+                    workbenchModuleMeta[
+                      panel.pluginId as keyof typeof workbenchModuleMeta
+                    ] === undefined,
+                )
+                .map((panel) => (
+                  <WorkbenchCard
+                    module={panel.pluginId}
+                    title={panel.title}
+                    placement={panel}
+                    workbenchId={workbenchId}
+                    projectId={projectId}
+                    key={panel.instanceId}
+                  >
+                    {panel.state === "ready" && (
+                      <div className="pm-empty compact">
+                        模块已从受信任静态注册表加载
+                      </div>
+                    )}
+                  </WorkbenchCard>
+                ))}
             </div>
           )}
         </>
