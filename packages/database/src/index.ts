@@ -175,3 +175,18 @@ export {
   type IdentityAdministrationErrorCode,
   type IdentityAdministrationRepositoryOptions,
 } from "./identity-administration-repository.js";
+export {
+  SharedSpaceRepository,
+  SharedSpaceRepositoryError,
+  type CommitFileRepositoryInput,
+  type ConsumeWriteRequestRepositoryInput,
+  type CreateDirectoryRepositoryInput,
+  type CreateWriteRequestRepositoryInput,
+  type SharedSpaceAuditInput,
+  type SharedSpaceSceneBinding,
+} from "./shared-space-repository.js";
+export {
+  DelegationRepository,
+  delegationContextHash,
+  type DelegationTransitionResult,
+} from "./delegation-repository.js";

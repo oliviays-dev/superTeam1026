@@ -91,6 +91,8 @@ import { RuntimeEconomicsRepository } from "./runtime-economics-repository.js";
 import { IdentityAdministrationRepository } from "./identity-administration-repository.js";
 import { TeammateRepository } from "./teammate-repository.js";
 import { MeetingCollaborationRepository } from "./meeting-collaboration-repository.js";
+import { SharedSpaceRepository } from "./shared-space-repository.js";
+import { DelegationRepository } from "./delegation-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2212,6 +2214,8 @@ export class PlatformRepositories {
   readonly traces: RuntimeTraceRepository;
   readonly externalRuntimes: ExternalRuntimeRepository;
   readonly agentRuntimeBindings: AgentRuntimeBindingRepository;
+  readonly sharedSpace: SharedSpaceRepository;
+  readonly delegations: DelegationRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2260,5 +2264,10 @@ export class PlatformRepositories {
     this.traces = new RuntimeTraceRepository(database);
     this.externalRuntimes = new ExternalRuntimeRepository(database);
     this.agentRuntimeBindings = new AgentRuntimeBindingRepository(database);
+    this.sharedSpace = new SharedSpaceRepository(
+      database,
+      this.actionTickets,
+    );
+    this.delegations = new DelegationRepository(database);
   }
 }

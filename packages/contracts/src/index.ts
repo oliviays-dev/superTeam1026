@@ -15,6 +15,8 @@ export * from "./external-runtime.js";
 export * from "./agent-runtime-binding.js";
 export * from "./identity.js";
 export * from "./scene-context.js";
+export * from "./shared-space.js";
 export * from "./task-execution-depth.js";
 export * from "./runtime-economics.js";
 export * from "./teammate.js";
+export * from "./delegation.js";
