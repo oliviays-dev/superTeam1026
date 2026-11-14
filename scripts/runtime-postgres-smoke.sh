@@ -8,14 +8,14 @@ DATABASE_URL_INPUT="${DATABASE_URL:-postgres://pluginmax:pluginmax@127.0.0.1:543
 STAMP="$(date +%Y%m%d%H%M%S)"
 
 psql_query() {
-  docker-compose -p "$COMPOSE_PROJECT" -f "$ROOT/$COMPOSE_FILE" \
+  "$ROOT/scripts/db-compose.sh" -p "$COMPOSE_PROJECT" -f "$ROOT/$COMPOSE_FILE" \
     exec -T postgres psql -U pluginmax -d pluginmax -qAt -v ON_ERROR_STOP=1 -c "$1"
 }
 
 psql_database() {
   local database="$1"
   local sql="$2"
-  docker-compose -p "$COMPOSE_PROJECT" -f "$ROOT/$COMPOSE_FILE" \
+  "$ROOT/scripts/db-compose.sh" -p "$COMPOSE_PROJECT" -f "$ROOT/$COMPOSE_FILE" \
     exec -T postgres psql -U pluginmax -d "$database" -qAt -v ON_ERROR_STOP=1 -c "$sql"
 }
 

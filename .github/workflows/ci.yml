@@ -109,6 +109,8 @@ jobs:
       - name: PostgreSQL upgrade smoke
         env:
           DATABASE_URL: postgres://pluginmax:pluginmax@127.0.0.1:54389/pluginmax
+          COMPOSE_PROJECT: pluginmax-ci
+          COMPOSE_FILE: docker-compose.batch8.yml
         run: ./scripts/runtime-postgres-smoke.sh
 
   runtime-browser:
@@ -125,7 +127,7 @@ jobs:
       - name: Install Pluginmax workspace
         run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium
-        run: pnpm exec playwright install chromium
+        run: ./node_modules/.bin/playwright install chromium
       - name: API, process recovery, and browser smoke
         run: pnpm test:ci
       - name: Upload runtime logs

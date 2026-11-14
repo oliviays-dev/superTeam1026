@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "pnpm -r --sort build",
-    "build:plugins": "for config in plugins/*/tsdown.config.ts; do pnpm exec tsdown --config \"$config\"; done",
+    "build:plugins": "for dir in plugins/*; do pnpm --dir \"$dir\" run build; done",
     "build:packages": "pnpm --filter './packages/*' build",
     "check": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build",
     "db:down": "./scripts/db-compose.sh down",
