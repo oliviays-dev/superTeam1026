@@ -28,6 +28,8 @@ jobs:
         run: pnpm run check
       - name: Build locked upstream DSH
         run: pnpm --dir vendor/deepseek-harness install --frozen-lockfile && pnpm --dir vendor/deepseek-harness build
+      - name: Build profile plugins
+        run: pnpm build:plugins
       - name: Install and smoke canary
         run: |
           set +e
@@ -83,6 +85,9 @@ jobs:
         run: pnpm run build:packages
       - name: PostgreSQL v12 to v13 compatibility smoke
         run: ./scripts/maintenance-effects-postgres-smoke.sh
+      - name: Stop compatibility PostgreSQL
+        if: always()
+        run: ./scripts/db-compose.sh -p pluginmax-batch8 -f docker-compose.batch8.yml down -v
       - name: Start isolated PostgreSQL
         run: |
           ./scripts/db-compose.sh -p pluginmax-ci -f docker-compose.batch8.yml up -d postgres
@@ -120,7 +125,7 @@ jobs:
       - name: Install Pluginmax workspace
         run: pnpm install --frozen-lockfile
       - name: Install Playwright Chromium
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install chromium
       - name: API, process recovery, and browser smoke
         run: pnpm test:ci
       - name: Upload runtime logs
