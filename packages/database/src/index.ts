@@ -241,3 +241,12 @@ export {
   ProjectAiPmRepository,
   ProjectAiPmRepositoryError,
 } from "./project-ai-pm-repository.js";
+export {
+  DataFabricRepository,
+  DataFabricRepositoryError,
+  type CreateQueryRunRecordInput,
+  type DataFabricRunContext,
+  type DataPolicyBundle,
+  type DatasetQueryBundle,
+  type ProjectReportReference,
+} from "./data-fabric-repository.js";

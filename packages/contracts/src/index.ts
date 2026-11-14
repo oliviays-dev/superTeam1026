@@ -29,3 +29,4 @@ export * from "./skill.js";
 export * from "./task-capture.js";
 export * from "./context-policy.js";
 export * from "./project-operations.js";
+export * from "./data-fabric.js";

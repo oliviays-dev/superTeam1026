@@ -108,6 +108,7 @@ import {
 import { TaskCaptureRepository } from "./task-capture-repository.js";
 import { ContextPolicyRepository } from "./context-policy-repository.js";
 import { ProjectAiPmRepository } from "./project-ai-pm-repository.js";
+import { DataFabricRepository } from "./data-fabric-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -2242,6 +2243,7 @@ export class PlatformRepositories {
   readonly taskCapture: TaskCaptureRepository;
   readonly contextPolicies: ContextPolicyRepository;
   readonly projectAiPms: ProjectAiPmRepository;
+  readonly dataFabric: DataFabricRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2305,5 +2307,6 @@ export class PlatformRepositories {
     this.taskCapture = new TaskCaptureRepository(database);
     this.contextPolicies = new ContextPolicyRepository(database);
     this.projectAiPms = new ProjectAiPmRepository(database);
+    this.dataFabric = new DataFabricRepository(database);
   }
 }

@@ -7949,3 +7949,587 @@ CREATE INDEX IF NOT EXISTS project_reports_project_kind_idx
     report_date DESC,
     version DESC
   );
+
+CREATE TRIGGER project_reports_immutable
+BEFORE UPDATE OR DELETE ON project_reports
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_report_mutation();
+
+-- M6 enable state: the Flag remains off until explicit release activation.
+`;
+
+export const M7_DATA_FABRIC_SCHEMA_SQL = `
+-- M7 expand: read-only Data Fabric catalog, immutable metric/policy versions,
+-- QueryRun/QueryResult, and Data Agent conversation facts.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('data_fabric', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS data_connections (
+  id UUID PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 160),
+  provider TEXT NOT NULL DEFAULT 'fixture'
+    CHECK (provider = 'fixture'),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  allowed_runtime_profile_ids JSONB NOT NULL
+    CHECK (
+      jsonb_typeof(allowed_runtime_profile_ids) = 'array'
+      AND jsonb_array_length(allowed_runtime_profile_ids) BETWEEN 1 AND 100
+    ),
+  max_rows INTEGER NOT NULL DEFAULT 500
+    CHECK (max_rows BETWEEN 1 AND 1000),
+  timeout_ms INTEGER NOT NULL DEFAULT 10000
+    CHECK (timeout_ms BETWEEN 1 AND 60000),
+  data_cutoff_at TIMESTAMPTZ,
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS data_connections_scope_name_idx
+  ON data_connections(
+    workspace_id,
+    project_id,
+    lower(btrim(name))
+  );
+
+CREATE INDEX IF NOT EXISTS data_connections_project_idx
+  ON data_connections(project_id, workspace_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS datasets (
+  id UUID PRIMARY KEY,
+  connection_id UUID NOT NULL
+    REFERENCES data_connections(id) ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  dataset_key TEXT NOT NULL
+    CHECK (dataset_key ~ '^[a-z0-9][a-z0-9._-]{1,119}$'),
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 160),
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  max_rows INTEGER NOT NULL DEFAULT 500
+    CHECK (max_rows BETWEEN 1 AND 1000),
+  timeout_ms INTEGER NOT NULL DEFAULT 10000
+    CHECK (timeout_ms BETWEEN 1 AND 60000),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (connection_id, dataset_key),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS datasets_project_idx
+  ON datasets(project_id, workspace_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS dataset_columns (
+  id UUID PRIMARY KEY,
+  dataset_id UUID NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+  name TEXT NOT NULL
+    CHECK (
+      length(name) BETWEEN 1 AND 120
+      AND name ~ '^[a-zA-Z_][a-zA-Z0-9_]*$'
+    ),
+  data_type TEXT NOT NULL
+    CHECK (data_type IN ('string', 'number', 'boolean', 'date')),
+  position INTEGER NOT NULL CHECK (position BETWEEN 0 AND 1000),
+  sensitive BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (dataset_id, position)
+);
+
+CREATE INDEX IF NOT EXISTS dataset_columns_dataset_idx
+  ON dataset_columns(dataset_id, position);
+
+CREATE UNIQUE INDEX IF NOT EXISTS dataset_columns_dataset_name_idx
+  ON dataset_columns(dataset_id, lower(name));
+
+CREATE TABLE IF NOT EXISTS semantic_metrics (
+  id UUID PRIMARY KEY,
+  dataset_id UUID NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+  metric_key TEXT NOT NULL
+    CHECK (metric_key ~ '^[a-z0-9][a-z0-9._-]{1,119}$'),
+  title TEXT NOT NULL CHECK (length(btrim(title)) BETWEEN 1 AND 160),
+  current_version INTEGER NOT NULL DEFAULT 1
+    CHECK (current_version > 0),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'retired')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (dataset_id, metric_key),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE TABLE IF NOT EXISTS semantic_metric_versions (
+  id UUID PRIMARY KEY,
+  metric_id UUID NOT NULL REFERENCES semantic_metrics(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  aggregation TEXT NOT NULL
+    CHECK (aggregation IN ('count', 'sum', 'avg', 'min', 'max')),
+  column_name TEXT NOT NULL
+    CHECK (
+      length(column_name) BETWEEN 1 AND 120
+      AND column_name ~ '^[a-zA-Z_][a-zA-Z0-9_]*$'
+    ),
+  description TEXT NOT NULL DEFAULT '',
+  format TEXT NOT NULL DEFAULT 'integer'
+    CHECK (format IN ('integer', 'decimal', 'text')),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (metric_id, version),
+  UNIQUE (metric_id, digest)
+);
+
+CREATE INDEX IF NOT EXISTS semantic_metric_versions_metric_idx
+  ON semantic_metric_versions(metric_id, version DESC);
+
+CREATE TABLE IF NOT EXISTS data_policies (
+  id UUID PRIMARY KEY,
+  dataset_id UUID NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('workspace', 'project')),
+  scope_id TEXT NOT NULL CHECK (length(btrim(scope_id)) BETWEEN 1 AND 180),
+  current_version INTEGER NOT NULL DEFAULT 1
+    CHECK (current_version > 0),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'retired')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (dataset_id, scope_type, scope_id),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS data_policies_dataset_idx
+  ON data_policies(dataset_id, status, scope_type, scope_id);
+
+CREATE TABLE IF NOT EXISTS data_policy_versions (
+  id UUID PRIMARY KEY,
+  policy_id UUID NOT NULL REFERENCES data_policies(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  row_filters JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(row_filters) = 'array'),
+  allowed_columns JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(allowed_columns) = 'array'),
+  denied_columns JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(denied_columns) = 'array'),
+  max_rows INTEGER NOT NULL CHECK (max_rows BETWEEN 1 AND 1000),
+  timeout_ms INTEGER NOT NULL CHECK (timeout_ms BETWEEN 1 AND 60000),
+  data_cutoff_at TIMESTAMPTZ,
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (policy_id, version),
+  UNIQUE (policy_id, digest)
+);
+
+CREATE INDEX IF NOT EXISTS data_policy_versions_policy_idx
+  ON data_policy_versions(policy_id, version DESC);
+
+-- Fixture rows are intentionally read-only from the application. A production
+-- connector must replace this adapter behind the independent security review.
+CREATE TABLE IF NOT EXISTS dataset_rows (
+  id UUID PRIMARY KEY,
+  dataset_id UUID NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+  row_key TEXT NOT NULL CHECK (length(btrim(row_key)) BETWEEN 1 AND 180),
+  row_data JSONB NOT NULL CHECK (jsonb_typeof(row_data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (dataset_id, row_key)
+);
+
+CREATE INDEX IF NOT EXISTS dataset_rows_dataset_idx
+  ON dataset_rows(dataset_id, row_key);
+
+CREATE TABLE IF NOT EXISTS data_agent_conversations (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  run_id UUID NOT NULL UNIQUE REFERENCES runs(id) ON DELETE RESTRICT,
+  context_pack_id UUID
+    REFERENCES context_packs(id) ON DELETE RESTRICT,
+  skill_snapshot_digest TEXT
+    CHECK (
+      skill_snapshot_digest IS NULL
+      OR skill_snapshot_digest ~ '^[a-f0-9]{64}$'
+    ),
+  runtime_profile_id TEXT NOT NULL
+    CHECK (length(btrim(runtime_profile_id)) BETWEEN 1 AND 180),
+  requester_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  title TEXT NOT NULL CHECK (length(btrim(title)) BETWEEN 1 AND 240),
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'archived')),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS data_agent_conversations_requester_idx
+  ON data_agent_conversations(
+    requester_principal_id,
+    status,
+    updated_at DESC
+  );
+
+CREATE TABLE IF NOT EXISTS query_runs (
+  id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL
+    REFERENCES data_agent_conversations(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  context_pack_id UUID
+    REFERENCES context_packs(id) ON DELETE RESTRICT,
+  skill_snapshot_digest TEXT
+    CHECK (
+      skill_snapshot_digest IS NULL
+      OR skill_snapshot_digest ~ '^[a-f0-9]{64}$'
+    ),
+  connection_id UUID NOT NULL
+    REFERENCES data_connections(id) ON DELETE RESTRICT,
+  connection_version INTEGER NOT NULL CHECK (connection_version > 0),
+  dataset_id UUID NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+  dataset_version INTEGER NOT NULL CHECK (dataset_version > 0),
+  metric_id UUID REFERENCES semantic_metrics(id) ON DELETE RESTRICT,
+  metric_version INTEGER CHECK (
+    metric_version IS NULL OR metric_version > 0
+  ),
+  runtime_profile_id TEXT NOT NULL
+    CHECK (length(btrim(runtime_profile_id)) BETWEEN 1 AND 180),
+  mode TEXT NOT NULL CHECK (mode IN ('explain', 'metric', 'dataset')),
+  query_spec JSONB NOT NULL CHECK (jsonb_typeof(query_spec) = 'object'),
+  requester_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  row_filters JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(row_filters) = 'array'),
+  denied_columns JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(denied_columns) = 'array'),
+  allowed_columns JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(allowed_columns) = 'array'),
+  max_rows INTEGER NOT NULL CHECK (max_rows BETWEEN 1 AND 1000),
+  timeout_ms INTEGER NOT NULL CHECK (timeout_ms BETWEEN 1 AND 60000),
+  data_cutoff_at TIMESTAMPTZ,
+  permission_summary JSONB NOT NULL
+    CHECK (jsonb_typeof(permission_summary) = 'object'),
+  policy_snapshot JSONB NOT NULL
+    CHECK (
+      jsonb_typeof(policy_snapshot) = 'array'
+      AND jsonb_array_length(policy_snapshot) > 0
+    ),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN (
+      'queued',
+      'running',
+      'completed',
+      'failed',
+      'cancelled',
+      'timeout'
+    )),
+  scan_count BIGINT CHECK (scan_count IS NULL OR scan_count >= 0),
+  row_count BIGINT CHECK (row_count IS NULL OR row_count >= 0),
+  result_digest TEXT
+    CHECK (result_digest IS NULL OR result_digest ~ '^[a-f0-9]{64}$'),
+  error_code TEXT CHECK (
+    error_code IS NULL OR length(btrim(error_code)) BETWEEN 1 AND 160
+  ),
+  error_message TEXT CHECK (
+    error_message IS NULL OR length(btrim(error_message)) BETWEEN 1 AND 4000
+  ),
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    (metric_id IS NULL AND metric_version IS NULL)
+    OR (metric_id IS NOT NULL AND metric_version IS NOT NULL)
+  ),
+  CHECK (
+    (status IN ('completed', 'failed', 'cancelled', 'timeout')
+      AND completed_at IS NOT NULL)
+    OR (status IN ('queued', 'running') AND completed_at IS NULL)
+  ),
+  CHECK (
+    (status = 'completed'
+      AND scan_count IS NOT NULL
+      AND row_count IS NOT NULL
+      AND result_digest IS NOT NULL
+      AND error_code IS NULL)
+    OR (status <> 'completed'
+      AND result_digest IS NULL
+      AND row_count IS NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS query_runs_conversation_idx
+  ON query_runs(conversation_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS query_runs_dataset_idx
+  ON query_runs(dataset_id, data_cutoff_at DESC, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS query_results (
+  query_run_id UUID PRIMARY KEY
+    REFERENCES query_runs(id) ON DELETE RESTRICT,
+  columns JSONB NOT NULL
+    CHECK (
+      jsonb_typeof(columns) = 'array'
+      AND jsonb_array_length(columns) <= 100
+    ),
+  rows JSONB NOT NULL
+    CHECK (
+      jsonb_typeof(rows) = 'array'
+      AND jsonb_array_length(rows) <= 1000
+    ),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS data_agent_messages (
+  id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL
+    REFERENCES data_agent_conversations(id) ON DELETE RESTRICT,
+  sequence BIGINT NOT NULL CHECK (sequence > 0),
+  role TEXT NOT NULL CHECK (role IN ('user', 'agent', 'system')),
+  content TEXT NOT NULL CHECK (
+    length(content) BETWEEN 1 AND 200000
+  ),
+  query_run_id UUID REFERENCES query_runs(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (conversation_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS data_agent_messages_conversation_idx
+  ON data_agent_messages(conversation_id, sequence);
+
+CREATE TABLE IF NOT EXISTS data_agent_context_refs (
+  id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL
+    REFERENCES data_agent_conversations(id) ON DELETE RESTRICT,
+  message_id UUID
+    REFERENCES data_agent_messages(id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL
+    CHECK (kind IN (
+      'run',
+      'context-pack',
+      'skill-snapshot',
+      'project-report',
+      'query-run'
+    )),
+  ref_id TEXT NOT NULL CHECK (length(btrim(ref_id)) BETWEEN 1 AND 180),
+  version INTEGER CHECK (version IS NULL OR version > 0),
+  digest TEXT CHECK (digest IS NULL OR digest ~ '^[a-f0-9]{64}$'),
+  cutoff_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS data_agent_context_refs_conversation_idx
+  ON data_agent_context_refs(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS data_agent_answers (
+  id UUID PRIMARY KEY,
+  conversation_id UUID NOT NULL
+    REFERENCES data_agent_conversations(id) ON DELETE RESTRICT,
+  message_id UUID NOT NULL UNIQUE
+    REFERENCES data_agent_messages(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  context_pack_id UUID
+    REFERENCES context_packs(id) ON DELETE RESTRICT,
+  skill_snapshot_digest TEXT
+    CHECK (
+      skill_snapshot_digest IS NULL
+      OR skill_snapshot_digest ~ '^[a-f0-9]{64}$'
+    ),
+  requester_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  project_report_id UUID
+    REFERENCES project_reports(id) ON DELETE RESTRICT,
+  content TEXT NOT NULL CHECK (
+    length(content) BETWEEN 1 AND 200000
+  ),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS data_agent_answer_query_runs (
+  answer_id UUID NOT NULL
+    REFERENCES data_agent_answers(id) ON DELETE RESTRICT,
+  query_run_id UUID NOT NULL
+    REFERENCES query_runs(id) ON DELETE RESTRICT,
+  position INTEGER NOT NULL CHECK (position >= 0),
+  PRIMARY KEY (answer_id, query_run_id),
+  UNIQUE (answer_id, position)
+);
+
+CREATE TABLE IF NOT EXISTS data_agent_answer_context_refs (
+  answer_id UUID NOT NULL
+    REFERENCES data_agent_answers(id) ON DELETE RESTRICT,
+  context_ref_id UUID NOT NULL
+    REFERENCES data_agent_context_refs(id) ON DELETE RESTRICT,
+  PRIMARY KEY (answer_id, context_ref_id)
+);
+
+-- M7 backfill / validate: this domain has no historical rows. Validate all
+-- version heads before exposing immutable version constraints.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM semantic_metrics AS metric
+    LEFT JOIN semantic_metric_versions AS version
+      ON version.metric_id = metric.id
+     AND version.version = metric.current_version
+    WHERE version.id IS NULL
+  ) THEN
+    RAISE EXCEPTION 'M7 semantic metric current_version is inconsistent';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM data_policies AS policy
+    LEFT JOIN data_policy_versions AS version
+      ON version.policy_id = policy.id
+     AND version.version = policy.current_version
+    WHERE version.id IS NULL
+  ) THEN
+    RAISE EXCEPTION 'M7 data policy current_version is inconsistent';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM query_runs
+    WHERE status = 'completed'
+      AND (
+        scan_count IS NULL
+        OR row_count IS NULL
+        OR result_digest IS NULL
+      )
+  ) THEN
+    RAISE EXCEPTION 'M7 completed QueryRun is missing result metadata';
+  END IF;
+END;
+$$;
+
+-- M7 enforce: versions, results, context refs and answers are immutable.
+CREATE OR REPLACE FUNCTION pluginmax_reject_data_fabric_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'data fabric versions and facts are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS semantic_metric_versions_immutable
+  ON semantic_metric_versions;
+CREATE TRIGGER semantic_metric_versions_immutable
+BEFORE UPDATE OR DELETE ON semantic_metric_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+DROP TRIGGER IF EXISTS data_policy_versions_immutable
+  ON data_policy_versions;
+CREATE TRIGGER data_policy_versions_immutable
+BEFORE UPDATE OR DELETE ON data_policy_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+DROP TRIGGER IF EXISTS query_results_immutable ON query_results;
+CREATE TRIGGER query_results_immutable
+BEFORE UPDATE OR DELETE ON query_results
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+DROP TRIGGER IF EXISTS data_agent_messages_immutable
+  ON data_agent_messages;
+CREATE TRIGGER data_agent_messages_immutable
+BEFORE UPDATE OR DELETE ON data_agent_messages
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+DROP TRIGGER IF EXISTS data_agent_context_refs_immutable
+  ON data_agent_context_refs;
+CREATE TRIGGER data_agent_context_refs_immutable
+BEFORE UPDATE OR DELETE ON data_agent_context_refs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+DROP TRIGGER IF EXISTS data_agent_answers_immutable
+  ON data_agent_answers;
+CREATE TRIGGER data_agent_answers_immutable
+BEFORE UPDATE OR DELETE ON data_agent_answers
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+DROP TRIGGER IF EXISTS data_agent_answer_query_runs_immutable
+  ON data_agent_answer_query_runs;
+CREATE TRIGGER data_agent_answer_query_runs_immutable
+BEFORE UPDATE OR DELETE ON data_agent_answer_query_runs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+DROP TRIGGER IF EXISTS data_agent_answer_context_refs_immutable
+  ON data_agent_answer_context_refs;
+CREATE TRIGGER data_agent_answer_context_refs_immutable
+BEFORE UPDATE OR DELETE ON data_agent_answer_context_refs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_data_fabric_version_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_query_run_transition()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF OLD.status IN ('completed', 'failed', 'cancelled', 'timeout') THEN
+    RAISE EXCEPTION 'terminal QueryRun is immutable';
+  END IF;
+  IF NEW.conversation_id IS DISTINCT FROM OLD.conversation_id
+    OR NEW.project_id IS DISTINCT FROM OLD.project_id
+    OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+    OR NEW.connection_id IS DISTINCT FROM OLD.connection_id
+    OR NEW.connection_version IS DISTINCT FROM OLD.connection_version
+    OR NEW.dataset_id IS DISTINCT FROM OLD.dataset_id
+    OR NEW.dataset_version IS DISTINCT FROM OLD.dataset_version
+    OR NEW.metric_id IS DISTINCT FROM OLD.metric_id
+    OR NEW.metric_version IS DISTINCT FROM OLD.metric_version
+    OR NEW.requester_principal_id IS DISTINCT FROM OLD.requester_principal_id
+    OR NEW.agent_principal_id IS DISTINCT FROM OLD.agent_principal_id
+    OR NEW.policy_snapshot IS DISTINCT FROM OLD.policy_snapshot
+    OR NEW.permission_summary IS DISTINCT FROM OLD.permission_summary
+  THEN
+    RAISE EXCEPTION 'QueryRun identity and permission snapshots are immutable';
+  END IF;
+  IF OLD.status <> 'queued'
+    AND NEW.status NOT IN (
+      'completed',
+      'failed',
+      'cancelled',
+      'timeout'
+    )
+  THEN
+    RAISE EXCEPTION 'invalid QueryRun transition';
+  END IF;
+  RETURN NEW;
+END;
+$$;
