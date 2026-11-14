@@ -222,3 +222,10 @@ export {
   type PlanOutboxMessageRow,
   type RouterAgentSnapshot,
 } from "./workflow-plan-repository.js";
+export {
+  captureRunSkillSnapshotWithClient,
+  effectiveSkillSnapshotDigest,
+  SkillRepository,
+  SkillRepositoryError,
+  skillVersionDigest,
+} from "./skill-repository.js";

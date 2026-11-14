@@ -6463,3 +6463,328 @@ CREATE TABLE IF NOT EXISTS workflow_plan_audit_events (
   created_at TIMESTAMPTZ NOT NULL,
   UNIQUE (plan_id, seq)
 );
+
+CREATE INDEX IF NOT EXISTS workflow_plan_audit_plan_idx
+  ON workflow_plan_audit_events(plan_id, seq);
+`;
+
+export const M4_SKILL_PLATFORM_SCHEMA_SQL = `
+-- M4 expand: immutable definitions, versions, installations, bindings,
+-- instance extensions, run snapshots, and audit.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('skills.platform', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS skill_definitions (
+  id UUID PRIMARY KEY,
+  key TEXT NOT NULL UNIQUE
+    CHECK (key ~ '^[a-z0-9][a-z0-9._-]{1,79}$'),
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 160),
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled', 'archived')),
+  current_version INTEGER NOT NULL DEFAULT 1 CHECK (current_version > 0),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (updated_at >= created_at)
+);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+  id UUID PRIMARY KEY,
+  skill_id UUID NOT NULL
+    REFERENCES skill_definitions(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  digest TEXT NOT NULL CHECK (digest ~ '^[a-f0-9]{64}$'),
+  publisher_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  trust_level TEXT NOT NULL
+    CHECK (trust_level IN ('official', 'verified', 'private')),
+  instructions TEXT NOT NULL CHECK (length(btrim(instructions)) BETWEEN 1 AND 200000),
+  manifest JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(manifest) = 'object'),
+  permissions JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(permissions) = 'array'),
+  triggers JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(triggers) = 'array'),
+  status TEXT NOT NULL DEFAULT 'published'
+    CHECK (status IN ('published', 'deprecated', 'revoked')),
+  protected BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (skill_id, version),
+  UNIQUE (skill_id, digest)
+);
+
+CREATE INDEX IF NOT EXISTS skill_versions_installable_idx
+  ON skill_versions(skill_id, status, version DESC);
+
+CREATE TABLE IF NOT EXISTS skill_installations (
+  id UUID PRIMARY KEY,
+  principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  skill_id UUID NOT NULL
+    REFERENCES skill_definitions(id) ON DELETE RESTRICT,
+  version_id UUID NOT NULL
+    REFERENCES skill_versions(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL DEFAULT 'active'
+    CHECK (status IN ('active', 'disabled')),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  installed_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  installed_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (principal_id, skill_id),
+  CHECK (updated_at >= installed_at)
+);
+
+CREATE INDEX IF NOT EXISTS skill_installations_principal_idx
+  ON skill_installations(principal_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS teammate_template_skill_bindings (
+  id UUID PRIMARY KEY,
+  template_id UUID NOT NULL
+    REFERENCES teammate_templates(id) ON DELETE RESTRICT,
+  skill_id UUID NOT NULL
+    REFERENCES skill_definitions(id) ON DELETE RESTRICT,
+  skill_version_id UUID NOT NULL
+    REFERENCES skill_versions(id) ON DELETE RESTRICT,
+  installation_id UUID NOT NULL
+    REFERENCES skill_installations(id) ON DELETE RESTRICT,
+  required BOOLEAN NOT NULL DEFAULT FALSE,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  bound_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (template_id, skill_id),
+  CHECK (updated_at >= created_at),
+  CHECK (NOT required OR enabled)
+);
+
+CREATE INDEX IF NOT EXISTS teammate_template_skill_bindings_template_idx
+  ON teammate_template_skill_bindings(template_id, required DESC, created_at);
+
+CREATE TABLE IF NOT EXISTS teammate_instance_skill_extensions (
+  id UUID PRIMARY KEY,
+  teammate_id UUID NOT NULL
+    REFERENCES teammates(id) ON DELETE RESTRICT,
+  skill_id UUID NOT NULL
+    REFERENCES skill_definitions(id) ON DELETE RESTRICT,
+  skill_version_id UUID NOT NULL
+    REFERENCES skill_versions(id) ON DELETE RESTRICT,
+  installation_id UUID NOT NULL
+    REFERENCES skill_installations(id) ON DELETE RESTRICT,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  added_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (teammate_id, skill_id),
+  CHECK (updated_at >= created_at)
+);
+
+CREATE INDEX IF NOT EXISTS teammate_instance_skill_extensions_teammate_idx
+  ON teammate_instance_skill_extensions(teammate_id, enabled, created_at);
+
+CREATE TABLE IF NOT EXISTS run_skill_snapshots (
+  run_id UUID PRIMARY KEY
+    REFERENCES runs(id) ON DELETE RESTRICT,
+  teammate_id UUID
+    REFERENCES teammates(id) ON DELETE RESTRICT,
+  template_id UUID
+    REFERENCES teammate_templates(id) ON DELETE RESTRICT,
+  template_version_id UUID
+    REFERENCES teammate_template_versions(id) ON DELETE RESTRICT,
+  platform_safety_rules JSONB NOT NULL
+    CHECK (jsonb_typeof(platform_safety_rules) = 'array'),
+  skills JSONB NOT NULL
+    CHECK (jsonb_typeof(skills) = 'array'),
+  snapshot_digest TEXT NOT NULL
+    CHECK (snapshot_digest ~ '^[a-f0-9]{64}$'),
+  captured_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    (teammate_id IS NULL AND template_id IS NULL AND template_version_id IS NULL)
+    OR
+    (teammate_id IS NOT NULL AND template_id IS NOT NULL AND template_version_id IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS run_skill_snapshots_teammate_idx
+  ON run_skill_snapshots(teammate_id, captured_at DESC);
+
+CREATE TABLE IF NOT EXISTS skill_audit_events (
+  id UUID PRIMARY KEY,
+  seq BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE,
+  resource_type TEXT NOT NULL
+    CHECK (resource_type IN ('skill', 'template', 'teammate', 'run')),
+  resource_id TEXT NOT NULL
+    CHECK (length(btrim(resource_id)) BETWEEN 1 AND 180),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'skill.definition.created',
+    'skill.version.published',
+    'skill.installed',
+    'skill.uninstalled',
+    'skills.bound',
+    'skills.unbound',
+    'skills.extension.added',
+    'skills.extension.removed',
+    'run.skills.snapshot'
+  )),
+  actor_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  summary TEXT NOT NULL CHECK (length(btrim(summary)) BETWEEN 1 AND 4000),
+  data JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS skill_audit_events_resource_idx
+  ON skill_audit_events(resource_type, resource_id, seq DESC);
+
+-- M4 backfill / validate: historical Runs remain untouched. Existing rows
+-- receive no synthetic Skill Snapshot; the next newly-created Run captures one.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM skill_definitions AS definition
+    LEFT JOIN skill_versions AS version
+      ON version.skill_id = definition.id
+     AND version.version = definition.current_version
+    WHERE version.id IS NULL
+      AND EXISTS (
+        SELECT 1 FROM skill_versions WHERE skill_id = definition.id
+      )
+  ) THEN
+    RAISE EXCEPTION 'M4 Skill Definition current_version is inconsistent';
+  END IF;
+END;
+$$;
+
+-- M4 enforce: immutable versions and snapshots, protected required bindings,
+-- append-only extensions, and append-only Skill audit.
+CREATE OR REPLACE FUNCTION pluginmax_reject_skill_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'skill versions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS skill_versions_immutable ON skill_versions;
+CREATE TRIGGER skill_versions_immutable
+BEFORE UPDATE OR DELETE ON skill_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_skill_version_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_run_skill_snapshot_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'run Skill snapshots are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS run_skill_snapshots_immutable ON run_skill_snapshots;
+CREATE TRIGGER run_skill_snapshots_immutable
+BEFORE UPDATE OR DELETE ON run_skill_snapshots
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_run_skill_snapshot_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_protect_required_skill_binding()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' AND OLD.required THEN
+    RAISE EXCEPTION 'required Skill bindings cannot be deleted';
+  END IF;
+  IF TG_OP = 'UPDATE' AND OLD.required AND (
+    NEW.template_id IS DISTINCT FROM OLD.template_id
+    OR NEW.skill_id IS DISTINCT FROM OLD.skill_id
+    OR NEW.required = FALSE
+    OR NEW.enabled = FALSE
+  ) THEN
+    RAISE EXCEPTION 'required Skill bindings cannot be disabled or shadowed';
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS teammate_template_skill_bindings_required_protected
+  ON teammate_template_skill_bindings;
+CREATE TRIGGER teammate_template_skill_bindings_required_protected
+BEFORE UPDATE OR DELETE ON teammate_template_skill_bindings
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_protect_required_skill_binding();
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_skill_extension_not_shadowing()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM teammates AS teammate
+    JOIN teammate_template_skill_bindings AS binding
+      ON binding.template_id = teammate.template_id
+     AND binding.skill_id = NEW.skill_id
+     AND binding.required = TRUE
+    WHERE teammate.id = NEW.teammate_id
+  ) THEN
+    RAISE EXCEPTION 'instance Skill extension cannot shadow a required Skill';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS teammate_instance_skill_extensions_no_shadow
+  ON teammate_instance_skill_extensions;
+CREATE TRIGGER teammate_instance_skill_extensions_no_shadow
+BEFORE INSERT OR UPDATE OF skill_id, teammate_id
+ON teammate_instance_skill_extensions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_skill_extension_not_shadowing();
+
+CREATE OR REPLACE FUNCTION pluginmax_protect_required_skill_installation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF (TG_OP = 'DELETE' OR NEW.status = 'disabled')
+    AND EXISTS (
+      SELECT 1
+      FROM teammate_template_skill_bindings
+      WHERE installation_id = OLD.id
+        AND required = TRUE
+    )
+  THEN
+    RAISE EXCEPTION 'required Skill installations cannot be disabled or deleted';
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+DROP TRIGGER IF EXISTS skill_installations_required_protected
+  ON skill_installations;
+CREATE TRIGGER skill_installations_required_protected
+BEFORE UPDATE OR DELETE ON skill_installations
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_protect_required_skill_installation();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_skill_audit_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Skill audit events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS skill_audit_events_append_only

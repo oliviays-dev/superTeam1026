@@ -25,3 +25,4 @@ export * from "./task-execution-evidence.js";
 export * from "./agent-task-tools.js";
 export * from "./workflow-assignment.js";
 export * from "./workflow-plan.js";
+export * from "./skill.js";

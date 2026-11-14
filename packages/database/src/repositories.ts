@@ -101,6 +101,10 @@ import {
 import { AgentToolRepository } from "./agent-tool-repository.js";
 import { WorkflowAssignmentRepository } from "./workflow-assignment-repository.js";
 import { WorkflowPlanRepository } from "./workflow-plan-repository.js";
+import {
+  captureRunSkillSnapshotWithClient,
+  SkillRepository,
+} from "./skill-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -1073,6 +1077,7 @@ export class RunRepository {
         );
       }
       await TeammateRepository.attributeRunWithClient(client, input.runId);
+      await captureRunSkillSnapshotWithClient(client, input.runId);
       return runFromRow(result.rows[0]!);
     });
   }
@@ -2230,6 +2235,7 @@ export class PlatformRepositories {
   readonly agentTools: AgentToolRepository;
   readonly workflowAssignments: WorkflowAssignmentRepository;
   readonly workflowPlans: WorkflowPlanRepository;
+  readonly skills: SkillRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2289,5 +2295,6 @@ export class PlatformRepositories {
     this.agentTools = new AgentToolRepository(database);
     this.workflowAssignments = new WorkflowAssignmentRepository(database);
     this.workflowPlans = new WorkflowPlanRepository(database);
+    this.skills = new SkillRepository(database);
   }
 }
