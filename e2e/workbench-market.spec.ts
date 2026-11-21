@@ -274,13 +274,21 @@ for (const viewport of viewports) {
         .filter({ hasText: "local-admin" });
       await entitlementRow.getByRole("button", { name: "撤销" }).click();
       await expect(entitlementRow).toContainText("revoked");
-      await page.getByRole("button", { name: "下架" }).click();
+      await page
+        .locator(".market-admin-form")
+        .nth(1)
+        .getByRole("button", { name: "下架" })
+        .click();
       await expect(
-        page.locator(".market-admin-pills").filter({ hasText: "delisted" }),
+        page.locator(".market-admin-pills").filter({ hasText: "已下架" }),
       ).toBeVisible();
-      await page.getByRole("button", { name: "归档" }).click();
+      await page
+        .locator(".market-admin-form")
+        .nth(1)
+        .getByRole("button", { name: "归档" })
+        .click();
       await expect(
-        page.locator(".market-admin-pills").filter({ hasText: "archived" }),
+        page.locator(".market-admin-pills").filter({ hasText: "已归档" }),
       ).toBeVisible();
 
       await page.screenshot({

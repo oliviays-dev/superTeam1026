@@ -31,8 +31,8 @@ import { agentFromRow, type AgentRow, type TaskRow } from "./rows.js";
 
 interface TeammateTemplateRow {
   id: string;
-  project_id: string;
-  workspace_id: string;
+  project_id: string | null;
+  workspace_id: string | null;
   scope: TeammateTemplate["scope"];
   owner_principal_id: string | null;
   status: TeammateTemplateStatus;
@@ -47,7 +47,7 @@ interface TeammateTemplateRow {
 interface TeammateTemplateVersionRow {
   id: string;
   template_id: string;
-  project_id: string;
+  project_id: string | null;
   version: number;
   definition: TeammateDefinition;
   content_digest: string;
@@ -364,13 +364,12 @@ export class TeammateRepository {
     const result = await this.database.query<TeammateTemplateRow>(
       `SELECT *
        FROM teammate_templates
-       WHERE project_id = $1
-         AND ($2::boolean OR status <> 'archived')
-         AND (scope = 'platform' OR owner_principal_id = $3)
+       WHERE ($1::boolean OR status <> 'archived')
+         AND (scope = 'platform' OR owner_principal_id = $2)
        ORDER BY
          CASE status WHEN 'active' THEN 0 WHEN 'disabled' THEN 1 ELSE 2 END,
          lower(definition ->> 'name')`,
-      [input.projectId, input.includeArchived ?? false, input.actorPrincipalId],
+      [input.includeArchived ?? false, input.actorPrincipalId],
     );
     return result.rows.map(templateFromRow);
   }
@@ -425,13 +424,11 @@ export class TeammateRepository {
            id, project_id, workspace_id, scope, owner_principal_id, status,
            current_version, definition, created_by, created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, $5, 'active', 1, $6::jsonb, $7, NOW(), NOW()
+           $1, NULL, NULL, $2, $3, 'active', 1, $4::jsonb, $5, NOW(), NOW()
          )
          RETURNING *`,
         [
           templateId,
-          input.projectId,
-          input.workspaceId,
           input.template.scope,
           input.template.scope === "personal" ? input.actorPrincipalId : null,
           JSON.stringify(definition),
@@ -442,11 +439,10 @@ export class TeammateRepository {
         `INSERT INTO teammate_template_versions (
            id, template_id, project_id, version, definition,
            content_digest, created_by, created_at
-         ) VALUES ($1, $2, $3, 1, $4::jsonb, $5, $6, NOW())`,
+         ) VALUES ($1, $2, NULL, 1, $3::jsonb, $4, $5, NOW())`,
         [
           versionId,
           templateId,
-          input.projectId,
           JSON.stringify(definition),
           definitionDigest(definition),
           input.actorPrincipalId,
@@ -484,12 +480,11 @@ export class TeammateRepository {
         `INSERT INTO teammate_template_versions (
            id, template_id, project_id, version, definition,
            content_digest, created_by, created_at
-         ) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, NOW())
+         ) VALUES ($1, $2, NULL, $3, $4::jsonb, $5, $6, NOW())
          RETURNING *`,
         [
           randomUUID(),
           current.id,
-          current.project_id,
           version,
           JSON.stringify(definition),
           definitionDigest(definition),

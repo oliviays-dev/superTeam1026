@@ -4,6 +4,7 @@ import type {
   TemplateRole,
   TemplateRoleCategory,
   TemplateRolePermission,
+  WorkflowDefinition,
   WorkflowTemplate,
 } from "@pluginmax/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -31,6 +32,7 @@ import {
   deleteTemplateRole,
   listProjectTemplateHistory,
   listProjectTemplates,
+  listPlatformWorkflowTemplates,
   listTemplateRoles,
   listWorkflowTemplates,
   updateProjectTemplate,
@@ -117,6 +119,11 @@ export function ProjectTemplatesView({
     queryKey: ["workflow-templates", "available"],
     queryFn: listWorkflowTemplates,
   });
+  const businessChainsQuery = useQuery({
+    queryKey: ["platform-business-chains"],
+    queryFn: listPlatformWorkflowTemplates,
+    retry: false,
+  });
   const historyQuery = useQuery({
     queryKey: ["project-template-history", selectedTemplateId],
     queryFn: () => listProjectTemplateHistory(selectedTemplateId),
@@ -128,6 +135,9 @@ export function ProjectTemplatesView({
   const templates = templatesQuery.data ?? [];
   const roles = rolesQuery.data ?? [];
   const workflows = workflowsQuery.data ?? [];
+  const businessChains = (businessChainsQuery.data ?? []).filter(
+    (definition) => definition.kind === "business-chain",
+  );
   const selectedTemplate = templates.find(
     (template) => template.id === selectedTemplateId,
   );
@@ -302,6 +312,7 @@ export function ProjectTemplatesView({
                 template={creatingTemplate ? undefined : selectedTemplate}
                 roles={roles}
                 workflows={workflows}
+                businessChains={businessChains}
                 history={historyQuery.data ?? []}
                 historyLoading={historyQuery.isLoading}
                 onSaved={(saved) => {
@@ -422,6 +433,7 @@ function TemplateEditor({
   template,
   roles,
   workflows,
+  businessChains,
   history,
   historyLoading,
   onSaved,
@@ -431,6 +443,7 @@ function TemplateEditor({
   readonly template?: ProjectTemplate | undefined;
   readonly roles: TemplateRole[];
   readonly workflows: WorkflowTemplate[];
+  readonly businessChains: WorkflowDefinition[];
   readonly history: Awaited<ReturnType<typeof listProjectTemplateHistory>>;
   readonly historyLoading: boolean;
   readonly onSaved: (template: ProjectTemplate) => void;
@@ -449,6 +462,17 @@ function TemplateEditor({
   const [ownerRoleId, setOwnerRoleId] = useState(template?.ownerRoleId ?? "");
   const [workflowIds, setWorkflowIds] = useState<string[]>(
     template?.workflowTemplates.map((item) => item.workflowTemplateId) ?? [],
+  );
+  const [businessChainIds, setBusinessChainIds] = useState<string[]>(
+    template?.businessChainDefinitions.map(
+      (definition) => definition.workflowDefinitionId,
+    ) ?? [],
+  );
+  const [businessChainMode, setBusinessChainMode] = useState(
+    template?.businessChainPolicy.mode ?? "none",
+  );
+  const [defaultBusinessChainKey, setDefaultBusinessChainKey] = useState(
+    template?.businessChainPolicy.defaultBusinessChainKey ?? "",
   );
   const [accessPolicy, setAccessPolicy] = useState<ProjectTemplateAccessPolicy>(
     template?.accessPolicy ?? "all-members",
@@ -480,6 +504,29 @@ function TemplateEditor({
             expectedVersion: workflow.version,
           })),
         accessPolicy,
+        businessChainPolicy: {
+          mode: businessChainMode,
+          defaultBusinessChainKey:
+            defaultBusinessChainKey === "" ? null : defaultBusinessChainKey,
+          allowedBusinessChainKeys: businessChains
+            .filter((definition) =>
+              businessChainIds.includes(definition.id),
+            )
+            .map((definition) => definition.chainKey)
+            .filter((key): key is string => key !== null),
+          versionPolicy:
+            template?.businessChainPolicy.versionPolicy ??
+            "pin-at-project-create",
+        },
+        businessChainDefinitions: businessChains
+          .filter((definition) =>
+            businessChainIds.includes(definition.id),
+          )
+          .map((definition) => ({
+            workflowDefinitionId: definition.id,
+            expectedVersion: definition.revision,
+            required: businessChainMode === "required",
+          })),
         allowedActorIds: allowedActorIds
           .split(",")
           .map((item) => item.trim())
@@ -770,6 +817,102 @@ function TemplateEditor({
         <div className="template-domain-note">
           <WorkflowIcon size={14} />
           项目模版只保存工作流模版的稳定引用和版本快照。
+        </div>
+      </section>
+
+      <section className="template-section">
+        <div className="template-section-head">
+          <h3>业务链路策略</h3>
+          <span>{businessChainIds.length} 个固定版本引用</span>
+        </div>
+        <div className="pm-form-grid">
+          <label className="pm-field">
+            <span>绑定要求</span>
+            <select
+              value={businessChainMode}
+              disabled={readOnly}
+              onChange={(event) => {
+                const mode = event.target.value as
+                  | "required"
+                  | "optional"
+                  | "none";
+                setBusinessChainMode(mode);
+                if (mode === "none") {
+                  setBusinessChainIds([]);
+                  setDefaultBusinessChainKey("");
+                }
+              }}
+            >
+              <option value="none">不启用</option>
+              <option value="optional">可选绑定</option>
+              <option value="required">必须绑定</option>
+            </select>
+          </label>
+          <label className="pm-field">
+            <span>默认业务链路</span>
+            <select
+              value={defaultBusinessChainKey}
+              disabled={readOnly || businessChainMode === "none"}
+              onChange={(event) =>
+                setDefaultBusinessChainKey(event.target.value)
+              }
+            >
+              <option value="">按模板策略自动选择</option>
+              {businessChains
+                .filter(
+                  (definition) =>
+                    businessChainIds.includes(definition.id) &&
+                    definition.chainKey !== null,
+                )
+                .map((definition) => (
+                  <option key={definition.id} value={definition.chainKey!}>
+                    {definition.businessChainMetadata?.displayName ??
+                      definition.name}
+                  </option>
+                ))}
+            </select>
+          </label>
+        </div>
+        <div className="template-check-grid">
+          {businessChains.map((definition) => (
+            <label className="template-check" key={definition.id}>
+              <input
+                type="checkbox"
+                checked={businessChainIds.includes(definition.id)}
+                disabled={readOnly || businessChainMode === "none"}
+                onChange={(event) => {
+                  const next = event.target.checked
+                    ? [...new Set([...businessChainIds, definition.id])]
+                    : businessChainIds.filter((id) => id !== definition.id);
+                  setBusinessChainIds(next);
+                  if (
+                    !next.includes(definition.id) &&
+                    defaultBusinessChainKey === definition.chainKey
+                  ) {
+                    setDefaultBusinessChainKey("");
+                  }
+                }}
+              />
+              <span>
+                <strong>
+                  {definition.businessChainMetadata?.displayName ??
+                    definition.name}
+                </strong>
+                <small>
+                  {definition.chainKey} · revision {definition.revision}
+                </small>
+              </span>
+            </label>
+          ))}
+          {businessChains.length === 0 && (
+            <div className="pm-empty compact">
+              当前没有已发布的平台业务链路定义。先在项目工作流中配置并发布业务链路。
+            </div>
+          )}
+        </div>
+        <div className="template-domain-note">
+          <WorkflowIcon size={14} />
+          项目创建时固定定义 revision；后续定义或模版更新不会静默覆盖已有项目。
         </div>
       </section>
 

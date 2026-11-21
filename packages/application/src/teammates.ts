@@ -292,11 +292,6 @@ export class TeammateApplicationService {
         404,
       );
     }
-    await this.requireProjectPermission(
-      template.projectId,
-      actorPrincipalId,
-      "write",
-    );
     const allowed =
       template.scope === "platform"
         ? administrator
@@ -339,11 +334,25 @@ export class TeammateApplicationService {
         404,
       );
     }
-    await this.requireProjectPermission(
-      template.projectId,
-      actorPrincipalId,
-      "read",
-    );
+    const principal =
+      await this.repositories.authorization.getPrincipal(actorPrincipalId);
+    if (principal === undefined || principal.status !== "active") {
+      throw new ApplicationError(
+        "principal_inactive",
+        "An active Principal is required",
+        403,
+      );
+    }
+    if (
+      template.scope === "personal" &&
+      template.ownerPrincipalId !== actorPrincipalId
+    ) {
+      throw new ApplicationError(
+        "teammate_template_forbidden",
+        "Personal templates are visible only to their owner",
+        403,
+      );
+    }
     const versions =
       await this.repositories.teammates.listTemplateVersions(templateId);
     return { template, versions };
@@ -510,13 +519,6 @@ export class TeammateApplicationService {
         "teammate_template_not_found",
         "AI Teammate template not found",
         404,
-      );
-    }
-    if (template.projectId !== parsed.projectId) {
-      throw new ApplicationError(
-        "teammate_template_cross_project",
-        "The template belongs to another workspace",
-        403,
       );
     }
     if (template.status !== "active") {

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   ActionTicketBundle,
+  AcknowledgeProjectAlertInput,
   Agent,
   AgentDetail,
   AgentEpisode,
@@ -10,6 +11,9 @@ import type {
   ApprovalSlaSweepResult,
   ArchiveMeetingInput,
   Artifact,
+  AssignProjectAlertInput,
+  BindProjectBusinessChainValue,
+  BusinessChainDefinitionValue,
   BlockTaskInput,
   ClaimTaskInput,
   ConfirmMeetingMinutesInput,
@@ -77,10 +81,16 @@ import type {
   ProjectRole,
   ProjectTemplate,
   ProjectTemplateRevisionSummary,
+  ProjectAlertDetail,
+  ProjectBusinessChainSettings,
+  ProjectProgressOverview,
+  ProjectFeatureFlagState,
   ProjectReportDetail,
   ProjectReportGenerationResult,
   ProjectReportQuery,
   ProjectReportSummary,
+  ProjectSourceRefreshValue,
+  ProjectSourceRefreshResult,
   GenerateProjectReportInput,
   ProjectAiPm,
   ProjectAiPmProvisionResult,
@@ -88,6 +98,7 @@ import type {
   PublishMemoryTruthInput,
   PublishMeetingMinutesInput,
   RestoreMeetingInput,
+  ResolveProjectAlertInput,
   RevokeMeetingDelegateInput,
   SetMeetingReadPositionInput,
   ProvideTaskInput,
@@ -139,6 +150,7 @@ import type {
   TriggerMeetingAiResult,
   TransferTaskInput,
   TransferWorkflowApprovalInput,
+  UnbindProjectBusinessChainInput,
   UpdateAgentInput,
   UpdateHandoffCardInput,
   UpdateMemoryClaimInput,
@@ -149,8 +161,10 @@ import type {
   UpdateMeetingPrivateBriefingInput,
   UploadMeetingFileInput,
   UpdateProjectMemberInput,
+  UpdateProjectFeatureFlagsInput,
   UpdateProjectInput,
   UpdateProjectRoleInput,
+  UpdateTaskParentInput,
   UpdateTaskInput,
   UpdateWorkbenchBriefSettingsInput,
   ValidateWorkflowMarkdownInput,
@@ -177,6 +191,7 @@ import type {
   WorkflowSweepResult,
   WorkflowStepDefinition,
   WorkflowValidationResult,
+  SuppressProjectAlertInput,
   OperationsSnapshot,
   ExternalRuntime,
   ExternalRuntimeCapabilitySnapshot,
@@ -222,6 +237,20 @@ import type {
   TeammateTemplate,
   WorkflowPlanDiff,
   WorkflowPlanDetail,
+  PlanningArtifact,
+  PlanningArtifactKind,
+  PlanningOverview,
+  PlanningQualityMetric,
+  PlanningRetryInput,
+  PlanningRunDetail,
+  PlanningRunOnceInput,
+  PlanningRunRevisionInput,
+  PlanningSettings,
+  PlanningStartInput,
+  PlanningSubmitPlanInput,
+  PlanningWorkerResult,
+  TaskDispatchReadiness,
+  UpdatePlanningSettingsInput,
   ContextPolicy,
   CreateTaskCaptureCandidateInput,
   CreateTaskCaptureSessionInput,
@@ -243,6 +272,7 @@ import type {
   CommitTaskDraftBatchInput,
 } from "@pluginmax/contracts";
 import {
+  BUSINESS_CHAIN_FLAG,
   inferDeliveryTarget,
   createExternalRuntimeInputSchema,
   createRootTraceContext,
@@ -272,6 +302,7 @@ import {
   SceneContextRepositoryError,
   TaskCaptureRepositoryError,
   WorkflowPlanRepositoryError,
+  PlanningRepositoryError,
   type PlatformRepositories,
   type ScopedAuthorizationPermission,
   type TaskAttachment,
@@ -317,6 +348,21 @@ import {
   type WorkflowPlanSweepResult,
 } from "./workflow-plan.js";
 import { SkillApplicationService } from "./skills.js";
+import { PlanningApplicationService } from "./planning.js";
+import type { PlanningRuntimeWorkerOptions } from "./planning-runtime.js";
+import {
+  ProjectBusinessChainApplicationError,
+  ProjectBusinessChainApplicationService,
+  translateProjectBusinessChainError,
+  type ProjectSourceAdapter,
+} from "./project-business-chain.js";
+import { McpProviderApplicationService } from "./mcp-providers.js";
+import { McpToolCallApplicationService } from "./mcp-tool-calls.js";
+export type {
+  AgentRuntimeAdapter,
+  AgentRuntimeEvent,
+  AgentRuntimeToolRequestEvent,
+} from "@pluginmax/agent-runtime";
 
 export {
   TaskExecutionPreflightError,
@@ -339,6 +385,52 @@ export {
   type WorkflowPlanSweepResult,
 } from "./workflow-plan.js";
 export { SkillApplicationService } from "./skills.js";
+export { PlanningApplicationService } from "./planning.js";
+export {
+  MockProjectSourceAdapter,
+  ProjectBusinessChainApplicationError,
+  ProjectBusinessChainApplicationService,
+  translateProjectBusinessChainError,
+  type MockProjectSourceFixture,
+  type ProjectSourceAdapter,
+  type ProjectSourceAdapterInput,
+} from "./project-business-chain.js";
+export {
+  McpProviderApplicationError,
+  McpProviderApplicationService,
+  isMcpProviderRepositoryError,
+  type McpProviderActor,
+  type McpProviderApplicationErrorCode,
+} from "./mcp-providers.js";
+export {
+  McpToolCallApplicationError,
+  McpToolCallApplicationService,
+  type McpToolCallApplicationErrorCode,
+} from "./mcp-tool-calls.js";
+export {
+  type RuntimeToolBridgePort,
+  type RuntimeToolBridgeRequest,
+} from "./runtime-tool-bridge.js";
+export {
+  AcceptancePlanningPlanner,
+  DeterministicPlanningCritic,
+  EmptyPlanningKnowledgeProvider,
+  PlanningRuntimeWorker,
+  type PlanningCritic,
+  type PlanningDraft,
+  type PlanningKnowledgeProvider,
+  type PlanningKnowledgeProviderInput,
+  type PlanningPlanner,
+  type PlanningRuntimeWorkerOptions,
+} from "./planning-runtime.js";
+export {
+  critiquePlanningGraph,
+  evaluatePlanningQualityGate,
+  inspectPlanningGraph,
+  isPlanningHighRiskNode,
+  normalizeAcceptanceStatement,
+  type PlanningGraphInspection,
+} from "./planning-quality.js";
 export {
   buildRunTimeline,
   decodeExecutionHistoryCursor,
@@ -440,11 +532,17 @@ export class PlatformApplication {
   private readonly acceptance: TaskAcceptanceService;
   private readonly workflowAssignments: WorkflowAssignmentService;
   readonly workflowPlans: WorkflowPlanApplicationService;
+  readonly planningRuntime: PlanningApplicationService;
+  readonly projectBusinessChains: ProjectBusinessChainApplicationService;
   readonly skills: SkillApplicationService;
+  readonly mcpProviders: McpProviderApplicationService;
+  readonly mcpToolCalls: McpToolCallApplicationService;
 
   constructor(
     private readonly repositories: PlatformRepositories,
     private readonly files?: FileStore,
+    planningWorkerOptions: PlanningRuntimeWorkerOptions = {},
+    projectSourceAdapters?: readonly ProjectSourceAdapter[],
   ) {
     this.agentRuntimePreflight = new AgentRuntimePreflightService(repositories);
     this.taskExecutionPreflight = new TaskExecutionPreflightService(
@@ -465,7 +563,24 @@ export class PlatformApplication {
           false,
         ),
     );
+    this.planningRuntime = new PlanningApplicationService(
+      repositories,
+      planningWorkerOptions,
+    );
+    this.projectBusinessChains = new ProjectBusinessChainApplicationService(
+      repositories,
+      projectSourceAdapters,
+    );
     this.skills = new SkillApplicationService(repositories);
+    this.mcpProviders = new McpProviderApplicationService(
+      repositories.mcpProviders,
+      repositories.featureFlags,
+    );
+    this.mcpToolCalls = new McpToolCallApplicationService(
+      repositories.mcpToolCalls,
+      repositories.runtimeToolRequests,
+      repositories.featureFlags,
+    );
     this.identityAdministration = new IdentityAdministrationService(
       repositories.identityAdministration,
     );
@@ -492,6 +607,177 @@ export class PlatformApplication {
       throw new ApplicationError("project_not_found", "Project not found", 404);
     }
     return project;
+  }
+
+  async getProjectBusinessChainSettings(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<ProjectBusinessChainSettings> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.getSettings(projectId),
+    );
+  }
+
+  async bindProjectBusinessChain(
+    projectId: string,
+    input: BindProjectBusinessChainValue,
+    actorId = "local-admin",
+  ) {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.bind({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async unbindProjectBusinessChain(
+    projectId: string,
+    input: UnbindProjectBusinessChainInput,
+    actorId = "local-admin",
+  ): Promise<ProjectBusinessChainSettings> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.unbind({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async updateProjectFeatureFlags(
+    projectId: string,
+    input: UpdateProjectFeatureFlagsInput,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<ProjectFeatureFlagState[]> {
+    if (!administrator) {
+      throw new ApplicationError(
+        "forbidden",
+        "Platform administrator permission is required",
+        403,
+      );
+    }
+    await this.requireProject(projectId);
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.updateFeatureFlags({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async refreshProjectSources(
+    projectId: string,
+    input: ProjectSourceRefreshValue,
+    actorId = "local-admin",
+  ): Promise<ProjectSourceRefreshResult> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.refreshSources({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async getProjectProgressOverview(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<ProjectProgressOverview> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.getOverview(projectId),
+    );
+  }
+
+  async getProjectAlertDetail(
+    alertId: string,
+    actorId = "local-admin",
+  ): Promise<ProjectAlertDetail> {
+    const detail = await this.repositories.projectBusinessChains.getAlertDetail(
+      alertId,
+    );
+    await this.requireProjectReadAccess(detail.alert.projectId, actorId);
+    return detail;
+  }
+
+  async acknowledgeProjectAlert(
+    alertId: string,
+    input: AcknowledgeProjectAlertInput,
+    actorId = "local-admin",
+  ): Promise<ProjectAlertDetail> {
+    const detail = await this.repositories.projectBusinessChains.getAlertDetail(
+      alertId,
+    );
+    await this.requireActiveProjectPermission(
+      detail.alert.projectId,
+      "write",
+      actorId,
+    );
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.acknowledgeAlert(alertId, actorId, input),
+    );
+  }
+
+  async suppressProjectAlert(
+    alertId: string,
+    input: SuppressProjectAlertInput,
+    actorId = "local-admin",
+  ): Promise<ProjectAlertDetail> {
+    const detail = await this.repositories.projectBusinessChains.getAlertDetail(
+      alertId,
+    );
+    await this.requireActiveProjectPermission(
+      detail.alert.projectId,
+      "write",
+      actorId,
+    );
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.suppressAlert(alertId, actorId, input),
+    );
+  }
+
+  async resolveProjectAlert(
+    alertId: string,
+    input: ResolveProjectAlertInput,
+    actorId = "local-admin",
+  ): Promise<ProjectAlertDetail> {
+    const detail = await this.repositories.projectBusinessChains.getAlertDetail(
+      alertId,
+    );
+    await this.requireActiveProjectPermission(
+      detail.alert.projectId,
+      "write",
+      actorId,
+    );
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.resolveAlert(alertId, actorId, input),
+    );
+  }
+
+  async assignProjectAlert(
+    alertId: string,
+    input: AssignProjectAlertInput,
+    actorId = "local-admin",
+  ): Promise<ProjectAlertDetail> {
+    const detail = await this.repositories.projectBusinessChains.getAlertDetail(
+      alertId,
+    );
+    await this.requireActiveProjectPermission(
+      detail.alert.projectId,
+      "write",
+      actorId,
+    );
+    return this.withProjectBusinessChain(() =>
+      this.projectBusinessChains.assignAlert(alertId, actorId, input),
+    );
   }
 
   async createProject(
@@ -537,7 +823,9 @@ export class PlatformApplication {
       }
       return materialized.project;
     } catch (error) {
-      throw translateProjectTemplateError(error);
+      const templateError = translateProjectTemplateError(error);
+      if (templateError !== error) throw templateError;
+      throw translateProjectBusinessChainError(error);
     }
   }
 
@@ -2402,6 +2690,32 @@ export class PlatformApplication {
       );
     }
     const projectTasks = await this.repositories.tasks.list(input.projectId);
+    if (input.parentTaskId !== undefined) {
+      const parent = projectTasks.find(
+        (candidate) => candidate.id === input.parentTaskId,
+      );
+      if (parent === undefined) {
+        throw new ApplicationError(
+          "task_parent_not_found",
+          "Parent task not found in this project",
+          404,
+        );
+      }
+      if (parent.parentTaskId !== undefined) {
+        throw new ApplicationError(
+          "task_hierarchy_depth",
+          "Task hierarchy is limited to one level",
+          409,
+        );
+      }
+      if (parent.status === "done" || parent.status === "cancelled") {
+        throw new ApplicationError(
+          "task_parent_inactive",
+          "Completed or cancelled tasks cannot receive child tasks",
+          409,
+        );
+      }
+    }
     const candidateTaskId = randomUUID();
     guardTaskDependencyRule(() =>
       assertValidTaskDependencies({
@@ -2426,6 +2740,92 @@ export class PlatformApplication {
       summary: `创建任务“${task.title}”`,
     });
     return task;
+  }
+
+  async setTaskParent(
+    id: string,
+    input: UpdateTaskParentInput,
+    actorId = "local-admin",
+  ): Promise<TaskDetail> {
+    const task = await this.getTask(id);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    const projectTasks = await this.repositories.tasks.list(task.projectId);
+    if (input.parentTaskId !== null) {
+      if (input.parentTaskId === id) {
+        throw new ApplicationError(
+          "task_parent_self",
+          "A task cannot be its own parent",
+          409,
+        );
+      }
+      const parent = projectTasks.find(
+        (candidate) => candidate.id === input.parentTaskId,
+      );
+      if (parent === undefined) {
+        throw new ApplicationError(
+          "task_parent_not_found",
+          "Parent task not found in this project",
+          404,
+        );
+      }
+      if (parent.parentTaskId !== undefined) {
+        throw new ApplicationError(
+          "task_hierarchy_depth",
+          "Task hierarchy is limited to one level",
+          409,
+        );
+      }
+      if (parent.status === "done" || parent.status === "cancelled") {
+        throw new ApplicationError(
+          "task_parent_inactive",
+          "Completed or cancelled tasks cannot receive child tasks",
+          409,
+        );
+      }
+      if (projectTasks.some((candidate) => candidate.parentTaskId === id)) {
+        throw new ApplicationError(
+          "task_has_children",
+          "A task with children cannot become a child task",
+          409,
+        );
+      }
+    }
+    const updated = await this.repositories.tasks.setParent({
+      id,
+      parentTaskId: input.parentTaskId,
+      expectedRevision: input.expectedRevision,
+    });
+    if (updated === undefined) {
+      throw new ApplicationError("task_not_found", "Task not found", 404);
+    }
+    if (updated === "revision_conflict") {
+      throw new ApplicationError(
+        "task_revision_conflict",
+        "Task changed before its hierarchy was updated",
+        409,
+      );
+    }
+    const parentName =
+      input.parentTaskId === null
+        ? undefined
+        : projectTasks.find(
+            (candidate) => candidate.id === input.parentTaskId,
+          )?.title;
+    await this.repositories.taskCollaboration.appendEvent({
+      taskId: id,
+      kind: "hierarchy",
+      actorId,
+      actorName: actorId,
+      summary:
+        input.parentTaskId === null
+          ? `解除任务“${task.title}”与主任务的关联`
+          : `将任务“${task.title}”关联到主任务“${parentName ?? input.parentTaskId}”`,
+      data: {
+        previousParentTaskId: task.parentTaskId ?? null,
+        parentTaskId: input.parentTaskId,
+      },
+    });
+    return this.getTaskDetail(id);
   }
 
   async createTaskCaptureSession(
@@ -3115,6 +3515,275 @@ export class PlatformApplication {
     }
   }
 
+  async getPlanningSettings(
+    projectId: string,
+    actorId = "local-admin",
+  ): Promise<PlanningSettings> {
+    await this.requireProjectReadAccess(projectId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.getSettings(projectId),
+    );
+  }
+
+  async updatePlanningSettings(
+    projectId: string,
+    input: UpdatePlanningSettingsInput,
+    actorId = "local-admin",
+  ): Promise<PlanningSettings> {
+    await this.requireActiveProjectPermission(projectId, "write", actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.updateSettings({
+        projectId,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async startPlanning(
+    taskId: string,
+    input: PlanningStartInput,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const task = await this.getTask(taskId);
+    await this.requireActiveProjectPermission(task.projectId, "write", actorId);
+    const result = await this.withPlanning(() =>
+      this.planningRuntime.start({
+        taskId,
+        actorId,
+        value: input,
+      }),
+    );
+    return result.detail;
+  }
+
+  async getPlanningOverview(
+    taskId: string,
+    actorId = "local-admin",
+  ): Promise<PlanningOverview> {
+    const task = await this.getTask(taskId);
+    await this.requireProjectReadAccess(task.projectId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.getOverview(taskId),
+    );
+  }
+
+  async pausePlanningRun(
+    runId: string,
+    input: PlanningRunRevisionInput,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.pause({
+        runId: detail.run.id,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async resumePlanningRun(
+    runId: string,
+    input: PlanningRunRevisionInput,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.startPaused({
+        runId: detail.run.id,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async cancelPlanningRun(
+    runId: string,
+    input: PlanningRunRevisionInput,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.cancel({
+        runId: detail.run.id,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async markPlanningReviewRequired(
+    runId: string,
+    input: PlanningRunRevisionInput,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.reviewRequired({
+        runId: detail.run.id,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async retryPlanningRun(
+    runId: string,
+    input: PlanningRetryInput,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    const result = await this.withPlanning(() =>
+      this.planningRuntime.retry({
+        runId: detail.run.id,
+        actorId,
+        value: input,
+      }),
+    );
+    return result.detail;
+  }
+
+  async runPlanningRuntimeOnce(
+    input: PlanningRunOnceInput = {},
+  ): Promise<PlanningWorkerResult> {
+    return this.withPlanning(() => this.planningRuntime.runOnce(input));
+  }
+
+  async runPlanningRun(
+    runId: string,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    await this.withPlanning(() =>
+      this.planningRuntime.processRun(detail.run.id),
+    );
+    return this.planningRuntime.getRun(detail.run.id);
+  }
+
+  async submitPlanningPlan(
+    runId: string,
+    input: PlanningSubmitPlanInput,
+    actorId = "local-admin",
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.submitPlan({
+        runId: detail.run.id,
+        actorId,
+        value: input,
+      }),
+    );
+  }
+
+  async getTaskPlanningReadiness(
+    taskId: string,
+    actorId = "local-admin",
+  ): Promise<TaskDispatchReadiness> {
+    const task = await this.getTask(taskId);
+    await this.requireProjectReadAccess(task.projectId, actorId);
+    return this.planningRuntime.getDispatchReadiness(taskId);
+  }
+
+  async recordPlanningArtifact(
+    runId: string,
+    input: {
+      readonly kind: PlanningArtifactKind;
+      readonly payload: unknown;
+    },
+    actorId = "local-admin",
+  ): Promise<PlanningArtifact> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.recordArtifact({
+        runId: detail.run.id,
+        actorId,
+        kind: input.kind,
+        payload: input.payload,
+      }),
+    );
+  }
+
+  async recordPlanningQualityMetric(
+    runId: string,
+    input: {
+      readonly criticScore: number | null;
+      readonly validatorErrorCount: number;
+      readonly acceptanceCoverage: number | null;
+      readonly nodeCount: number;
+      readonly depth: number;
+      readonly humanReviewRequired: boolean;
+      readonly autoApproveEligible: boolean;
+    },
+    actorId = "local-admin",
+  ): Promise<PlanningQualityMetric> {
+    const detail = await this.requirePlanningRunWrite(runId, actorId);
+    return this.withPlanning(() =>
+      this.planningRuntime.recordQualityMetric({
+        runId: detail.run.id,
+        actorId,
+        ...input,
+      }),
+    );
+  }
+
+  private async requirePlanningRunWrite(
+    runId: string,
+    actorId: string,
+  ): Promise<PlanningRunDetail> {
+    const detail = await this.withPlanning(() =>
+      this.planningRuntime.getRun(runId),
+    );
+    await this.requireActiveProjectPermission(
+      detail.run.projectId,
+      "write",
+      actorId,
+    );
+    return detail;
+  }
+
+  private async withPlanning<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof PlanningRepositoryError) {
+        const statusCode =
+          error.code === "planning_run_not_found" ||
+          error.code === "planning_root_task_invalid"
+            ? 404
+            : error.code === "planning_artifact_invalid"
+              ? 422
+              : 409;
+        throw new ApplicationError(
+          error.code,
+          error.message,
+          statusCode,
+          error.details,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async withProjectBusinessChain<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      const translated = translateProjectBusinessChainError(error);
+      if (translated instanceof ProjectBusinessChainApplicationError) {
+        throw new ApplicationError(
+          translated.code,
+          translated.message,
+          translated.statusCode,
+          translated.details,
+        );
+      }
+      throw translated;
+    }
+  }
+
   async listTaskRuns(taskId: string) {
     await this.getTask(taskId);
     return this.repositories.runs.listByTask(taskId);
@@ -3729,6 +4398,16 @@ export class PlatformApplication {
         "task_dependencies_unresolved",
         "All prerequisite tasks must be done before dispatch",
         409,
+      );
+    }
+    const planningReadiness =
+      await this.repositories.planning.getTaskDispatchReadiness(task.id);
+    if (!planningReadiness.ready) {
+      throw new ApplicationError(
+        planningReadiness.code,
+        planningReadiness.message,
+        409,
+        planningReadiness,
       );
     }
     const runs = await this.repositories.runs.listByTask(task.id);
@@ -5735,6 +6414,54 @@ export class PlatformApplication {
     } catch (error) {
       throw translateWorkflowAssignmentError(error);
     }
+  }
+
+  async configureWorkflowBusinessChain(
+    workflowId: string,
+    input: BusinessChainDefinitionValue,
+    actorId: string,
+    administrator: boolean,
+  ): Promise<WorkflowDefinition> {
+    const definition =
+      await this.workflowAssignments.getReadableDefinition(workflowId, actorId);
+    if (definition.scope === "platform") {
+      if (!administrator) {
+        throw new ApplicationError(
+          "forbidden",
+          "Platform administrator permission is required",
+          403,
+        );
+      }
+    } else {
+      await this.requireActiveProjectPermission(
+        definition.ownerProjectId,
+        "write",
+        actorId,
+      );
+    }
+    const flag =
+      await this.repositories.projectBusinessChains.getFeatureFlagState(
+        BUSINESS_CHAIN_FLAG,
+        definition.ownerProjectId,
+      );
+    if (!flag.enabled) {
+      throw new ApplicationError(
+        "project_business_chain_disabled",
+        "Feature Flag project.business_chain is disabled",
+        409,
+        { flagKey: BUSINESS_CHAIN_FLAG },
+      );
+    }
+    return this.withProjectBusinessChain(async () => {
+      await this.repositories.projectBusinessChains.configureDefinition({
+        workflowDefinitionId: workflowId,
+        value: input,
+      });
+      return this.workflowAssignments.getReadableDefinition(
+        workflowId,
+        actorId,
+      );
+    });
   }
 
   async publishWorkflowDefinition(
@@ -10923,6 +11650,14 @@ function translateWorkflowPlanFailure(error: unknown): Error {
       error.code,
       error.message,
       error.code === "workflow_plan_not_found" ? 404 : 409,
+    );
+  }
+  if (error instanceof PlanningRepositoryError) {
+    return new ApplicationError(
+      error.code,
+      error.message,
+      error.code === "planning_run_not_found" ? 404 : 409,
+      error.details,
     );
   }
   return error instanceof Error ? error : new Error(String(error));

@@ -6,6 +6,8 @@ import type {
   InstallSkillInput,
   RunSkillSnapshot,
   SkillAuditEvent,
+  SkillBindingMode,
+  SkillBindingScene,
   SkillDefinition,
   SkillDetail,
   SkillInstallation,
@@ -45,6 +47,7 @@ interface SkillVersionRow {
   publisher_principal_id: string;
   trust_level: SkillTrustLevel;
   instructions: string;
+  instructions_hash: string | null;
   manifest: Record<string, unknown>;
   permissions: string[];
   triggers: string[];
@@ -73,6 +76,8 @@ interface TemplateBindingRow {
   installation_id: string;
   required: boolean;
   enabled: boolean;
+  mode: SkillBindingMode;
+  scenes: SkillBindingScene[];
   bound_by_principal_id: string;
   created_at: Date;
   updated_at: Date;
@@ -85,6 +90,8 @@ interface InstanceExtensionRow {
   skill_version_id: string;
   installation_id: string;
   enabled: boolean;
+  mode: "additive";
+  scenes: SkillBindingScene[];
   added_by_principal_id: string;
   created_at: Date;
   updated_at: Date;
@@ -94,6 +101,8 @@ interface EffectiveSkillRow extends SkillVersionRow {
   skill_key: string;
   skill_name: string;
   required?: boolean;
+  skill_mode: SkillBindingMode;
+  skill_scenes: SkillBindingScene[];
 }
 
 interface TeammateSkillScopeRow {
@@ -166,6 +175,9 @@ function definitionFromRow(row: SkillDefinitionRow): SkillDefinition {
 }
 
 function versionFromRow(row: SkillVersionRow): SkillVersion {
+  const instructionsHash =
+    row.instructions_hash ??
+    createHash("sha256").update(row.instructions).digest("hex");
   return {
     id: row.id,
     skillId: row.skill_id,
@@ -174,6 +186,7 @@ function versionFromRow(row: SkillVersionRow): SkillVersion {
     publisherPrincipalId: row.publisher_principal_id,
     trustLevel: row.trust_level,
     instructions: row.instructions,
+    instructionsHash,
     manifest: row.manifest,
     permissions: row.permissions,
     triggers: row.triggers,
@@ -197,9 +210,7 @@ function installationFromRow(row: SkillInstallationRow): SkillInstallation {
   };
 }
 
-function bindingFromRow(
-  row: TemplateBindingRow,
-): TeammateTemplateSkillBinding {
+function bindingFromRow(row: TemplateBindingRow): TeammateTemplateSkillBinding {
   return {
     id: row.id,
     templateId: row.template_id,
@@ -208,6 +219,8 @@ function bindingFromRow(
     installationId: row.installation_id,
     required: row.required,
     enabled: row.enabled,
+    mode: row.mode,
+    scenes: row.scenes,
     boundByPrincipalId: row.bound_by_principal_id,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -224,6 +237,8 @@ function extensionFromRow(
     skillVersionId: row.skill_version_id,
     installationId: row.installation_id,
     enabled: row.enabled,
+    mode: row.mode,
+    scenes: row.scenes,
     addedByPrincipalId: row.added_by_principal_id,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -440,7 +455,9 @@ async function resolveEffectiveWithQuery(
        version.*,
        definition.key AS skill_key,
        definition.name AS skill_name,
-       binding.required
+       binding.required,
+       binding.mode AS skill_mode,
+       binding.scenes AS skill_scenes
      FROM teammate_template_skill_bindings AS binding
      JOIN skill_definitions AS definition
        ON definition.id = binding.skill_id
@@ -463,7 +480,9 @@ async function resolveEffectiveWithQuery(
        version.*,
        definition.key AS skill_key,
        definition.name AS skill_name,
-       FALSE AS required
+       FALSE AS required,
+       extension.mode AS skill_mode,
+       extension.scenes AS skill_scenes
      FROM teammate_instance_skill_extensions AS extension
      JOIN skill_definitions AS definition
        ON definition.id = extension.skill_id
@@ -497,12 +516,17 @@ async function resolveEffectiveWithQuery(
       publisherPrincipalId: row.publisher_principal_id,
       trustLevel: row.trust_level,
       instructions: row.instructions,
+      instructionsHash:
+        row.instructions_hash ??
+        createHash("sha256").update(row.instructions).digest("hex"),
       manifest: row.manifest,
       permissions: row.permissions,
       triggers: row.triggers,
       status: row.status,
       protected: row.protected,
       source,
+      mode: row.skill_mode,
+      scenes: row.skill_scenes,
       grantsAuthorization: false,
     });
   };
@@ -691,11 +715,11 @@ export class SkillRepository {
       await client.query(
         `INSERT INTO skill_versions (
            id, skill_id, version, digest, publisher_principal_id,
-           trust_level, instructions, manifest, permissions, triggers,
-           status, protected, created_at
+           trust_level, instructions, instructions_hash, manifest,
+           permissions, triggers, status, protected, created_at
          ) VALUES (
-           $1, $2, 1, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb,
-           $10, $11, NOW()
+           $1, $2, 1, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb,
+           $11, $12, NOW()
          )`,
         [
           versionId,
@@ -704,6 +728,7 @@ export class SkillRepository {
           input.actorPrincipalId,
           input.content.trustLevel,
           input.content.instructions,
+          createHash("sha256").update(input.content.instructions).digest("hex"),
           JSON.stringify(input.content.manifest),
           JSON.stringify(input.content.permissions),
           JSON.stringify(input.content.triggers),
@@ -770,11 +795,11 @@ export class SkillRepository {
       await client.query(
         `INSERT INTO skill_versions (
            id, skill_id, version, digest, publisher_principal_id,
-           trust_level, instructions, manifest, permissions, triggers,
-           status, protected, created_at
+           trust_level, instructions, instructions_hash, manifest,
+           permissions, triggers, status, protected, created_at
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb,
-           $11, $12, NOW()
+           $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb,
+           $11::jsonb, $12, $13, NOW()
          )`,
         [
           versionId,
@@ -784,6 +809,7 @@ export class SkillRepository {
           input.actorPrincipalId,
           input.content.trustLevel,
           input.content.instructions,
+          createHash("sha256").update(input.content.instructions).digest("hex"),
           JSON.stringify(input.content.manifest),
           JSON.stringify(input.content.permissions),
           JSON.stringify(input.content.triggers),
@@ -809,9 +835,7 @@ export class SkillRepository {
     });
   }
 
-  async listInstallations(
-    principalId: string,
-  ): Promise<SkillInstallation[]> {
+  async listInstallations(principalId: string): Promise<SkillInstallation[]> {
     const result = await this.database.query<SkillInstallationRow>(
       `SELECT *
        FROM skill_installations
@@ -890,10 +914,7 @@ export class SkillRepository {
           "Skill installation disappeared during install",
         );
       }
-      if (
-        row.version_id === input.value.versionId &&
-        row.status === "active"
-      ) {
+      if (row.version_id === input.value.versionId && row.status === "active") {
         return installationFromRow(row);
       }
       const updated = await client.query<SkillInstallationRow>(
@@ -986,6 +1007,32 @@ export class SkillRepository {
     readonly value: BindTemplateSkillInput;
   }): Promise<TeammateTemplateSkillBinding> {
     return this.database.transaction(async (client) => {
+      const mode = input.value.required
+        ? "required"
+        : (input.value.mode ?? "default");
+      const scenes = [
+        ...new Set(input.value.scenes ?? ["task-execution"]),
+      ] as SkillBindingScene[];
+      if (mode === "primary") {
+        const primaryBindings = await client.query<{
+          scenes: SkillBindingScene[];
+        }>(
+          `SELECT scenes
+           FROM teammate_template_skill_bindings
+           WHERE template_id = $1 AND mode = 'primary'`,
+          [input.templateId],
+        );
+        if (
+          primaryBindings.rows.some((binding) =>
+            binding.scenes.some((scene) => scenes.includes(scene)),
+          )
+        ) {
+          throw new SkillRepositoryError(
+            "skill_binding_conflict",
+            "A primary Skill already exists for one or more scenes",
+          );
+        }
+      }
       const installation = await requireInstallation(client, {
         principalId: input.actorPrincipalId,
         skillId: input.value.skillId,
@@ -994,8 +1041,11 @@ export class SkillRepository {
       const inserted = await client.query<TemplateBindingRow>(
         `INSERT INTO teammate_template_skill_bindings (
            id, template_id, skill_id, skill_version_id, installation_id,
-           required, enabled, bound_by_principal_id, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+           required, enabled, mode, scenes, bound_by_principal_id,
+           created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, NOW(), NOW()
+         )
          ON CONFLICT (template_id, skill_id) DO NOTHING
          RETURNING *`,
         [
@@ -1006,6 +1056,8 @@ export class SkillRepository {
           installation.id,
           input.value.required ?? false,
           input.value.enabled ?? true,
+          mode,
+          JSON.stringify(scenes),
           input.actorPrincipalId,
         ],
       );
@@ -1021,6 +1073,8 @@ export class SkillRepository {
             skillId: input.value.skillId,
             versionId: input.value.versionId,
             required: input.value.required ?? false,
+            mode,
+            scenes,
           },
         });
         return bindingFromRow(inserted.rows[0]);
@@ -1036,7 +1090,9 @@ export class SkillRepository {
       if (
         row.skill_version_id === input.value.versionId &&
         row.required === (input.value.required ?? false) &&
-        row.enabled === (input.value.enabled ?? true)
+        row.enabled === (input.value.enabled ?? true) &&
+        row.mode === mode &&
+        JSON.stringify(row.scenes) === JSON.stringify(scenes)
       ) {
         return bindingFromRow(row);
       }
@@ -1103,7 +1159,8 @@ export class SkillRepository {
     readonly value: {
       readonly skillId: string;
       readonly versionId: string;
-      readonly enabled?: boolean;
+      readonly enabled?: boolean | undefined;
+      readonly scenes?: SkillBindingScene[] | undefined;
     };
   }): Promise<TeammateInstanceSkillExtension> {
     return this.database.transaction(async (client) => {
@@ -1129,11 +1186,16 @@ export class SkillRepository {
         skillId: input.value.skillId,
         versionId: input.value.versionId,
       });
+      const scenes = [
+        ...new Set(input.value.scenes ?? ["task-execution"]),
+      ] as SkillBindingScene[];
       const inserted = await client.query<InstanceExtensionRow>(
         `INSERT INTO teammate_instance_skill_extensions (
            id, teammate_id, skill_id, skill_version_id, installation_id,
-           enabled, added_by_principal_id, created_at, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+           enabled, mode, scenes, added_by_principal_id, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4, $5, $6, 'additive', $7::jsonb, $8, NOW(), NOW()
+         )
          ON CONFLICT (teammate_id, skill_id) DO NOTHING
          RETURNING *`,
         [
@@ -1143,6 +1205,7 @@ export class SkillRepository {
           input.value.versionId,
           installation.id,
           input.value.enabled ?? true,
+          JSON.stringify(scenes),
           input.actorPrincipalId,
         ],
       );
@@ -1157,6 +1220,7 @@ export class SkillRepository {
             extensionId: inserted.rows[0].id,
             skillId: input.value.skillId,
             versionId: input.value.versionId,
+            scenes,
           },
         });
         return extensionFromRow(inserted.rows[0]);
@@ -1171,7 +1235,8 @@ export class SkillRepository {
       const row = existing.rows[0]!;
       if (
         row.skill_version_id === input.value.versionId &&
-        row.enabled === (input.value.enabled ?? true)
+        row.enabled === (input.value.enabled ?? true) &&
+        JSON.stringify(row.scenes) === JSON.stringify(scenes)
       ) {
         return extensionFromRow(row);
       }

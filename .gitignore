@@ -6,6 +6,7 @@ coverage/
 dist/
 lib/
 node_modules/
+.pnpm-store/
 *.tsbuildinfo
 *.tgz
 profile/package.json

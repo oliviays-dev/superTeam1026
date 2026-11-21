@@ -8,6 +8,8 @@ import type {
   Project,
   ProjectTemplate,
   ProjectTemplateAccessPolicy,
+  ProjectTemplateBusinessChainPolicy,
+  ProjectTemplateBusinessChainRef,
   ProjectTemplateRevisionSummary,
   ProjectTemplateWorkflowRef,
   TemplateRole,
@@ -18,10 +20,19 @@ import type {
   WorkflowTemplateDefinition,
 } from "@pluginmax/contracts";
 import { AuthorizationRepository } from "./authorization-repository.js";
-import { workflowTemplateDefinitionSchema } from "@pluginmax/contracts";
+import {
+  businessChainMetadataSchema,
+  businessChainNodeMetadataSchema,
+  createProjectTemplateInputSchema,
+  emptyProjectTemplateBusinessChainPolicy,
+  projectTemplateBusinessChainPolicySchema,
+  updateProjectTemplateInputSchema,
+  workflowTemplateDefinitionSchema,
+} from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import type { Database } from "./database.js";
 import { projectFromRow, type ProjectRow } from "./rows.js";
+import { materializeTemplateBusinessChainWithClient } from "./project-business-chain-repository.js";
 
 interface TemplateRoleRow {
   id: string;
@@ -46,6 +57,20 @@ interface WorkflowTemplateRow {
   status: WorkflowTemplate["status"];
   created_at: Date;
   updated_at: Date;
+}
+
+interface WorkflowDefinitionRow {
+  id: string;
+  scope: "project" | "platform";
+  kind: "workflow" | "business-chain";
+  chain_key: string | null;
+  business_chain_metadata: unknown;
+  business_chain_nodes: unknown;
+  name: string;
+  description: string;
+  status: "active" | "archived";
+  published_at: Date | null;
+  revision: number;
 }
 
 interface ProjectTemplateRow {
@@ -82,6 +107,8 @@ export interface ProjectTemplateSnapshot {
   readonly roles: readonly TemplateRole[];
   readonly ownerRoleId: string | null;
   readonly workflowTemplates: readonly ProjectTemplateWorkflowRef[];
+  readonly businessChainPolicy: ProjectTemplateBusinessChainPolicy;
+  readonly businessChainDefinitions: readonly ProjectTemplateBusinessChainRef[];
   readonly accessPolicy: ProjectTemplateAccessPolicy;
   readonly allowedActorIds: readonly string[];
 }
@@ -97,6 +124,12 @@ export interface CreateProjectTemplateSnapshotInput {
     readonly workflowTemplateId: string;
     readonly expectedVersion: number;
   }[];
+  readonly businessChainPolicy?: ProjectTemplateBusinessChainPolicy | undefined;
+  readonly businessChainDefinitions?: readonly {
+    readonly workflowDefinitionId: string;
+    readonly expectedVersion: number;
+    readonly required: boolean;
+  }[] | undefined;
   readonly accessPolicy: ProjectTemplateAccessPolicy;
   readonly allowedActorIds: readonly string[];
 }
@@ -134,6 +167,11 @@ export type ProjectTemplateErrorCode =
   | "workflow_template_archived"
   | "workflow_template_version_conflict"
   | "workflow_template_key_conflict"
+  | "workflow_definition_not_found"
+  | "workflow_definition_not_business_chain"
+  | "workflow_definition_scope_conflict"
+  | "workflow_definition_version_conflict"
+  | "business_chain_policy_invalid"
   | "project_template_in_use"
   | "materialization_key_conflict";
 
@@ -447,22 +485,26 @@ export class ProjectTemplatesRepository {
     input: CreateProjectTemplateInput,
     actorId: string,
   ): Promise<ProjectTemplate> {
+    const parsedInput = createProjectTemplateInputSchema.parse(input);
     let templateId: string;
     try {
       templateId = await this.database.transaction(async (client) => {
-        const snapshot = await this.buildSnapshot(client, input);
+        const snapshot = await this.buildSnapshot(client, parsedInput);
         const id = randomUUID();
         await client.query(
           `INSERT INTO project_templates (
              id, name, code, type, description, status, revision,
-             created_by, updated_by, created_at, updated_at
-           ) VALUES ($1, $2, $3, $4, $5, 'active', 1, $6, $6, NOW(), NOW())`,
+             business_chain_policy, created_by, updated_by, created_at, updated_at
+           ) VALUES (
+             $1, $2, $3, $4, $5, 'active', 1, $6::jsonb, $7, $7, NOW(), NOW()
+           )`,
           [
             id,
             snapshot.name,
             snapshot.code,
             snapshot.type,
             snapshot.description,
+            JSON.stringify(snapshot.businessChainPolicy),
             actorId,
           ],
         );
@@ -495,6 +537,7 @@ export class ProjectTemplatesRepository {
     input: UpdateProjectTemplateInput,
     actorId: string,
   ): Promise<ProjectTemplate> {
+    const parsedInput = updateProjectTemplateInputSchema.parse(input);
     try {
       await this.database.transaction(async (client) => {
         const current = await this.lockProjectTemplate(client, id);
@@ -504,22 +547,34 @@ export class ProjectTemplatesRepository {
             "Archived project templates are read-only",
           );
         }
-        if (current.revision !== input.expectedRevision) {
-          throw revisionConflict(id, current.revision, input.expectedRevision);
+        if (current.revision !== parsedInput.expectedRevision) {
+          throw revisionConflict(
+            id,
+            current.revision,
+            parsedInput.expectedRevision,
+          );
         }
         const currentSnapshot = current.snapshot;
         const roleIds =
-          input.roleIds ??
+          parsedInput.roleIds ??
           currentSnapshot.roles.map((role: TemplateRole) => role.id);
         const workflowTemplates =
-          input.workflowTemplates ??
+          parsedInput.workflowTemplates ??
           currentSnapshot.workflowTemplates.map((ref) => ({
             workflowTemplateId: ref.workflowTemplateId,
             expectedVersion: ref.version,
           }));
-        const accessPolicy = input.accessPolicy ?? currentSnapshot.accessPolicy;
+        const businessChainDefinitions =
+          parsedInput.businessChainDefinitions ??
+          (currentSnapshot.businessChainDefinitions ?? []).map((ref) => ({
+            workflowDefinitionId: ref.workflowDefinitionId,
+            expectedVersion: ref.version,
+            required: ref.required,
+          }));
+        const accessPolicy =
+          parsedInput.accessPolicy ?? currentSnapshot.accessPolicy;
         const allowedActorIds =
-          input.allowedActorIds ?? currentSnapshot.allowedActorIds;
+          parsedInput.allowedActorIds ?? currentSnapshot.allowedActorIds;
         if (
           accessPolicy === "selected-members" &&
           allowedActorIds.length === 0
@@ -531,16 +586,20 @@ export class ProjectTemplatesRepository {
           );
         }
         const snapshot = await this.buildSnapshot(client, {
-          name: input.name ?? current.name,
-          code: input.code ?? current.code,
-          type: input.type ?? current.type,
-          description: input.description ?? current.description,
+          name: parsedInput.name ?? current.name,
+          code: parsedInput.code ?? current.code,
+          type: parsedInput.type ?? current.type,
+          description: parsedInput.description ?? current.description,
           roleIds,
           ownerRoleId:
-            input.ownerRoleId === undefined
+            parsedInput.ownerRoleId === undefined
               ? (currentSnapshot.ownerRoleId ?? undefined)
-              : (input.ownerRoleId ?? undefined),
+              : (parsedInput.ownerRoleId ?? undefined),
           workflowTemplates,
+          businessChainPolicy:
+            parsedInput.businessChainPolicy ??
+            currentSnapshot.businessChainPolicy,
+          businessChainDefinitions,
           accessPolicy,
           allowedActorIds,
         });
@@ -553,7 +612,8 @@ export class ProjectTemplatesRepository {
              type = $4,
              description = $5,
              revision = $6,
-             updated_by = $7,
+             business_chain_policy = $7::jsonb,
+             updated_by = $8,
              updated_at = NOW()
            WHERE id = $1`,
           [
@@ -563,6 +623,7 @@ export class ProjectTemplatesRepository {
             snapshot.type,
             snapshot.description,
             nextRevision,
+            JSON.stringify(snapshot.businessChainPolicy),
             actorId,
           ],
         );
@@ -572,7 +633,7 @@ export class ProjectTemplatesRepository {
           id,
           nextRevision,
           snapshot,
-          input.changeSummary ??
+          parsedInput.changeSummary ??
             `更新模板 · ${snapshot.roles.length} 个角色 · ${snapshot.workflowTemplates.length} 个工作流`,
           "active",
           actorId,
@@ -608,14 +669,17 @@ export class ProjectTemplatesRepository {
         await client.query(
           `INSERT INTO project_templates (
              id, name, code, type, description, status, revision,
-             created_by, updated_by, created_at, updated_at
-           ) VALUES ($1, $2, $3, $4, $5, 'active', 1, $6, $6, NOW(), NOW())`,
+             business_chain_policy, created_by, updated_by, created_at, updated_at
+           ) VALUES (
+             $1, $2, $3, $4, $5, 'active', 1, $6::jsonb, $7, $7, NOW(), NOW()
+           )`,
           [
             nextId,
             snapshot.name,
             snapshot.code,
             snapshot.type,
             snapshot.description,
+            JSON.stringify(snapshot.businessChainPolicy),
             actorId,
           ],
         );
@@ -952,6 +1016,36 @@ export class ProjectTemplatesRepository {
         );
       }
 
+      const businessChainFlag = await client.query<{ mode: string }>(
+        `SELECT mode
+         FROM feature_flag_settings
+         WHERE flag_key = 'project.business_chain'
+           AND (
+             (scope_type = 'project' AND scope_id = $1)
+             OR (scope_type = 'platform' AND scope_id = 'platform')
+           )
+         ORDER BY CASE scope_type WHEN 'project' THEN 0 ELSE 1 END
+         LIMIT 1`,
+        [projectId],
+      );
+      if (
+        businessChainFlag.rows[0]?.mode === "on" ||
+        businessChainFlag.rows[0]?.mode === "enforce"
+      ) {
+        await materializeTemplateBusinessChainWithClient(client, {
+          projectId,
+          projectTemplateId: input.templateId,
+          projectTemplateRevision: template.revision,
+          policy: snapshot.businessChainPolicy ?? {
+            mode: "none",
+            defaultBusinessChainKey: null,
+            allowedBusinessChainKeys: [],
+            versionPolicy: "latest-active",
+          },
+          actorId: input.actorId,
+        });
+      }
+
       await client.query(
         `INSERT INTO project_template_materializations (
            id, template_id, template_revision, idempotency_key, request_hash,
@@ -1097,6 +1191,61 @@ export class ProjectTemplatesRepository {
         version: workflow.version,
       });
     }
+    const businessChainDefinitions: ProjectTemplateBusinessChainRef[] = [];
+    for (const ref of input.businessChainDefinitions ?? []) {
+      const definitionResult = await client.query<WorkflowDefinitionRow>(
+        "SELECT * FROM workflow_definitions WHERE id = $1",
+        [ref.workflowDefinitionId],
+      );
+      const definition = definitionResult.rows[0];
+      if (definition === undefined) {
+        throw new ProjectTemplateRepositoryError(
+          "workflow_definition_not_found",
+          "A referenced business chain definition does not exist",
+          400,
+        );
+      }
+      if (definition.kind !== "business-chain") {
+        throw new ProjectTemplateRepositoryError(
+          "workflow_definition_not_business_chain",
+          "Project templates may only reference business chain definitions",
+          400,
+        );
+      }
+      if (
+        definition.scope !== "platform" ||
+        definition.status !== "active" ||
+        definition.published_at === null
+      ) {
+        throw new ProjectTemplateRepositoryError(
+          "workflow_definition_scope_conflict",
+          "Project templates require published platform business chains",
+          409,
+        );
+      }
+      if (definition.revision !== ref.expectedVersion) {
+        throw new ProjectTemplateRepositoryError(
+          "workflow_definition_version_conflict",
+          "A referenced business chain definition changed while saving",
+        );
+      }
+      const metadata = businessChainMetadataSchema.parse(
+        definition.business_chain_metadata,
+      );
+      businessChainDefinitions.push({
+        workflowDefinitionId: definition.id,
+        version: definition.revision,
+        chainKey: metadata.chainKey,
+        displayName: metadata.displayName,
+        required: ref.required ?? false,
+      });
+    }
+    const businessChainPolicy = normalizeBusinessChainPolicy(
+      projectTemplateBusinessChainPolicySchema.parse(
+        input.businessChainPolicy ?? emptyProjectTemplateBusinessChainPolicy,
+      ),
+      businessChainDefinitions,
+    );
     const ownerRoleId = normalizeOwnerRole(input.ownerRoleId, roles);
     return {
       name: input.name,
@@ -1106,6 +1255,8 @@ export class ProjectTemplatesRepository {
       roles,
       ownerRoleId,
       workflowTemplates,
+      businessChainPolicy,
+      businessChainDefinitions,
       accessPolicy: input.accessPolicy,
       allowedActorIds:
         input.accessPolicy === "all-members"
@@ -1141,6 +1292,49 @@ export class ProjectTemplatesRepository {
         ],
       );
     }
+    for (const definition of snapshot.businessChainDefinitions) {
+      const definitionResult = await client.query<WorkflowDefinitionRow>(
+        "SELECT * FROM workflow_definitions WHERE id = $1",
+        [definition.workflowDefinitionId],
+      );
+      const definitionRow = definitionResult.rows[0];
+      if (definitionRow === undefined) {
+        throw new ProjectTemplateRepositoryError(
+          "workflow_definition_not_found",
+          "A referenced business chain definition no longer exists",
+        );
+      }
+      const definitionSnapshot = {
+        id: definitionRow.id,
+        version: definitionRow.revision,
+        name: definitionRow.name,
+        description: definitionRow.description,
+        metadata: businessChainMetadataSchema.parse(
+          definitionRow.business_chain_metadata,
+        ),
+        nodes: Array.isArray(definitionRow.business_chain_nodes)
+          ? definitionRow.business_chain_nodes.map((node) =>
+              businessChainNodeMetadataSchema.parse(node),
+            )
+          : [],
+      };
+      await client.query(
+        `INSERT INTO project_template_business_chain_refs (
+           template_id, workflow_definition_id, workflow_definition_version,
+           definition_snapshot, chain_key_snapshot, display_name_snapshot,
+           required
+         ) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)`,
+        [
+          templateId,
+          definition.workflowDefinitionId,
+          definition.version,
+          JSON.stringify(definitionSnapshot),
+          definition.chainKey,
+          definition.displayName,
+          definition.required,
+        ],
+      );
+    }
     for (const actorId of snapshot.allowedActorIds) {
       await client.query(
         `INSERT INTO project_template_grants (template_id, actor_id)
@@ -1161,6 +1355,10 @@ export class ProjectTemplatesRepository {
     );
     await client.query(
       "DELETE FROM project_template_workflow_refs WHERE template_id = $1",
+      [templateId],
+    );
+    await client.query(
+      "DELETE FROM project_template_business_chain_refs WHERE template_id = $1",
       [templateId],
     );
     await client.query(
@@ -1281,6 +1479,12 @@ function projectTemplateFromRow(row: ProjectTemplateRow): ProjectTemplate {
     roles: [...row.snapshot.roles],
     ownerRoleId: row.snapshot.ownerRoleId,
     workflowTemplates: [...row.snapshot.workflowTemplates],
+    businessChainPolicy:
+      row.snapshot.businessChainPolicy ??
+      emptyProjectTemplateBusinessChainPolicy,
+    businessChainDefinitions: [
+      ...(row.snapshot.businessChainDefinitions ?? []),
+    ],
     accessPolicy: row.snapshot.accessPolicy,
     allowedActorIds: [...row.snapshot.allowedActorIds],
     materializedProjectCount: Number(row.materialized_project_count),
@@ -1293,6 +1497,63 @@ function projectTemplateFromRow(row: ProjectTemplateRow): ProjectTemplate {
 
 function parseWorkflowDefinition(value: unknown): WorkflowTemplateDefinition {
   return workflowTemplateDefinitionSchema.parse(value);
+}
+
+function normalizeBusinessChainPolicy(
+  policy: ProjectTemplateBusinessChainPolicy,
+  definitions: readonly ProjectTemplateBusinessChainRef[],
+): ProjectTemplateBusinessChainPolicy {
+  const definitionKeys = new Set(
+    definitions.map((definition) => definition.chainKey),
+  );
+  const requestedKeys = [...new Set(policy.allowedBusinessChainKeys)];
+  const outsideReferences = requestedKeys.filter(
+    (key) => !definitionKeys.has(key),
+  );
+  if (outsideReferences.length > 0) {
+    throw new ProjectTemplateRepositoryError(
+      "business_chain_policy_invalid",
+      "Allowed business chain keys must reference saved definitions",
+      400,
+      { outsideReferences },
+    );
+  }
+  if (
+    policy.defaultBusinessChainKey !== null &&
+    !definitionKeys.has(policy.defaultBusinessChainKey)
+  ) {
+    throw new ProjectTemplateRepositoryError(
+      "business_chain_policy_invalid",
+      "The default business chain must reference a saved definition",
+      400,
+    );
+  }
+  if (policy.mode === "required" && definitions.length === 0) {
+    throw new ProjectTemplateRepositoryError(
+      "business_chain_policy_invalid",
+      "Required business chain templates need at least one definition",
+      400,
+    );
+  }
+  if (
+    policy.mode === "required" &&
+    policy.defaultBusinessChainKey === null &&
+    definitions.length > 1
+  ) {
+    throw new ProjectTemplateRepositoryError(
+      "business_chain_policy_invalid",
+      "Required business chain templates need a default when several are allowed",
+      400,
+    );
+  }
+  return {
+    mode: policy.mode,
+    defaultBusinessChainKey:
+      policy.defaultBusinessChainKey ??
+      (policy.mode === "required" ? definitions[0]?.chainKey ?? null : null),
+    allowedBusinessChainKeys: [...definitionKeys],
+    versionPolicy: policy.versionPolicy,
+  };
 }
 
 function normalizeOwnerRole(

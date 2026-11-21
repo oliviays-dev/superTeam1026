@@ -1,4 +1,8 @@
-import type { RuntimeKind } from "@pluginmax/contracts";
+import type {
+  RuntimeKind,
+  RuntimeMcpToolRequest,
+  RuntimeMcpToolResult,
+} from "@pluginmax/contracts";
 import type {
   ExternalRuntimeExecutionMetadata,
   ExternalRuntimeProcessDiagnostics,
@@ -18,7 +22,18 @@ export interface RuntimeTaskInput {
     readonly fault?: "fail" | "timeout" | undefined;
     readonly delayMs?: number | undefined;
   };
+  readonly requestMcpTool?:
+    | ((request: RuntimeMcpToolRequest) => Promise<RuntimeMcpToolResult>)
+    | undefined;
 }
+
+export interface AgentRuntimeToolRequestEvent {
+  readonly type: "tool.request";
+  readonly request: RuntimeMcpToolRequest;
+  readonly complete: (result: RuntimeMcpToolResult) => void;
+}
+
+export type RuntimeMcpToolRequestProtocol = "none" | "structured-v1";
 
 export type AgentRuntimeEvent =
   | {
@@ -62,10 +77,12 @@ export type AgentRuntimeEvent =
       readonly output: string;
       readonly execution?: ExternalRuntimeExecutionMetadata;
       readonly diagnostics?: ExternalRuntimeProcessDiagnostics;
-    };
+    }
+  | AgentRuntimeToolRequestEvent;
 
 export interface AgentRuntimeAdapter {
   readonly id: string;
+  readonly mcpToolRequestProtocol?: RuntimeMcpToolRequestProtocol;
   execute(
     input: RuntimeTaskInput,
     signal: AbortSignal,
@@ -99,6 +116,7 @@ function chunks(value: string, size = 18): string[] {
 
 export class FakeRuntimeAdapter implements AgentRuntimeAdapter {
   readonly id = "fake";
+  readonly mcpToolRequestProtocol = "none" as const;
 
   async *execute(
     input: RuntimeTaskInput,

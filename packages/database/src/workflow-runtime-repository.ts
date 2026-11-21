@@ -15,6 +15,10 @@ import type {
 import type { PoolClient } from "pg";
 import type { Database } from "./database.js";
 import {
+  businessChainMetadataSchema,
+  businessChainNodeMetadataSchema,
+} from "@pluginmax/contracts";
+import {
   appendWorkflowAuditWithClient,
   insertWorkflowBindingsWithClient,
   type WorkflowBindingSeed,
@@ -56,6 +60,10 @@ interface WorkflowDefinitionRow {
   status: WorkflowDefinition["status"];
   source_template_id: string | null;
   source_template_version: number | null;
+  kind: WorkflowDefinition["kind"];
+  chain_key: string | null;
+  business_chain_metadata: unknown;
+  business_chain_nodes: unknown;
   scope: WorkflowDefinition["scope"];
   origin: WorkflowDefinition["origin"];
   published_by_principal_id: string | null;
@@ -1114,6 +1122,18 @@ function definitionFromRow(row: WorkflowDefinitionRow): WorkflowDefinition {
     status: row.status,
     sourceTemplateId: row.source_template_id,
     sourceTemplateVersion: row.source_template_version,
+    kind: row.kind ?? "workflow",
+    chainKey: row.chain_key ?? null,
+    businessChainMetadata:
+      row.business_chain_metadata === null ||
+      row.business_chain_metadata === undefined
+        ? null
+        : businessChainMetadataSchema.parse(row.business_chain_metadata),
+    businessChainNodes: Array.isArray(row.business_chain_nodes)
+      ? row.business_chain_nodes.map((node) =>
+          businessChainNodeMetadataSchema.parse(node),
+        )
+      : [],
     revision: row.revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),

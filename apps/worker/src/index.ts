@@ -7,10 +7,27 @@ import {
 } from "@pluginmax/application";
 import { loadConfig, loadLocalEnv } from "@pluginmax/config";
 import { Database, PlatformRepositories } from "@pluginmax/database";
+import {
+  MCP_PROJECT_SOURCE_FLAG,
+  MCP_RUNTIME_TOOL_BRIDGE_FLAG,
+  MCP_TOOL_INVOCATION_FLAG,
+} from "@pluginmax/contracts";
 import { LocalFileStore } from "@pluginmax/files";
 import { WorkerRuntime } from "./worker-runtime.js";
 import { RuntimeMaintenanceService } from "./maintenance-service.js";
 import { RuntimeProbeService } from "./runtime-probe-service.js";
+import {
+  HttpStreamableMcpProbeTransport,
+  McpProviderProbeService,
+} from "./mcp-provider-probe-service.js";
+import { McpToolCallService } from "./mcp-tool-call-service.js";
+import { RuntimeToolRequestBridge } from "./runtime-tool-request-bridge.js";
+import {
+  EnvironmentSecretStoreAdapter,
+  ManagedSecretResolver,
+  MountedFileSecretStoreAdapter,
+} from "./secret-resolver.js";
+import { McpProjectSourceAdapter } from "./project-source-mcp-adapter.js";
 
 loadLocalEnv();
 const config = loadConfig();
@@ -21,18 +38,6 @@ const sharedSpace = new SharedSpaceApplication(
   repositories,
   new LocalFileStore(config.fileStoreRoot),
 );
-const executor = new RunExecutor(repositories, {
-  workspaceRoot: config.agentWorkspaceRoot,
-  fileStoreRoot: config.fileStoreRoot,
-  runtimeEffectPollIntervalMs: config.runtimeEffectPollIntervalMs,
-  dsh: {
-    dshBin: config.dshBin,
-    profile: config.dshProfile,
-    dshHome: config.dshHome,
-    provider: config.dshProvider,
-    model: config.dshModel,
-  },
-});
 const workerId = `worker-${randomUUID()}`;
 
 const log = (event: string, data: Record<string, unknown> = {}) => {
@@ -48,6 +53,35 @@ const log = (event: string, data: Record<string, unknown> = {}) => {
 };
 
 const sweep = async () => {
+  if (
+    await repositories.featureFlags.isEnabled(MCP_PROJECT_SOURCE_FLAG)
+  ) {
+    const reconciled = await projectSourceMcp.reconcileExpired(
+      config.workerRecoveryBatchSize,
+    );
+    if (reconciled > 0) {
+      log("project_source_mcp.reconciled", { count: reconciled });
+    }
+  }
+  if (
+    await repositories.featureFlags.isEnabled(MCP_RUNTIME_TOOL_BRIDGE_FLAG)
+  ) {
+    const reconciled =
+      await repositories.runtimeToolRequests.reconcileExpired(
+        config.workerRecoveryBatchSize,
+      );
+    if (reconciled > 0) {
+      log("runtime_tool_request.reconciled", { count: reconciled });
+    }
+  }
+  if (await repositories.featureFlags.isEnabled(MCP_TOOL_INVOCATION_FLAG)) {
+    const reconciled = await repositories.mcpToolCalls.reconcileExpired(
+      config.workerRecoveryBatchSize,
+    );
+    if (reconciled > 0) {
+      log("mcp_tool_call.reconciled", { count: reconciled });
+    }
+  }
   const expiredGates = await application.expireExecutionGates(
     config.workerRecoveryBatchSize,
   );
@@ -69,6 +103,12 @@ const sweep = async () => {
   });
   if (planSweep.claimed > 0 || planSweep.fenced > 0) {
     log("workflow_plan.sweep", { ...planSweep });
+  }
+  const planningSweep = await application.runPlanningRuntimeOnce({
+    limit: config.workerRecoveryBatchSize,
+  });
+  if (planningSweep.claimed > 0) {
+    log("planning_runtime.sweep", planningSweep);
   }
   const sharedSpaceRecovery = await sharedSpace.recoverApprovedWrites(
     config.workerRecoveryBatchSize,
@@ -119,6 +159,82 @@ const runtimeProbe = new RuntimeProbeService(
   },
   log,
 );
+const mcpTransport = new HttpStreamableMcpProbeTransport({
+  allowHttp: process.env.MCP_PROVIDER_ALLOW_HTTP === "1",
+  allowPrivateHosts: process.env.MCP_PROVIDER_ALLOW_PRIVATE_HOSTS === "1",
+  allowedHosts: (process.env.MCP_PROVIDER_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map((host) => host.trim())
+    .filter(Boolean),
+});
+const mcpCredentials = new ManagedSecretResolver(
+  {
+    timeoutMs: config.secretResolutionTimeoutMs,
+    cacheTtlMs: config.secretResolutionCacheTtlMs,
+  },
+  [
+    new EnvironmentSecretStoreAdapter(),
+    ...(config.secretStoreFile === undefined
+      ? []
+      : [
+          new MountedFileSecretStoreAdapter(config.secretStoreFile, {
+            allowLoosePermissions:
+              config.secretStoreAllowLoosePermissions,
+          }),
+        ]),
+  ],
+);
+const mcpProviderProbe = new McpProviderProbeService(
+  repositories,
+  {
+    owner: workerId,
+    leaseSeconds: config.runtimeProbeLeaseSeconds,
+  },
+  mcpTransport,
+  mcpCredentials,
+  log,
+);
+const mcpToolCall = new McpToolCallService(
+  repositories,
+  {
+    owner: workerId,
+    leaseSeconds: config.runtimeProbeLeaseSeconds,
+  },
+  mcpTransport,
+  mcpCredentials,
+  log,
+);
+const runtimeToolBridge = new RuntimeToolRequestBridge(
+  repositories,
+  mcpToolCall,
+  {
+    owner: workerId,
+    leaseSeconds: Math.max(config.workerLeaseSeconds, 300),
+  },
+  log,
+);
+const projectSourceMcp = new McpProjectSourceAdapter(
+  repositories,
+  runtimeToolBridge,
+  {
+    owner: workerId,
+    leaseSeconds: Math.max(config.workerLeaseSeconds, 300),
+  },
+  log,
+);
+const executor = new RunExecutor(repositories, {
+  workspaceRoot: config.agentWorkspaceRoot,
+  fileStoreRoot: config.fileStoreRoot,
+  runtimeEffectPollIntervalMs: config.runtimeEffectPollIntervalMs,
+  runtimeToolBridge,
+  dsh: {
+    dshBin: config.dshBin,
+    profile: config.dshProfile,
+    dshHome: config.dshHome,
+    provider: config.dshProvider,
+    model: config.dshModel,
+  },
+});
 
 const runtime = new WorkerRuntime(
   {
@@ -136,6 +252,7 @@ const runtime = new WorkerRuntime(
     sweepIntervalMs: config.workflowSweepIntervalMs,
     maintenanceIntervalMs: config.maintenancePollIntervalMs,
     runtimeProbePollIntervalMs: config.runtimeProbePollIntervalMs,
+    mcpProviderProbePollIntervalMs: config.runtimeProbePollIntervalMs,
   },
   {
     repositories,
@@ -143,6 +260,8 @@ const runtime = new WorkerRuntime(
     sweep,
     maintenance,
     runtimeProbe,
+    mcpProviderProbe,
+    mcpToolCall,
     log,
   },
 );

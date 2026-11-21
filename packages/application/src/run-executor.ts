@@ -7,6 +7,7 @@ import {
   ExternalRuntimeAdapterFailure,
   type AgentRuntimeAdapter,
   type AgentRuntimeEvent,
+  type AgentRuntimeToolRequestEvent,
   type DshSdkAdapterOptions,
   type ExternalRuntimeExecutionMetadata,
   type ExternalRuntimeProcessDiagnostics,
@@ -17,7 +18,9 @@ import type {
   ExternalRunExecutionSnapshot,
   Project,
   Run,
+  RuntimeMcpToolResult,
   Task,
+  WorkbenchSourceRef,
 } from "@pluginmax/contracts";
 import {
   DirectChatPreconditionError,
@@ -35,6 +38,7 @@ import { executionEnvelopeDigest } from "./task-execution-preflight.js";
 import { runWorkspacePath } from "./run-workspace.js";
 import { SceneContextService } from "./scene-context.js";
 import { TaskAcceptanceService } from "./task-acceptance.js";
+import type { RuntimeToolBridgePort } from "./runtime-tool-bridge.js";
 
 export class RunCancelledError extends Error {
   constructor() {
@@ -84,6 +88,11 @@ export interface RunExecutorOptions {
   readonly fileStoreRoot: string;
   readonly dsh: DshSdkAdapterOptions;
   readonly runtimeEffectPollIntervalMs?: number;
+  readonly runtimeToolBridge?: RuntimeToolBridgePort;
+  readonly runtimeAdapterFactory?: (input: {
+    readonly agent: Agent;
+    readonly executionSnapshot: ExternalRunExecutionSnapshot | null;
+  }) => AgentRuntimeAdapter;
 }
 
 function runtimeFor(
@@ -528,7 +537,13 @@ export class RunExecutor {
       if (executionSnapshot !== null) {
         await this.repositories.runs.markExternalStarted(runId);
       }
-      const adapter = runtimeFor(agent, this.options, executionSnapshot);
+      const adapter =
+        this.options.runtimeAdapterFactory?.({
+          agent,
+          executionSnapshot,
+        }) ?? runtimeFor(agent, this.options, executionSnapshot);
+      const supportsToolRequests =
+        adapter.mcpToolRequestProtocol === "structured-v1";
       for await (const event of adapter.execute(
         {
           runId,
@@ -552,11 +567,53 @@ export class RunExecutor {
           ...(run.inputSnapshot.runtimeOptions === undefined
             ? {}
             : { runtimeOptions: run.inputSnapshot.runtimeOptions }),
+          ...(this.options.runtimeToolBridge === undefined ||
+          !supportsToolRequests
+            ? {}
+            : {
+                requestMcpTool: async (request) => {
+                  await assertLease();
+                  const result = await this.options.runtimeToolBridge!.request({
+                    runId,
+                    runAttempt: run.attempt,
+                    request,
+                    signal: controller.signal,
+                    assertLease,
+                  });
+                  await assertLease();
+                  return result;
+                },
+              }),
         },
         controller.signal,
       )) {
         await assertLease();
         await this.assertStillRunning(runId);
+        if (event.type === "tool.request") {
+          if (!supportsToolRequests) {
+            event.complete({
+              requestId: event.request.requestId,
+              callId: null,
+              status: "failed",
+              deduplicated: false,
+              resultAvailable: false,
+              errorCategory: "unknown",
+              errorCode: "runtime_tool_request_protocol_unsupported",
+              errorMessage:
+                "The Runtime Adapter does not declare structured-v1 Tool Request support",
+            });
+            throw new RunNonRetryableError(
+              "runtime adapter does not support structured tool requests",
+            );
+          }
+          await this.handleRuntimeToolRequest({
+            run,
+            event,
+            signal: controller.signal,
+            assertLease,
+          });
+          continue;
+        }
         await this.persistEvent(runId, event);
         await assertLease();
         if (event.type === "completed") {
@@ -918,6 +975,7 @@ export class RunExecutor {
     await assertLease();
     const existingArtifacts =
       await this.repositories.artifacts.listByRun(runId);
+    const sourceRefs = await this.artifactSourceRefs(run.projectId!);
     const artifact =
       existingArtifacts.find(
         (candidate) =>
@@ -927,6 +985,7 @@ export class RunExecutor {
         runId,
         projectId: run.projectId!,
         ref,
+        sourceRefs,
       }));
     await this.repositories.runs.appendEventIfAbsent(
       runId,
@@ -1200,6 +1259,60 @@ export class RunExecutor {
     }
   }
 
+  private async handleRuntimeToolRequest(input: {
+    readonly run: Run;
+    readonly event: AgentRuntimeToolRequestEvent;
+    readonly signal: AbortSignal;
+    readonly assertLease: () => Promise<void>;
+  }): Promise<void> {
+    if (this.options.runtimeToolBridge === undefined) {
+      input.event.complete({
+        requestId: input.event.request.requestId,
+        callId: null,
+        status: "failed",
+        deduplicated: false,
+        resultAvailable: false,
+        errorCategory: "unknown",
+        errorCode: "runtime_tool_bridge_unavailable",
+        errorMessage: "The Runtime Tool Request bridge is unavailable",
+      });
+      throw new RunNonRetryableError(
+        "runtime tool request bridge is unavailable",
+      );
+    }
+    try {
+      const result = await this.options.runtimeToolBridge.request({
+        runId: input.run.id,
+        runAttempt: input.run.attempt,
+        request: input.event.request,
+        signal: input.signal,
+        assertLease: input.assertLease,
+      });
+      input.event.complete(result);
+      await input.assertLease();
+    } catch (error) {
+      const code =
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        typeof error.code === "string"
+          ? error.code.slice(0, 160)
+          : "runtime_tool_request_rejected";
+      const rejected: RuntimeMcpToolResult = {
+        requestId: input.event.request.requestId,
+        callId: null,
+        status: "failed",
+        deduplicated: false,
+        resultAvailable: false,
+        errorCategory: "authorization",
+        errorCode: code,
+        errorMessage: "The Runtime Tool Request was rejected",
+      };
+      input.event.complete(rejected);
+      throw new RunNonRetryableError(`runtime tool request rejected: ${code}`);
+    }
+  }
+
   private async assertStillRunning(runId: string): Promise<void> {
     const current = await this.requireRun(runId);
     if (current.status === "cancelled") throw new RunCancelledError();
@@ -1226,5 +1339,28 @@ export class RunExecutor {
     const task = await this.repositories.tasks.get(taskId);
     if (task === undefined) throw new Error(`task not found: ${taskId}`);
     return task;
+  }
+
+  private async artifactSourceRefs(
+    projectId: string,
+  ): Promise<WorkbenchSourceRef[]> {
+    const snapshots =
+      await this.repositories.projectBusinessChains.listSourceSnapshots(
+        projectId,
+      );
+    const latest = new Map<string, (typeof snapshots)[number]>();
+    for (const snapshot of snapshots) {
+      if (!latest.has(snapshot.refKey)) latest.set(snapshot.refKey, snapshot);
+    }
+    return [...latest.values()].slice(0, 50).map((snapshot) => ({
+      kind: "project-source" as const,
+      id: snapshot.refKey,
+      projectId,
+      label: `${snapshot.sourceSystem} · ${snapshot.sourceObjectType}`,
+      route: "project" as const,
+      targetId: projectId,
+      available: snapshot.status !== "error",
+      cutoffAt: snapshot.observedAt,
+    }));
   }
 }

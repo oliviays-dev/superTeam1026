@@ -587,6 +587,7 @@ function failForProcess(
 
 export class CodexJsonlAdapter implements AgentRuntimeAdapter {
   readonly id = "codex-jsonl";
+  readonly mcpToolRequestProtocol = "none" as const;
   readonly planVisibility = "summary" as const;
   readonly toolEventCompleteness = "partial" as const;
   readonly textStreaming = "message" as const;

@@ -131,6 +131,20 @@ test("project report history, real workbench risks and source return context", a
       .first(),
   ).toBeVisible();
   await expect(page.getByText("直接关注任务").first()).toBeVisible();
+  await post("/api/v1/workbench/supply-exceptions", {
+    projectId: project.id,
+    title: "Incremental brief push browser",
+    severity: "high",
+    suggestedAction: "Confirm the streamed refresh",
+    ownerActorId: "local-admin",
+    impactScope: "SSE fixture",
+    sourceTaskId: task.id,
+    status: "open",
+  });
+  await post("/api/v1/workbench/brief/refresh", {});
+  await expect(
+    page.getByText("Incremental brief push browser").first(),
+  ).toBeVisible({ timeout: 8_000 });
   await page
     .getByRole("combobox", { name: "简报更新频次" })
     .selectOption("every-4-hours");

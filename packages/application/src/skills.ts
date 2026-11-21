@@ -243,11 +243,7 @@ export class SkillApplicationService {
         404,
       );
     }
-    await this.requireProjectPermission(
-      template.projectId,
-      actorPrincipalId,
-      "write",
-    );
+    await this.requireActivePrincipal(actorPrincipalId);
     const allowed =
       template.scope === "platform"
         ? administrator
@@ -558,6 +554,17 @@ export class SkillApplicationService {
       throw new ApplicationError(
         "required_skill_cannot_be_disabled",
         "A required Skill must remain enabled",
+        409,
+      );
+    }
+    if (
+      parsed.required &&
+      parsed.mode !== undefined &&
+      parsed.mode !== "required"
+    ) {
+      throw new ApplicationError(
+        "required_skill_mode_conflict",
+        "A required Skill binding must use mode=required",
         409,
       );
     }

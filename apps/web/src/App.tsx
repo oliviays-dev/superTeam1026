@@ -12,6 +12,7 @@ import {
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  PlugZap,
   ShieldCheck,
   SquareTerminal,
   Sun,
@@ -30,6 +31,7 @@ import {
 import { ProjectsView, TasksView } from "./WorkspaceViews.js";
 import { ProjectTemplatesView } from "./ProjectTemplatesView.js";
 import { RuntimesView } from "./RuntimesView.js";
+import { McpProvidersView } from "./McpProvidersView.js";
 import { TeammatesView } from "./TeammatesView.js";
 import {
   ApiRequestError,
@@ -54,6 +56,7 @@ type AppView =
   | "agents"
   | "teammates"
   | "runtimes"
+  | "mcp-providers"
   | "operations"
   | "identity"
   | "shared-space"
@@ -72,6 +75,7 @@ const navItems = [
   { key: "teammates", label: "AI Teammate", icon: UsersRound },
   { key: "delegations", label: "委托中心", icon: UserRoundCheck },
   { key: "runtimes", label: "运行时", icon: SquareTerminal },
+  { key: "mcp-providers", label: "MCP 连接", icon: PlugZap },
   { key: "operations", label: "运维", icon: Activity },
   { key: "identity", label: "账号与权限", icon: ShieldCheck },
   { key: "shared-space", label: "共享空间", icon: FolderOpen },
@@ -448,6 +452,9 @@ export function App() {
             canManageTemplates={
               viewerQuery.data?.canManageProjectTemplates ?? false
             }
+            platformAdministrator={
+              viewerQuery.data?.platformAdministrator ?? false
+            }
             capability={projectCapability}
             onOpenTemplates={() => setView("project-templates")}
             {...(projectReportId === undefined
@@ -521,6 +528,13 @@ export function App() {
         )}
         {view === "runtimes" && (
           <RuntimesView workspaceId={selectedProjectId} />
+        )}
+        {view === "mcp-providers" && (
+          <McpProvidersView
+            platformAdministrator={
+              viewerQuery.data.platformAdministrator ?? false
+            }
+          />
         )}
         {view === "delegations" && (
           <DelegationsView

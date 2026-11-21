@@ -9266,3 +9266,3333 @@ EXECUTE FUNCTION pluginmax_reject_market_template_dependency_mutation();
 -- M8 enable state: workbench.v2 and market remain off until explicit release
 -- activation and the M8 observation window completes.
 `;
+
+export const M9_FOUNDATION_SCHEMA_SQL = `
+-- M9 expand: task hierarchy, global Teammate template scope, and scene-aware
+-- Skill binding metadata. Product behaviour remains feature-gated in the app.
+ALTER TABLE tasks
+  ADD COLUMN IF NOT EXISTS parent_task_id UUID
+    REFERENCES tasks(id) ON DELETE RESTRICT;
+
+CREATE INDEX IF NOT EXISTS tasks_parent_task_idx
+  ON tasks(project_id, parent_task_id, status)
+  WHERE parent_task_id IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_task_hierarchy()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  parent_project_id UUID;
+  parent_status TEXT;
+  parent_parent_task_id UUID;
+BEGIN
+  IF NEW.parent_task_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.parent_task_id = NEW.id THEN
+    RAISE EXCEPTION 'a task cannot be its own parent';
+  END IF;
+  SELECT project_id, status, parent_task_id
+  INTO parent_project_id, parent_status, parent_parent_task_id
+  FROM tasks
+  WHERE id = NEW.parent_task_id;
+  IF parent_project_id IS NULL THEN
+    RAISE EXCEPTION 'parent task does not exist';
+  END IF;
+  IF parent_project_id <> NEW.project_id THEN
+    RAISE EXCEPTION 'parent and child tasks must belong to the same project';
+  END IF;
+  IF parent_status IN ('done', 'cancelled') THEN
+    RAISE EXCEPTION 'completed or cancelled tasks cannot receive child tasks';
+  END IF;
+  IF parent_parent_task_id IS NOT NULL THEN
+    RAISE EXCEPTION 'task hierarchy depth is limited to one level';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM tasks WHERE parent_task_id = NEW.id
+  ) THEN
+    RAISE EXCEPTION 'a task with children cannot become a child task';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tasks_hierarchy_guard ON tasks;
+CREATE TRIGGER tasks_hierarchy_guard
+BEFORE INSERT OR UPDATE OF parent_task_id, project_id
+ON tasks
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_task_hierarchy();
+
+ALTER TABLE task_events
+  DROP CONSTRAINT IF EXISTS task_events_kind_check;
+
+ALTER TABLE task_events
+  ADD CONSTRAINT task_events_kind_check
+  CHECK (kind IN (
+    'created',
+    'updated',
+    'status',
+    'message',
+    'review',
+    'dependency',
+    'hierarchy',
+    'attachment',
+    'dispatch',
+    'transfer',
+    'claim',
+    'control',
+    'input',
+    'session'
+  ));
+
+-- Templates are definitions shared by projects, not project-owned assets.
+-- project_id and workspace_id remain for N-1 compatibility but are nullable.
+ALTER TABLE teammate_templates
+  ALTER COLUMN project_id DROP NOT NULL,
+  ALTER COLUMN workspace_id DROP NOT NULL;
+
+ALTER TABLE teammate_template_versions
+  ALTER COLUMN project_id DROP NOT NULL;
+
+UPDATE teammate_templates
+SET project_id = NULL, workspace_id = NULL
+WHERE project_id IS NOT NULL OR workspace_id IS NOT NULL;
+
+DROP TRIGGER IF EXISTS teammate_template_versions_immutable
+  ON teammate_template_versions;
+
+UPDATE teammate_template_versions
+SET project_id = NULL
+WHERE project_id IS NOT NULL;
+
+CREATE TRIGGER teammate_template_versions_immutable
+BEFORE UPDATE OR DELETE ON teammate_template_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_teammate_template_version_mutation();
+
+DROP INDEX IF EXISTS teammate_templates_active_name_idx;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM teammate_templates
+    WHERE scope = 'platform' AND status <> 'archived'
+    GROUP BY lower(btrim(definition ->> 'name'))
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'platform teammate template names must be globally unique';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM teammate_templates
+    WHERE scope = 'personal' AND status <> 'archived'
+    GROUP BY owner_principal_id, lower(btrim(definition ->> 'name'))
+    HAVING COUNT(*) > 1
+  ) THEN
+    RAISE EXCEPTION 'personal teammate template names must be unique per owner';
+  END IF;
+END;
+$$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS teammate_templates_platform_name_idx
+  ON teammate_templates(lower(btrim(definition ->> 'name')))
+  WHERE scope = 'platform' AND status <> 'archived';
+
+CREATE UNIQUE INDEX IF NOT EXISTS teammate_templates_personal_owner_name_idx
+  ON teammate_templates(
+    owner_principal_id,
+    lower(btrim(definition ->> 'name'))
+  )
+  WHERE scope = 'personal' AND status <> 'archived';
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_teammate_template_version()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  template_project_id UUID;
+  template_scope TEXT;
+  template_status TEXT;
+  template_owner_principal_id TEXT;
+  version_number INTEGER;
+  version_project_id UUID;
+BEGIN
+  SELECT project_id, scope, status, owner_principal_id
+  INTO template_project_id, template_scope, template_status,
+       template_owner_principal_id
+  FROM teammate_templates
+  WHERE id = NEW.template_id;
+
+  SELECT version, project_id
+  INTO version_number, version_project_id
+  FROM teammate_template_versions
+  WHERE id = NEW.template_version_id
+    AND template_id = NEW.template_id;
+
+  IF version_project_id IS DISTINCT FROM template_project_id
+    OR version_number IS DISTINCT FROM NEW.template_version
+  THEN
+    RAISE EXCEPTION 'teammate template version does not match template scope';
+  END IF;
+  IF template_status = 'archived' AND TG_OP = 'INSERT' THEN
+    RAISE EXCEPTION 'archived teammate template cannot create an instance';
+  END IF;
+  IF template_scope = 'personal' AND TG_OP = 'INSERT' THEN
+    IF template_owner_principal_id IS NULL
+      OR template_owner_principal_id <> NEW.owner_principal_id
+    THEN
+      RAISE EXCEPTION 'personal teammate template requires its owner';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+ALTER TABLE skill_versions
+  ADD COLUMN IF NOT EXISTS instructions_hash TEXT
+    CHECK (
+      instructions_hash IS NULL
+      OR instructions_hash ~ '^[a-f0-9]{64}$'
+    );
+
+ALTER TABLE teammate_template_skill_bindings
+  ADD COLUMN IF NOT EXISTS mode TEXT,
+  ADD COLUMN IF NOT EXISTS scenes JSONB NOT NULL
+    DEFAULT '["task-execution"]'::jsonb
+    CHECK (
+      jsonb_typeof(scenes) = 'array'
+      AND jsonb_array_length(scenes) BETWEEN 1 AND 8
+    );
+
+UPDATE teammate_template_skill_bindings
+SET
+  mode = CASE WHEN required THEN 'required' ELSE 'default' END,
+  scenes = '["task-execution"]'::jsonb
+WHERE mode IS NULL;
+
+ALTER TABLE teammate_template_skill_bindings
+  ALTER COLUMN mode SET NOT NULL;
+
+ALTER TABLE teammate_template_skill_bindings
+  DROP CONSTRAINT IF EXISTS teammate_template_skill_bindings_mode_check;
+
+ALTER TABLE teammate_template_skill_bindings
+  ADD CONSTRAINT teammate_template_skill_bindings_mode_check
+  CHECK (mode IN ('required', 'default', 'additive', 'primary'));
+
+ALTER TABLE teammate_template_skill_bindings
+  DROP CONSTRAINT IF EXISTS teammate_template_skill_bindings_mode_required_check;
+
+ALTER TABLE teammate_template_skill_bindings
+  ADD CONSTRAINT teammate_template_skill_bindings_mode_required_check
+  CHECK (
+    (required AND mode = 'required')
+    OR (NOT required AND mode IN ('default', 'additive', 'primary'))
+  );
+
+ALTER TABLE teammate_instance_skill_extensions
+  ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'additive',
+  ADD COLUMN IF NOT EXISTS scenes JSONB NOT NULL
+    DEFAULT '["task-execution"]'::jsonb
+    CHECK (
+      jsonb_typeof(scenes) = 'array'
+      AND jsonb_array_length(scenes) BETWEEN 1 AND 8
+    );
+
+ALTER TABLE teammate_instance_skill_extensions
+  DROP CONSTRAINT IF EXISTS teammate_instance_skill_extensions_mode_check;
+
+ALTER TABLE teammate_instance_skill_extensions
+  ADD CONSTRAINT teammate_instance_skill_extensions_mode_check
+  CHECK (mode = 'additive');
+
+-- M9 enable state: no runtime flag is opened by this migration.
+`;
+
+export const M10_PLANNING_RUNTIME_SCHEMA_SQL = `
+-- M10 expand: Planning control-plane policy, runs, trigger receipts,
+-- immutable artifacts, append-only events, and quality snapshots.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('planning.manual', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW()),
+  ('planning.autopilot', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS planning_policies (
+  id UUID PRIMARY KEY,
+  scope_type TEXT NOT NULL CHECK (scope_type IN ('platform', 'project')),
+  scope_id TEXT NOT NULL
+    CHECK (length(btrim(scope_id)) BETWEEN 1 AND 180),
+  config JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(config) = 'object'),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  updated_by TEXT NOT NULL
+    CHECK (length(btrim(updated_by)) BETWEEN 1 AND 180),
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (scope_type, scope_id)
+);
+
+INSERT INTO planning_policies (
+  id, scope_type, scope_id, config, revision, updated_by, updated_at
+) VALUES (
+  '00000000-0000-4000-8000-000000000046',
+  'platform',
+  'platform',
+  '{
+    "minScore": 80,
+    "autoApprove": false,
+    "highRiskReview": true,
+    "requireHumanReview": true,
+    "maxNodes": 100,
+    "maxDepth": 32,
+    "triggerPolicy": {
+      "agentAssigned": false,
+      "taskSpecChanged": false,
+      "agentRequested": false,
+      "replanRequested": true
+    }
+  }'::jsonb,
+  1,
+  'system:migration',
+  NOW()
+)
+ON CONFLICT (scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS planning_runs (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  root_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL CHECK (status IN (
+    'queued',
+    'preparing',
+    'understanding',
+    'clarifying',
+    'drafting',
+    'critiquing',
+    'validating',
+    'review_required',
+    'succeeded',
+    'failed',
+    'cancelled',
+    'paused'
+  )),
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  trigger_kind TEXT NOT NULL CHECK (trigger_kind IN (
+    'human-manual',
+    'agent-assigned',
+    'task-spec-changed',
+    'agent-requested',
+    'replan-requested'
+  )),
+  root_task_revision INTEGER NOT NULL CHECK (root_task_revision > 0),
+  policy_revision INTEGER NOT NULL CHECK (policy_revision > 0),
+  source_run_id UUID REFERENCES planning_runs(id) ON DELETE RESTRICT,
+  workflow_plan_id UUID
+    REFERENCES workflow_plans(id) ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED,
+  trigger_count INTEGER NOT NULL DEFAULT 1 CHECK (trigger_count > 0),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  blocked_reason TEXT,
+  failure_code TEXT,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  started_at TIMESTAMPTZ,
+  paused_at TIMESTAMPTZ,
+  terminal_at TIMESTAMPTZ,
+  CHECK (updated_at >= created_at),
+  CHECK (
+    (status = 'paused' AND paused_at IS NOT NULL)
+    OR (status <> 'paused' AND paused_at IS NULL)
+  ),
+  CHECK (
+    (status IN ('succeeded', 'failed', 'cancelled')
+      AND terminal_at IS NOT NULL)
+    OR (status NOT IN ('succeeded', 'failed', 'cancelled')
+      AND terminal_at IS NULL)
+  ),
+  CHECK (status <> 'succeeded' OR workflow_plan_id IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS planning_runs_active_root_idx
+  ON planning_runs(root_task_id)
+  WHERE status NOT IN ('succeeded', 'failed', 'cancelled');
+
+CREATE UNIQUE INDEX IF NOT EXISTS planning_runs_workflow_plan_idx
+  ON planning_runs(workflow_plan_id)
+  WHERE workflow_plan_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS planning_runs_project_status_idx
+  ON planning_runs(project_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS planning_runs_root_created_idx
+  ON planning_runs(root_task_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_planning_run_scope()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  task_project_id UUID;
+  task_parent_id UUID;
+BEGIN
+  SELECT project_id, parent_task_id
+  INTO task_project_id, task_parent_id
+  FROM tasks
+  WHERE id = NEW.root_task_id;
+
+  IF task_project_id IS NULL THEN
+    RAISE EXCEPTION 'planning root task does not exist';
+  END IF;
+  IF task_project_id <> NEW.project_id THEN
+    RAISE EXCEPTION 'planning root task must belong to its project';
+  END IF;
+  IF task_parent_id IS NOT NULL THEN
+    RAISE EXCEPTION 'planning may only start from a root task';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS planning_runs_scope_guard ON planning_runs;
+CREATE TRIGGER planning_runs_scope_guard
+BEFORE INSERT OR UPDATE OF project_id, root_task_id
+ON planning_runs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_planning_run_scope();
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_planning_run_transition()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  transition_allowed BOOLEAN := FALSE;
+BEGIN
+  IF NEW.status = OLD.status THEN
+    IF NEW.revision <> OLD.revision + 1 THEN
+      RAISE EXCEPTION 'planning run revision must advance by one';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF OLD.status IN ('succeeded', 'failed', 'cancelled') THEN
+    RAISE EXCEPTION 'terminal planning runs are immutable';
+  END IF;
+  IF NEW.revision <> OLD.revision + 1 THEN
+    RAISE EXCEPTION 'planning run revision must advance by one';
+  END IF;
+
+  transition_allowed := CASE
+    WHEN OLD.status = 'queued'
+      AND NEW.status IN ('preparing', 'paused', 'cancelled', 'failed')
+      THEN TRUE
+    WHEN OLD.status = 'preparing'
+      AND NEW.status IN (
+        'understanding', 'clarifying', 'drafting', 'critiquing',
+        'validating', 'review_required', 'paused', 'cancelled', 'failed'
+      )
+      THEN TRUE
+    WHEN OLD.status = 'understanding'
+      AND NEW.status IN (
+        'clarifying', 'drafting', 'critiquing', 'validating',
+        'review_required', 'paused', 'cancelled', 'failed'
+      )
+      THEN TRUE
+    WHEN OLD.status = 'clarifying'
+      AND NEW.status IN (
+        'understanding', 'drafting', 'review_required',
+        'paused', 'cancelled', 'failed'
+      )
+      THEN TRUE
+    WHEN OLD.status = 'drafting'
+      AND NEW.status IN (
+        'critiquing', 'validating', 'review_required',
+        'paused', 'cancelled', 'failed'
+      )
+      THEN TRUE
+    WHEN OLD.status = 'critiquing'
+      AND NEW.status IN (
+        'drafting', 'validating', 'review_required',
+        'paused', 'cancelled', 'failed'
+      )
+      THEN TRUE
+    WHEN OLD.status = 'validating'
+      AND NEW.status IN (
+        'review_required', 'succeeded', 'paused', 'cancelled', 'failed'
+      )
+      THEN TRUE
+    WHEN OLD.status = 'review_required'
+      AND NEW.status IN ('preparing', 'succeeded', 'cancelled', 'failed')
+      THEN TRUE
+    WHEN OLD.status = 'paused'
+      AND NEW.status IN ('preparing', 'cancelled', 'failed')
+      THEN TRUE
+    ELSE FALSE
+  END;
+
+  IF NOT transition_allowed THEN
+    RAISE EXCEPTION 'illegal planning run transition: % -> %',
+      OLD.status, NEW.status;
+  END IF;
+  IF NEW.status = 'succeeded' AND NEW.workflow_plan_id IS NULL THEN
+    RAISE EXCEPTION 'succeeded planning run must bind a workflow plan';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS planning_runs_transition_guard ON planning_runs;
+CREATE TRIGGER planning_runs_transition_guard
+BEFORE UPDATE ON planning_runs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_planning_run_transition();
+
+CREATE TABLE IF NOT EXISTS planning_trigger_receipts (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  root_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  planning_run_id UUID NOT NULL
+    REFERENCES planning_runs(id) ON DELETE RESTRICT,
+  trigger_kind TEXT NOT NULL CHECK (trigger_kind IN (
+    'human-manual',
+    'agent-assigned',
+    'task-spec-changed',
+    'agent-requested',
+    'replan-requested'
+  )),
+  root_task_revision INTEGER NOT NULL CHECK (root_task_revision > 0),
+  event_key TEXT NOT NULL CHECK (event_key ~ '^[a-f0-9]{64}$'),
+  request_digest TEXT NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL CHECK (status IN ('accepted', 'merged', 'discarded')),
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, root_task_id, event_key)
+);
+
+CREATE INDEX IF NOT EXISTS planning_trigger_receipts_run_idx
+  ON planning_trigger_receipts(planning_run_id, created_at);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_planning_trigger_receipt_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'planning trigger receipts are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS planning_trigger_receipts_immutable
+  ON planning_trigger_receipts;
+CREATE TRIGGER planning_trigger_receipts_immutable
+BEFORE UPDATE OR DELETE ON planning_trigger_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_planning_trigger_receipt_mutation();
+
+CREATE TABLE IF NOT EXISTS planning_artifacts (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES planning_runs(id) ON DELETE RESTRICT,
+  kind TEXT NOT NULL CHECK (kind IN (
+    'requirement-brief',
+    'facts-ledger',
+    'critic',
+    'context-pack',
+    'plan-draft',
+    'skill-snapshot',
+    'knowledge-receipt'
+  )),
+  version INTEGER NOT NULL CHECK (version > 0),
+  content_digest TEXT NOT NULL CHECK (content_digest ~ '^[a-f0-9]{64}$'),
+  payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+  created_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, kind, version)
+);
+
+CREATE INDEX IF NOT EXISTS planning_artifacts_run_idx
+  ON planning_artifacts(run_id, kind, version DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_planning_artifact_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'planning artifacts are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS planning_artifacts_immutable ON planning_artifacts;
+CREATE TRIGGER planning_artifacts_immutable
+BEFORE UPDATE OR DELETE ON planning_artifacts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_planning_artifact_mutation();
+
+CREATE TABLE IF NOT EXISTS planning_events (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES planning_runs(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'run.created',
+    'trigger.merged',
+    'run.started',
+    'run.paused',
+    'run.cancelled',
+    'run.review_required',
+    'run.retried',
+    'run.succeeded',
+    'run.failed',
+    'artifact.recorded',
+    'quality.recorded'
+  )),
+  event_key TEXT NOT NULL CHECK (event_key ~ '^[a-f0-9]{64}$'),
+  actor_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  summary TEXT NOT NULL,
+  data JSONB CHECK (data IS NULL OR jsonb_typeof(data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, seq),
+  UNIQUE (event_key)
+);
+
+CREATE INDEX IF NOT EXISTS planning_events_run_idx
+  ON planning_events(run_id, seq);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_planning_event_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'planning events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS planning_events_append_only ON planning_events;
+CREATE TRIGGER planning_events_append_only
+BEFORE UPDATE OR DELETE ON planning_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_planning_event_mutation();
+
+CREATE TABLE IF NOT EXISTS planning_quality_metrics (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES planning_runs(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  critic_score NUMERIC(5, 2)
+    CHECK (critic_score IS NULL OR critic_score BETWEEN 0 AND 100),
+  validator_error_count INTEGER NOT NULL DEFAULT 0
+    CHECK (validator_error_count >= 0),
+  acceptance_coverage NUMERIC(5, 4)
+    CHECK (
+      acceptance_coverage IS NULL
+      OR acceptance_coverage BETWEEN 0 AND 1
+    ),
+  node_count INTEGER NOT NULL DEFAULT 0 CHECK (node_count >= 0),
+  depth INTEGER NOT NULL DEFAULT 0 CHECK (depth >= 0),
+  human_review_required BOOLEAN NOT NULL,
+  auto_approve_eligible BOOLEAN NOT NULL,
+  recorded_by_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT,
+  recorded_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS planning_quality_metrics_run_idx
+  ON planning_quality_metrics(run_id, version DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_planning_quality_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'planning quality metrics are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS planning_quality_metrics_immutable
+  ON planning_quality_metrics;
+CREATE TRIGGER planning_quality_metrics_immutable
+BEFORE UPDATE OR DELETE ON planning_quality_metrics
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_planning_quality_mutation();
+
+ALTER TABLE workflow_plans
+  ADD COLUMN IF NOT EXISTS planning_run_id UUID
+    REFERENCES planning_runs(id) ON DELETE RESTRICT
+    DEFERRABLE INITIALLY DEFERRED,
+  ADD COLUMN IF NOT EXISTS planning_source_legacy_unverified BOOLEAN
+    NOT NULL DEFAULT FALSE;
+
+-- Planning-generated Router plans are produced by the Planning Runtime and do
+-- not require an M3 Router Agent. Preserve the original constraint for legacy
+-- callers while allowing a server-verified Planning Run to prove provenance.
+ALTER TABLE workflow_plans
+  DROP CONSTRAINT IF EXISTS workflow_plans_check3;
+ALTER TABLE workflow_plans
+  DROP CONSTRAINT IF EXISTS workflow_plans_router_agent_required;
+ALTER TABLE workflow_plans
+  ADD CONSTRAINT workflow_plans_router_agent_required
+  CHECK (
+    source <> 'router'
+    OR router_agent_id IS NOT NULL
+    OR planning_run_id IS NOT NULL
+  );
+
+-- Legacy Router plans predate Planning Runs. They remain readable without
+-- fabricating provenance. New rows cannot opt into this compatibility marker.
+UPDATE workflow_plans
+SET planning_source_legacy_unverified = TRUE
+WHERE source = 'router' AND planning_run_id IS NULL;
+
+ALTER TABLE workflow_plans
+  DROP CONSTRAINT IF EXISTS workflow_plans_planning_run_key;
+ALTER TABLE workflow_plans
+  ADD CONSTRAINT workflow_plans_planning_run_key
+  UNIQUE (planning_run_id);
+
+-- Validate before enforcement: only rows classified above may omit a run.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM workflow_plans
+    WHERE source = 'router'
+      AND planning_run_id IS NULL
+      AND NOT planning_source_legacy_unverified
+  ) THEN
+    RAISE EXCEPTION 'router plan provenance precheck failed';
+  END IF;
+END;
+$$;
+
+ALTER TABLE workflow_plans
+  DROP CONSTRAINT IF EXISTS workflow_plans_router_planning_run_check;
+ALTER TABLE workflow_plans
+  ADD CONSTRAINT workflow_plans_router_planning_run_check
+  CHECK (
+    source <> 'router'
+    OR planning_run_id IS NOT NULL
+    OR planning_source_legacy_unverified
+  )
+  NOT VALID;
+
+ALTER TABLE workflow_plans
+  VALIDATE CONSTRAINT workflow_plans_router_planning_run_check;
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_workflow_plan_planning_source()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  run_project_id UUID;
+  run_root_task_id UUID;
+  run_status TEXT;
+BEGIN
+  IF NEW.source = 'router'
+    AND NEW.planning_run_id IS NULL
+    AND NOT NEW.planning_source_legacy_unverified
+  THEN
+    RAISE EXCEPTION 'router plans require a planning run';
+  END IF;
+  IF NEW.planning_run_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT project_id, root_task_id, status
+  INTO run_project_id, run_root_task_id, run_status
+  FROM planning_runs
+  WHERE id = NEW.planning_run_id;
+
+  IF run_project_id IS NULL THEN
+    RAISE EXCEPTION 'planning run does not exist';
+  END IF;
+  IF run_project_id <> NEW.project_id
+    OR run_root_task_id <> NEW.root_task_id
+  THEN
+    RAISE EXCEPTION 'planning run scope does not match workflow plan';
+  END IF;
+  IF run_status NOT IN ('review_required', 'succeeded') THEN
+    RAISE EXCEPTION 'planning run is not ready to bind a workflow plan';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_planning_legacy_source()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'INSERT' AND NEW.planning_source_legacy_unverified THEN
+    RAISE EXCEPTION 'legacy planning provenance is migration-only';
+  END IF;
+  IF TG_OP = 'UPDATE'
+    AND NEW.planning_source_legacy_unverified
+    AND NOT OLD.planning_source_legacy_unverified
+  THEN
+    RAISE EXCEPTION 'legacy planning provenance is migration-only';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- Plan Versions are immutable. A Router version may omit Router Agent metadata
+-- only when its parent Plan is bound to a Planning Run.
+DO $$
+DECLARE
+  constraint_name TEXT;
+BEGIN
+  FOR constraint_name IN
+    SELECT constraint_entry.conname
+    FROM pg_constraint AS constraint_entry
+    WHERE constraint_entry.conrelid =
+      'workflow_plan_versions'::regclass
+      AND constraint_entry.contype = 'c'
+      AND pg_get_constraintdef(constraint_entry.oid)
+        LIKE '%router_agent_id IS NOT NULL%'
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE workflow_plan_versions DROP CONSTRAINT %I',
+      constraint_name
+    );
+  END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_workflow_plan_version_source()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  parent_planning_run_id UUID;
+  parent_legacy_unverified BOOLEAN;
+  parent_project_id UUID;
+  parent_root_task_id UUID;
+  version_project_id UUID;
+  version_root_task_id UUID;
+BEGIN
+  IF NEW.source = 'router' AND NEW.router_agent_id IS NULL THEN
+    SELECT planning_run_id, planning_source_legacy_unverified,
+           project_id, root_task_id
+    INTO parent_planning_run_id, parent_legacy_unverified,
+         parent_project_id, parent_root_task_id
+    FROM workflow_plans
+    WHERE id = NEW.plan_id;
+    IF parent_project_id IS NULL THEN
+      RAISE EXCEPTION 'workflow plan version parent is missing';
+    END IF;
+    IF parent_planning_run_id IS NULL THEN
+      RAISE EXCEPTION 'router plan versions require planning provenance';
+    END IF;
+    IF parent_legacy_unverified THEN
+      RAISE EXCEPTION 'legacy router plans cannot receive new versions';
+    END IF;
+    SELECT project_id, root_task_id
+    INTO version_project_id, version_root_task_id
+    FROM workflow_plans
+    WHERE id = NEW.plan_id;
+    IF version_project_id IS DISTINCT FROM parent_project_id
+      OR version_root_task_id IS DISTINCT FROM parent_root_task_id
+    THEN
+      RAISE EXCEPTION 'workflow plan version scope changed';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS workflow_plan_versions_planning_source_guard
+  ON workflow_plan_versions;
+CREATE TRIGGER workflow_plan_versions_planning_source_guard
+BEFORE INSERT OR UPDATE OF source, router_agent_id, plan_id
+ON workflow_plan_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_workflow_plan_version_source();
+
+DROP TRIGGER IF EXISTS workflow_plans_planning_legacy_guard
+  ON workflow_plans;
+CREATE TRIGGER workflow_plans_planning_legacy_guard
+BEFORE INSERT OR UPDATE OF planning_source_legacy_unverified
+ON workflow_plans
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_planning_legacy_source();
+
+DROP TRIGGER IF EXISTS workflow_plans_planning_source_guard
+  ON workflow_plans;
+CREATE TRIGGER workflow_plans_planning_source_guard
+BEFORE INSERT OR UPDATE OF
+  source, planning_run_id, project_id, root_task_id
+ON workflow_plans
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_workflow_plan_planning_source();
+
+-- M10 enable state: planning.manual and planning.autopilot remain off.
+`;
+
+export const M11_PROJECT_BUSINESS_CHAIN_SCHEMA_SQL = `
+-- M11 expand: business-chain definitions, project bindings, immutable source
+-- snapshots, and stable project alerts. The overview remains a read model and
+-- is deliberately not persisted.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('project.business_chain', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW()),
+  ('project.source.mock', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+ALTER TABLE workflow_definitions
+  ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'workflow',
+  ADD COLUMN IF NOT EXISTS chain_key TEXT,
+  ADD COLUMN IF NOT EXISTS business_chain_metadata JSONB,
+  ADD COLUMN IF NOT EXISTS business_chain_nodes JSONB NOT NULL
+    DEFAULT '[]'::jsonb;
+
+ALTER TABLE workflow_definitions
+  DROP CONSTRAINT IF EXISTS workflow_definitions_kind_check;
+ALTER TABLE workflow_definitions
+  ADD CONSTRAINT workflow_definitions_kind_check
+  CHECK (kind IN ('workflow', 'business-chain'));
+
+ALTER TABLE workflow_definitions
+  DROP CONSTRAINT IF EXISTS workflow_definitions_business_chain_check;
+ALTER TABLE workflow_definitions
+  ADD CONSTRAINT workflow_definitions_business_chain_check
+  CHECK (
+    (
+      kind = 'workflow'
+      AND chain_key IS NULL
+      AND business_chain_metadata IS NULL
+      AND business_chain_nodes = '[]'::jsonb
+    )
+    OR (
+      kind = 'business-chain'
+      AND chain_key IS NOT NULL
+      AND business_chain_metadata IS NOT NULL
+      AND jsonb_typeof(business_chain_metadata) = 'object'
+      AND business_chain_metadata ->> 'chainKey' = chain_key
+      AND jsonb_typeof(business_chain_nodes) = 'array'
+      AND jsonb_array_length(business_chain_nodes) > 0
+    )
+  );
+
+CREATE INDEX IF NOT EXISTS workflow_definitions_business_chain_idx
+  ON workflow_definitions(scope, status, chain_key, revision DESC)
+  WHERE kind = 'business-chain';
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_business_chain_definition()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  metadata_chain_key TEXT;
+  duplicate_stage_count INTEGER;
+  duplicate_sequence_count INTEGER;
+BEGIN
+  IF NEW.kind <> 'business-chain' THEN
+    RETURN NEW;
+  END IF;
+  metadata_chain_key := NEW.business_chain_metadata ->> 'chainKey';
+  IF metadata_chain_key IS DISTINCT FROM NEW.chain_key THEN
+    RAISE EXCEPTION 'business chain key must match definition metadata';
+  END IF;
+  IF NEW.scope = 'platform'
+    AND (NEW.status <> 'active' OR NEW.published_at IS NULL)
+  THEN
+    RAISE EXCEPTION 'platform business chain definitions must be published';
+  END IF;
+
+  SELECT COUNT(*)
+  INTO duplicate_stage_count
+  FROM (
+    SELECT node ->> 'stageCode'
+    FROM jsonb_array_elements(NEW.business_chain_nodes) AS node
+    GROUP BY node ->> 'stageCode'
+    HAVING COUNT(*) > 1
+  ) AS duplicate_stage;
+  IF duplicate_stage_count > 0 THEN
+    RAISE EXCEPTION 'business chain stageCode values must be unique';
+  END IF;
+
+  SELECT COUNT(*)
+  INTO duplicate_sequence_count
+  FROM (
+    SELECT (node ->> 'sequence')::integer
+    FROM jsonb_array_elements(NEW.business_chain_nodes) AS node
+    GROUP BY (node ->> 'sequence')::integer
+    HAVING COUNT(*) > 1
+  ) AS duplicate_sequence;
+  IF duplicate_sequence_count > 0 THEN
+    RAISE EXCEPTION 'business chain sequence values must be unique';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS workflow_definitions_business_chain_guard
+  ON workflow_definitions;
+CREATE TRIGGER workflow_definitions_business_chain_guard
+BEFORE INSERT OR UPDATE OF
+  kind, chain_key, business_chain_metadata, business_chain_nodes,
+  scope, status, published_at
+ON workflow_definitions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_business_chain_definition();
+
+ALTER TABLE project_templates
+  ADD COLUMN IF NOT EXISTS business_chain_policy JSONB NOT NULL
+    DEFAULT '{
+      "mode": "none",
+      "defaultBusinessChainKey": null,
+      "allowedBusinessChainKeys": [],
+      "versionPolicy": "latest-active"
+    }'::jsonb;
+
+ALTER TABLE project_templates
+  DROP CONSTRAINT IF EXISTS project_templates_business_chain_policy_check;
+ALTER TABLE project_templates
+  ADD CONSTRAINT project_templates_business_chain_policy_check
+  CHECK (
+    jsonb_typeof(business_chain_policy) = 'object'
+    AND business_chain_policy ->> 'mode' IN ('required', 'optional', 'none')
+    AND business_chain_policy ->> 'versionPolicy' IN (
+      'pin-at-project-create',
+      'latest-active'
+    )
+    AND jsonb_typeof(
+      business_chain_policy -> 'allowedBusinessChainKeys'
+    ) = 'array'
+  );
+
+CREATE TABLE IF NOT EXISTS project_template_business_chain_refs (
+  template_id UUID NOT NULL
+    REFERENCES project_templates(id) ON DELETE CASCADE,
+  workflow_definition_id UUID NOT NULL
+    REFERENCES workflow_definitions(id) ON DELETE RESTRICT,
+  workflow_definition_version INTEGER NOT NULL
+    CHECK (workflow_definition_version > 0),
+  definition_snapshot JSONB NOT NULL
+    CHECK (jsonb_typeof(definition_snapshot) = 'object'),
+  chain_key_snapshot TEXT NOT NULL
+    CHECK (length(btrim(chain_key_snapshot)) BETWEEN 1 AND 120),
+  display_name_snapshot TEXT NOT NULL
+    CHECK (length(btrim(display_name_snapshot)) BETWEEN 1 AND 160),
+  required BOOLEAN NOT NULL DEFAULT FALSE,
+  PRIMARY KEY (template_id, workflow_definition_id)
+);
+
+CREATE INDEX IF NOT EXISTS project_template_business_chain_refs_definition_idx
+  ON project_template_business_chain_refs(
+    workflow_definition_id,
+    workflow_definition_version
+  );
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_project_template_business_chain_ref()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  definition_kind TEXT;
+  definition_scope TEXT;
+  definition_status TEXT;
+  definition_published_at TIMESTAMPTZ;
+BEGIN
+  SELECT kind, scope, status, published_at
+  INTO definition_kind, definition_scope, definition_status,
+       definition_published_at
+  FROM workflow_definitions
+  WHERE id = NEW.workflow_definition_id;
+  IF definition_kind IS NULL THEN
+    RAISE EXCEPTION 'business chain definition does not exist';
+  END IF;
+  IF definition_kind <> 'business-chain' THEN
+    RAISE EXCEPTION 'project template references must be business chains';
+  END IF;
+  IF definition_scope <> 'platform'
+    OR definition_status <> 'active'
+    OR definition_published_at IS NULL
+  THEN
+    RAISE EXCEPTION 'project template references require published platform chains';
+  END IF;
+  IF NEW.definition_snapshot ->> 'id' <>
+      NEW.workflow_definition_id::text
+    OR (NEW.definition_snapshot ->> 'version')::integer <>
+      NEW.workflow_definition_version
+    OR NEW.definition_snapshot -> 'metadata' ->> 'chainKey' <>
+      NEW.chain_key_snapshot
+  THEN
+    RAISE EXCEPTION 'project template business chain reference is stale';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_template_business_chain_refs_guard
+  ON project_template_business_chain_refs;
+CREATE TRIGGER project_template_business_chain_refs_guard
+BEFORE INSERT OR UPDATE ON project_template_business_chain_refs
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_project_template_business_chain_ref();
+
+CREATE TABLE IF NOT EXISTS project_business_chain_binding_revisions (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  operation TEXT NOT NULL CHECK (operation IN ('bind', 'upgrade', 'unbind')),
+  project_template_id UUID
+    REFERENCES project_templates(id) ON DELETE RESTRICT,
+  source_template_revision INTEGER
+    CHECK (source_template_revision IS NULL OR source_template_revision > 0),
+  workflow_definition_id UUID
+    REFERENCES workflow_definitions(id) ON DELETE RESTRICT,
+  workflow_definition_version INTEGER
+    CHECK (
+      workflow_definition_version IS NULL
+      OR workflow_definition_version > 0
+    ),
+  definition_snapshot JSONB,
+  chain_key TEXT,
+  binding_mode TEXT
+    CHECK (binding_mode IS NULL OR binding_mode IN ('template', 'manual', 'upgrade')),
+  node_bindings JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(node_bindings) = 'array'),
+  binding_digest TEXT
+    CHECK (binding_digest IS NULL OR binding_digest ~ '^[a-f0-9]{64}$'),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  reason TEXT NOT NULL DEFAULT ''
+    CHECK (length(reason) <= 2000),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, revision),
+  CHECK (
+    (
+      operation IN ('bind', 'upgrade')
+      AND workflow_definition_id IS NOT NULL
+      AND workflow_definition_version IS NOT NULL
+      AND definition_snapshot IS NOT NULL
+      AND jsonb_typeof(definition_snapshot) = 'object'
+      AND chain_key IS NOT NULL
+      AND binding_mode IS NOT NULL
+      AND binding_digest IS NOT NULL
+    )
+    OR (
+      operation = 'unbind'
+      AND workflow_definition_id IS NULL
+      AND workflow_definition_version IS NULL
+      AND definition_snapshot IS NULL
+      AND chain_key IS NULL
+      AND binding_mode IS NULL
+      AND binding_digest IS NULL
+      AND jsonb_array_length(node_bindings) = 0
+    )
+  )
+);
+
+CREATE INDEX IF NOT EXISTS project_business_chain_binding_revisions_project_idx
+  ON project_business_chain_binding_revisions(project_id, revision DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_project_business_chain_revision_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'project business chain revisions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_business_chain_binding_revisions_immutable
+  ON project_business_chain_binding_revisions;
+CREATE TRIGGER project_business_chain_binding_revisions_immutable
+BEFORE UPDATE OR DELETE ON project_business_chain_binding_revisions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_business_chain_revision_mutation();
+
+CREATE TABLE IF NOT EXISTS project_business_chain_bindings (
+  project_id UUID PRIMARY KEY REFERENCES projects(id) ON DELETE RESTRICT,
+  project_template_id UUID
+    REFERENCES project_templates(id) ON DELETE RESTRICT,
+  source_template_revision INTEGER
+    CHECK (source_template_revision IS NULL OR source_template_revision > 0),
+  workflow_definition_id UUID
+    REFERENCES workflow_definitions(id) ON DELETE RESTRICT,
+  workflow_definition_version INTEGER
+    CHECK (
+      workflow_definition_version IS NULL
+      OR workflow_definition_version > 0
+    ),
+  definition_snapshot JSONB,
+  chain_key TEXT,
+  binding_mode TEXT
+    CHECK (binding_mode IS NULL OR binding_mode IN ('template', 'manual', 'upgrade')),
+  node_bindings JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(node_bindings) = 'array'),
+  binding_digest TEXT
+    CHECK (binding_digest IS NULL OR binding_digest ~ '^[a-f0-9]{64}$'),
+  active BOOLEAN NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  bound_by_principal_id TEXT
+    CHECK (
+      bound_by_principal_id IS NULL
+      OR length(btrim(bound_by_principal_id)) BETWEEN 1 AND 180
+    ),
+  bound_at TIMESTAMPTZ,
+  unbound_by_principal_id TEXT
+    CHECK (
+      unbound_by_principal_id IS NULL
+      OR length(btrim(unbound_by_principal_id)) BETWEEN 1 AND 180
+    ),
+  unbound_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, revision),
+  FOREIGN KEY (project_id, revision)
+    REFERENCES project_business_chain_binding_revisions(project_id, revision)
+    ON DELETE RESTRICT,
+  CHECK (
+    (
+      active
+      AND workflow_definition_id IS NOT NULL
+      AND workflow_definition_version IS NOT NULL
+      AND definition_snapshot IS NOT NULL
+      AND jsonb_typeof(definition_snapshot) = 'object'
+      AND chain_key IS NOT NULL
+      AND binding_mode IS NOT NULL
+      AND binding_digest IS NOT NULL
+      AND bound_by_principal_id IS NOT NULL
+      AND bound_at IS NOT NULL
+      AND unbound_by_principal_id IS NULL
+      AND unbound_at IS NULL
+    )
+    OR (
+      NOT active
+      AND workflow_definition_id IS NULL
+      AND workflow_definition_version IS NULL
+      AND definition_snapshot IS NULL
+      AND chain_key IS NULL
+      AND binding_mode IS NULL
+      AND binding_digest IS NULL
+      AND jsonb_array_length(node_bindings) = 0
+      AND unbound_by_principal_id IS NOT NULL
+      AND unbound_at IS NOT NULL
+    )
+  )
+);
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_project_business_chain_binding()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  definition_kind TEXT;
+  definition_scope TEXT;
+  definition_project_id UUID;
+  definition_chain_key TEXT;
+  definition_version INTEGER;
+  project_scope TEXT;
+  project_source_template_id UUID;
+  project_source_template_revision INTEGER;
+  policy_mode TEXT;
+  allowed_keys JSONB;
+BEGIN
+  IF NOT NEW.active THEN
+    RETURN NEW;
+  END IF;
+
+  SELECT kind, scope, project_id, chain_key, revision
+  INTO definition_kind, definition_scope, definition_project_id,
+       definition_chain_key, definition_version
+  FROM workflow_definitions
+  WHERE id = NEW.workflow_definition_id;
+  IF definition_kind IS NULL THEN
+    RAISE EXCEPTION 'business chain definition does not exist';
+  END IF;
+  IF definition_kind <> 'business-chain' THEN
+    RAISE EXCEPTION 'project binding must reference a business chain';
+  END IF;
+  IF NEW.definition_snapshot ->> 'id' <>
+      NEW.workflow_definition_id::text
+    OR (NEW.definition_snapshot ->> 'version')::integer <>
+      NEW.workflow_definition_version
+    OR NEW.definition_snapshot -> 'metadata' ->> 'chainKey' <>
+      NEW.chain_key
+  THEN
+    RAISE EXCEPTION 'project binding definition snapshot is invalid';
+  END IF;
+  IF definition_scope = 'project'
+    AND definition_project_id <> NEW.project_id
+  THEN
+    RAISE EXCEPTION 'project business chain definition scope mismatch';
+  END IF;
+
+  SELECT
+    CASE status WHEN 'active' THEN 'active' ELSE 'archived' END,
+    source_template_id,
+    source_template_revision
+  INTO project_scope, project_source_template_id,
+       project_source_template_revision
+  FROM projects
+  WHERE id = NEW.project_id;
+  IF project_scope IS NULL THEN
+    RAISE EXCEPTION 'project binding project does not exist';
+  END IF;
+  IF NEW.project_template_id IS DISTINCT FROM project_source_template_id
+    OR NEW.source_template_revision IS DISTINCT FROM
+      project_source_template_revision
+  THEN
+    RAISE EXCEPTION 'project binding template scope mismatch';
+  END IF;
+  IF NEW.project_template_id IS NOT NULL THEN
+    SELECT business_chain_policy ->> 'mode',
+           business_chain_policy -> 'allowedBusinessChainKeys'
+    INTO policy_mode, allowed_keys
+    FROM project_templates
+    WHERE id = NEW.project_template_id;
+    IF policy_mode IS NULL THEN
+      RAISE EXCEPTION 'project template does not exist';
+    END IF;
+    IF policy_mode = 'none' THEN
+      RAISE EXCEPTION 'project template does not allow a business chain';
+    END IF;
+    IF NOT allowed_keys ? NEW.chain_key THEN
+      RAISE EXCEPTION 'business chain is outside the project template policy';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_business_chain_bindings_guard
+  ON project_business_chain_bindings;
+CREATE TRIGGER project_business_chain_bindings_guard
+BEFORE INSERT OR UPDATE OF
+  project_id, workflow_definition_id, workflow_definition_version,
+  chain_key, binding_mode, node_bindings, binding_digest, active
+ON project_business_chain_bindings
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_project_business_chain_binding();
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_project_business_chain_revision_increment()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.project_id <> OLD.project_id THEN
+    RAISE EXCEPTION 'project binding project is immutable';
+  END IF;
+  IF NEW.revision <> OLD.revision + 1 THEN
+    RAISE EXCEPTION 'project binding revision must advance by one';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_business_chain_bindings_revision_guard
+  ON project_business_chain_bindings;
+CREATE TRIGGER project_business_chain_bindings_revision_guard
+BEFORE UPDATE ON project_business_chain_bindings
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_project_business_chain_revision_increment();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_project_business_chain_binding_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'project business chain bindings must be unbound, not deleted';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_business_chain_bindings_delete_guard
+  ON project_business_chain_bindings;
+CREATE TRIGGER project_business_chain_bindings_delete_guard
+BEFORE DELETE ON project_business_chain_bindings
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_business_chain_binding_delete();
+
+CREATE TABLE IF NOT EXISTS project_source_snapshots (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  ref_key TEXT NOT NULL
+    CHECK (length(btrim(ref_key)) BETWEEN 1 AND 160),
+  source_kind TEXT NOT NULL
+    CHECK (length(btrim(source_kind)) BETWEEN 1 AND 80),
+  source_system TEXT NOT NULL
+    CHECK (length(btrim(source_system)) BETWEEN 1 AND 120),
+  source_object_type TEXT NOT NULL
+    CHECK (length(btrim(source_object_type)) BETWEEN 1 AND 120),
+  source_object_id TEXT NOT NULL
+    CHECK (length(btrim(source_object_id)) BETWEEN 1 AND 240),
+  source_revision TEXT
+    CHECK (
+      source_revision IS NULL
+      OR length(btrim(source_revision)) BETWEEN 1 AND 240
+    ),
+  version INTEGER NOT NULL CHECK (version > 0),
+  status TEXT NOT NULL CHECK (status IN ('fresh', 'stale', 'error')),
+  observed_at TIMESTAMPTZ NOT NULL,
+  effective_at TIMESTAMPTZ,
+  fresh_until TIMESTAMPTZ,
+  payload_digest TEXT
+    CHECK (payload_digest IS NULL OR payload_digest ~ '^[a-f0-9]{64}$'),
+  payload JSONB,
+  failure_reason TEXT
+    CHECK (failure_reason IS NULL OR length(failure_reason) <= 2000),
+  is_mock BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(created_by_principal_id)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, ref_key, version),
+  CHECK (
+    (
+      status <> 'error'
+      AND payload_digest IS NOT NULL
+      AND payload IS NOT NULL
+      AND failure_reason IS NULL
+    )
+    OR (
+      status = 'error'
+      AND payload_digest IS NULL
+      AND payload IS NULL
+      AND failure_reason IS NOT NULL
+    )
+  )
+);
+
+CREATE INDEX IF NOT EXISTS project_source_snapshots_active_idx
+  ON project_source_snapshots(project_id, ref_key, version DESC);
+
+CREATE INDEX IF NOT EXISTS project_source_snapshots_observed_idx
+  ON project_source_snapshots(project_id, observed_at DESC, id);
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_project_source_snapshot_version()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtext(NEW.project_id::text || ':' || NEW.ref_key)
+  );
+  SELECT COALESCE(MAX(version), 0) + 1
+  INTO NEW.version
+  FROM project_source_snapshots
+  WHERE project_id = NEW.project_id
+    AND ref_key = NEW.ref_key;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_source_snapshots_version_guard
+  ON project_source_snapshots;
+CREATE TRIGGER project_source_snapshots_version_guard
+BEFORE INSERT ON project_source_snapshots
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_project_source_snapshot_version();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_project_source_snapshot_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'project source snapshots are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_source_snapshots_immutable
+  ON project_source_snapshots;
+CREATE TRIGGER project_source_snapshots_immutable
+BEFORE UPDATE OR DELETE ON project_source_snapshots
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_source_snapshot_mutation();
+
+CREATE TABLE IF NOT EXISTS project_alerts (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  condition_key TEXT NOT NULL CHECK (condition_key ~ '^[a-f0-9]{64}$'),
+  source_system TEXT NOT NULL,
+  source_object_type TEXT NOT NULL,
+  source_object_id TEXT NOT NULL,
+  condition_code TEXT NOT NULL,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL DEFAULT '',
+  severity TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'critical')),
+  lifecycle TEXT NOT NULL DEFAULT 'open'
+    CHECK (lifecycle IN ('open', 'acknowledged', 'suppressed', 'resolved')),
+  source_revision TEXT,
+  first_seen_at TIMESTAMPTZ NOT NULL,
+  last_seen_at TIMESTAMPTZ NOT NULL,
+  acknowledged_at TIMESTAMPTZ,
+  acknowledged_by_principal_id TEXT,
+  suppression_until TIMESTAMPTZ,
+  resolved_at TIMESTAMPTZ,
+  resolved_by_principal_id TEXT,
+  assignee_principal_id TEXT,
+  linked_node_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(linked_node_ids) = 'array'),
+  linked_task_ids JSONB NOT NULL DEFAULT '[]'::jsonb
+    CHECK (jsonb_typeof(linked_task_ids) = 'array'),
+  follow_target_id TEXT,
+  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, condition_key),
+  CHECK (
+    lifecycle <> 'acknowledged'
+    OR (acknowledged_at IS NOT NULL AND acknowledged_by_principal_id IS NOT NULL)
+  ),
+  CHECK (
+    lifecycle <> 'suppressed'
+    OR suppression_until IS NOT NULL
+  ),
+  CHECK (
+    lifecycle <> 'resolved'
+    OR (resolved_at IS NOT NULL AND resolved_by_principal_id IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS project_alerts_project_lifecycle_idx
+  ON project_alerts(project_id, lifecycle, severity, updated_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_project_alert_revision()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.project_id <> OLD.project_id
+    OR NEW.condition_key <> OLD.condition_key
+  THEN
+    RAISE EXCEPTION 'project alert identity is immutable';
+  END IF;
+  IF NEW.revision <> OLD.revision + 1 THEN
+    RAISE EXCEPTION 'project alert revision must advance by one';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_alerts_revision_guard ON project_alerts;
+CREATE TRIGGER project_alerts_revision_guard
+BEFORE UPDATE ON project_alerts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_project_alert_revision();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_project_alert_delete()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'project alerts must be resolved, not deleted';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_alerts_delete_guard ON project_alerts;
+CREATE TRIGGER project_alerts_delete_guard
+BEFORE DELETE ON project_alerts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_alert_delete();
+
+CREATE TABLE IF NOT EXISTS project_alert_events (
+  id UUID PRIMARY KEY,
+  alert_id UUID NOT NULL REFERENCES project_alerts(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  kind TEXT NOT NULL CHECK (kind IN (
+    'alert.opened',
+    'alert.observed',
+    'alert.acknowledged',
+    'alert.suppressed',
+    'alert.assigned',
+    'alert.resolved',
+    'alert.reopened',
+    'alert.severity_changed'
+  )),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  from_lifecycle TEXT
+    CHECK (
+      from_lifecycle IS NULL
+      OR from_lifecycle IN ('open', 'acknowledged', 'suppressed', 'resolved')
+    ),
+  to_lifecycle TEXT
+    CHECK (
+      to_lifecycle IS NULL
+      OR to_lifecycle IN ('open', 'acknowledged', 'suppressed', 'resolved')
+    ),
+  summary TEXT NOT NULL,
+  data JSONB CHECK (data IS NULL OR jsonb_typeof(data) = 'object'),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (alert_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS project_alert_events_project_idx
+  ON project_alert_events(project_id, created_at DESC, id);
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_project_alert_event_seq()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  SELECT COALESCE(MAX(seq), 0) + 1
+  INTO NEW.seq
+  FROM project_alert_events
+  WHERE alert_id = NEW.alert_id;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_alert_events_seq_guard
+  ON project_alert_events;
+CREATE TRIGGER project_alert_events_seq_guard
+BEFORE INSERT ON project_alert_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_project_alert_event_seq();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_project_alert_event_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'project alert events are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS project_alert_events_append_only
+  ON project_alert_events;
+CREATE TRIGGER project_alert_events_append_only
+BEFORE UPDATE OR DELETE ON project_alert_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_project_alert_event_mutation();
+
+-- M11 enable state: project business-chain and mock source flags remain off.
+`;
+
+export const M12_MARKET_GOVERNANCE_SCHEMA_SQL = `
+-- M12 expand: separate Market origin, sharing, publication and availability
+-- from owner-scoped installation state. Existing Market columns remain
+-- readable for N-1 applications for at least one release cycle.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES
+  ('market.governance_v2', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW()),
+  ('market.shared_supply', 'platform', 'platform', 'off', 1,
+   'system:migration', NOW())
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+ALTER TABLE market_assets
+  ALTER COLUMN trust_level SET DEFAULT 'private',
+  ALTER COLUMN visibility SET DEFAULT 'private';
+
+ALTER TABLE market_assets
+  ADD COLUMN IF NOT EXISTS origin TEXT,
+  ADD COLUMN IF NOT EXISTS sharing_scope TEXT,
+  ADD COLUMN IF NOT EXISTS sharing_scope_id TEXT,
+  ADD COLUMN IF NOT EXISTS publication_status TEXT,
+  ADD COLUMN IF NOT EXISTS availability_status TEXT,
+  ADD COLUMN IF NOT EXISTS admin_locked BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS admin_locked_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS admin_locked_by_principal_id TEXT,
+  ADD COLUMN IF NOT EXISTS admin_lock_reason TEXT,
+  ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS delisted_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS suspended_reason TEXT,
+  ADD COLUMN IF NOT EXISTS publication_changed_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS availability_changed_at TIMESTAMPTZ;
+
+UPDATE market_assets
+SET
+  origin = CASE
+    WHEN trust_level IN ('official', 'verified') THEN 'platform'
+    ELSE 'user'
+  END,
+  sharing_scope = CASE visibility
+    WHEN 'public' THEN 'platform'
+    ELSE visibility
+  END,
+  sharing_scope_id = visibility_scope_id,
+  publication_status = CASE status
+    WHEN 'active' THEN 'published'
+    WHEN 'delisted' THEN 'delisted'
+    ELSE 'archived'
+  END,
+  availability_status = 'active',
+  published_at = CASE
+    WHEN status = 'active' THEN updated_at
+    ELSE NULL
+  END,
+  delisted_at = CASE
+    WHEN status = 'delisted' THEN updated_at
+    ELSE NULL
+  END,
+  archived_at = CASE
+    WHEN status = 'archived' THEN updated_at
+    ELSE NULL
+  END,
+  publication_changed_at = updated_at,
+  availability_changed_at = updated_at
+WHERE origin IS NULL
+   OR sharing_scope IS NULL
+   OR publication_status IS NULL
+   OR availability_status IS NULL;
+
+ALTER TABLE market_assets
+  DROP CONSTRAINT IF EXISTS market_assets_origin_check,
+  DROP CONSTRAINT IF EXISTS market_assets_sharing_scope_check,
+  DROP CONSTRAINT IF EXISTS market_assets_publication_status_check,
+  DROP CONSTRAINT IF EXISTS market_assets_availability_status_check,
+  DROP CONSTRAINT IF EXISTS market_assets_admin_lock_check,
+  DROP CONSTRAINT IF EXISTS market_assets_governance_scope_check;
+
+ALTER TABLE market_assets
+  ADD CONSTRAINT market_assets_origin_check
+    CHECK (origin IN ('platform', 'user')),
+  ADD CONSTRAINT market_assets_sharing_scope_check
+    CHECK (sharing_scope IN ('private', 'project', 'workspace', 'platform')),
+  ADD CONSTRAINT market_assets_publication_status_check
+    CHECK (publication_status IN ('draft', 'published', 'delisted', 'archived')),
+  ADD CONSTRAINT market_assets_availability_status_check
+    CHECK (availability_status IN ('active', 'suspended')),
+  ADD CONSTRAINT market_assets_admin_lock_check
+    CHECK (
+      (
+        NOT admin_locked
+        AND admin_locked_at IS NULL
+        AND admin_locked_by_principal_id IS NULL
+        AND admin_lock_reason IS NULL
+      )
+      OR (
+        admin_locked
+        AND admin_locked_at IS NOT NULL
+        AND admin_locked_by_principal_id IS NOT NULL
+        AND length(btrim(admin_locked_by_principal_id)) BETWEEN 1 AND 180
+        AND admin_lock_reason IS NOT NULL
+        AND length(btrim(admin_lock_reason)) BETWEEN 1 AND 2000
+      )
+    ),
+  ADD CONSTRAINT market_assets_governance_scope_check
+    CHECK (
+      origin IS NOT NULL
+      AND sharing_scope IS NOT NULL
+      AND publication_status IS NOT NULL
+      AND availability_status IS NOT NULL
+      AND publication_changed_at IS NOT NULL
+      AND availability_changed_at IS NOT NULL
+      AND (
+        (sharing_scope IN ('project', 'workspace')
+          AND sharing_scope_id IS NOT NULL
+          AND length(btrim(sharing_scope_id)) BETWEEN 1 AND 180)
+        OR
+        (sharing_scope IN ('private', 'platform')
+          AND sharing_scope_id IS NULL)
+      )
+    );
+
+CREATE INDEX IF NOT EXISTS market_assets_governance_catalog_idx
+  ON market_assets(
+    publication_status,
+    availability_status,
+    sharing_scope,
+    kind,
+    updated_at DESC
+  );
+
+CREATE INDEX IF NOT EXISTS market_assets_owner_governance_idx
+  ON market_assets(publisher_principal_id, publication_status, updated_at DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_market_legacy_publication_status(
+  publication TEXT,
+  availability TEXT
+)
+RETURNS TEXT
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT CASE
+    WHEN publication = 'archived' THEN 'archived'
+    WHEN publication = 'published' AND availability = 'active' THEN 'active'
+    ELSE 'delisted'
+  END;
+$$;
+
+CREATE OR REPLACE FUNCTION pluginmax_sync_market_asset_governance_projection()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  legacy_changed BOOLEAN := FALSE;
+  governance_changed BOOLEAN := FALSE;
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.origin IS NULL
+      OR NEW.sharing_scope IS NULL
+      OR NEW.publication_status IS NULL
+      OR NEW.availability_status IS NULL
+    THEN
+      NEW.origin := CASE
+        WHEN NEW.trust_level IN ('official', 'verified') THEN 'platform'
+        ELSE 'user'
+      END;
+      NEW.sharing_scope := CASE NEW.visibility
+        WHEN 'public' THEN 'platform'
+        ELSE NEW.visibility
+      END;
+      NEW.sharing_scope_id := NEW.visibility_scope_id;
+      NEW.publication_status := CASE NEW.status
+        WHEN 'active' THEN 'published'
+        WHEN 'delisted' THEN 'delisted'
+        ELSE 'archived'
+      END;
+      NEW.availability_status := 'active';
+    ELSE
+      NEW.visibility := CASE NEW.sharing_scope
+        WHEN 'platform' THEN 'public'
+        ELSE NEW.sharing_scope
+      END;
+      NEW.visibility_scope_id := CASE
+        WHEN NEW.sharing_scope IN ('project', 'workspace')
+          THEN NEW.sharing_scope_id
+        ELSE NULL
+      END;
+      NEW.status := pluginmax_market_legacy_publication_status(
+        NEW.publication_status,
+        NEW.availability_status
+      );
+      NEW.trust_level := CASE NEW.origin
+        WHEN 'platform' THEN 'official'
+        ELSE 'private'
+      END;
+    END IF;
+    NEW.publication_changed_at := COALESCE(
+      NEW.publication_changed_at,
+      NEW.updated_at,
+      NOW()
+    );
+    NEW.availability_changed_at := COALESCE(
+      NEW.availability_changed_at,
+      NEW.updated_at,
+      NOW()
+    );
+    IF NEW.publication_status = 'published' THEN
+      NEW.published_at := COALESCE(NEW.published_at, NOW());
+    ELSIF NEW.publication_status = 'delisted' THEN
+      NEW.delisted_at := COALESCE(NEW.delisted_at, NOW());
+    ELSIF NEW.publication_status = 'archived' THEN
+      NEW.archived_at := COALESCE(NEW.archived_at, NOW());
+    END IF;
+    IF NEW.availability_status = 'suspended' THEN
+      NEW.suspended_at := COALESCE(NEW.suspended_at, NOW());
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  legacy_changed :=
+    NEW.visibility IS DISTINCT FROM OLD.visibility
+    OR NEW.visibility_scope_id IS DISTINCT FROM OLD.visibility_scope_id
+    OR NEW.status IS DISTINCT FROM OLD.status
+    OR NEW.trust_level IS DISTINCT FROM OLD.trust_level;
+  governance_changed :=
+    NEW.origin IS DISTINCT FROM OLD.origin
+    OR NEW.sharing_scope IS DISTINCT FROM OLD.sharing_scope
+    OR NEW.sharing_scope_id IS DISTINCT FROM OLD.sharing_scope_id
+    OR NEW.publication_status IS DISTINCT FROM OLD.publication_status
+    OR NEW.availability_status IS DISTINCT FROM OLD.availability_status;
+
+  IF legacy_changed AND NOT governance_changed THEN
+    NEW.origin := CASE
+      WHEN NEW.trust_level IN ('official', 'verified') THEN 'platform'
+      ELSE 'user'
+    END;
+    NEW.sharing_scope := CASE NEW.visibility
+      WHEN 'public' THEN 'platform'
+      ELSE NEW.visibility
+    END;
+    NEW.sharing_scope_id := NEW.visibility_scope_id;
+    NEW.publication_status := CASE NEW.status
+      WHEN 'active' THEN 'published'
+      WHEN 'delisted' THEN 'delisted'
+      ELSE 'archived'
+    END;
+    IF NEW.status = 'active' AND OLD.availability_status = 'suspended' THEN
+      NEW.availability_status := 'suspended';
+    ELSE
+      NEW.availability_status := 'active';
+    END IF;
+  ELSIF governance_changed AND NOT legacy_changed THEN
+    NEW.visibility := CASE NEW.sharing_scope
+      WHEN 'platform' THEN 'public'
+      ELSE NEW.sharing_scope
+    END;
+    NEW.visibility_scope_id := CASE
+      WHEN NEW.sharing_scope IN ('project', 'workspace')
+        THEN NEW.sharing_scope_id
+      ELSE NULL
+    END;
+    NEW.status := pluginmax_market_legacy_publication_status(
+      NEW.publication_status,
+      NEW.availability_status
+    );
+    NEW.trust_level := CASE
+      WHEN NEW.origin = 'platform' AND OLD.trust_level = 'verified'
+        THEN 'verified'
+      WHEN NEW.origin = 'platform' THEN 'official'
+      ELSE 'private'
+    END;
+  ELSIF legacy_changed AND governance_changed THEN
+    IF NEW.visibility IS DISTINCT FROM (
+        CASE
+          WHEN NEW.sharing_scope = 'platform' THEN 'public'
+          ELSE NEW.sharing_scope
+        END
+      )
+      OR NEW.status IS DISTINCT FROM (
+        pluginmax_market_legacy_publication_status(
+          NEW.publication_status,
+          NEW.availability_status
+        )
+      )
+    THEN
+      RAISE EXCEPTION 'conflicting Market legacy and governance projections';
+    END IF;
+  END IF;
+
+  IF NEW.publication_status IS DISTINCT FROM OLD.publication_status THEN
+    NEW.publication_changed_at := NOW();
+    IF NEW.publication_status = 'published' THEN
+      NEW.published_at := NOW();
+    ELSIF NEW.publication_status = 'delisted' THEN
+      NEW.delisted_at := NOW();
+    ELSIF NEW.publication_status = 'archived' THEN
+      NEW.archived_at := NOW();
+    END IF;
+  END IF;
+  IF NEW.availability_status IS DISTINCT FROM OLD.availability_status THEN
+    NEW.availability_changed_at := NOW();
+    IF NEW.availability_status = 'suspended' THEN
+      NEW.suspended_at := NOW();
+    ELSE
+      NEW.suspended_at := NULL;
+      NEW.suspended_reason := NULL;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_assets_governance_projection
+  ON market_assets;
+CREATE TRIGGER market_assets_governance_projection
+BEFORE INSERT OR UPDATE OF
+  origin, sharing_scope, sharing_scope_id, publication_status,
+  availability_status, visibility, visibility_scope_id, status, trust_level
+ON market_assets
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_sync_market_asset_governance_projection();
+
+CREATE TABLE IF NOT EXISTS market_governance_audit_events (
+  id UUID PRIMARY KEY,
+  asset_id UUID NOT NULL
+    REFERENCES market_assets(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  action TEXT NOT NULL
+    CHECK (length(btrim(action)) BETWEEN 1 AND 120),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  actor_role TEXT NOT NULL
+    CHECK (actor_role IN ('owner', 'platform-admin', 'system')),
+  reason TEXT NOT NULL DEFAULT '' CHECK (length(reason) <= 2000),
+  from_state JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(from_state) = 'object'),
+  to_state JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(to_state) = 'object'),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (asset_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS market_governance_audit_asset_idx
+  ON market_governance_audit_events(asset_id, seq DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_market_governance_audit_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Market governance audit is append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_governance_audit_append_only
+  ON market_governance_audit_events;
+CREATE TRIGGER market_governance_audit_append_only
+BEFORE UPDATE OR DELETE ON market_governance_audit_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_market_governance_audit_mutation();
+
+CREATE TABLE IF NOT EXISTS market_asset_resource_bindings (
+  id UUID PRIMARY KEY,
+  asset_id UUID NOT NULL
+    REFERENCES market_assets(id) ON DELETE RESTRICT,
+  asset_version_id UUID NOT NULL
+    REFERENCES market_asset_versions(id) ON DELETE RESTRICT,
+  resource_kind TEXT NOT NULL CHECK (resource_kind IN (
+    'skill_version',
+    'mcp_provider',
+    'workflow_template_version',
+    'workbench_template_version',
+    'trusted_panel'
+  )),
+  resource_id TEXT NOT NULL
+    CHECK (length(btrim(resource_id)) BETWEEN 1 AND 180),
+  resource_version_id TEXT
+    CHECK (
+      resource_version_id IS NULL
+      OR length(btrim(resource_version_id)) BETWEEN 1 AND 180
+    ),
+  created_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(created_by_principal_id)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (
+    asset_version_id,
+    resource_kind,
+    resource_id,
+    resource_version_id
+  )
+);
+
+CREATE INDEX IF NOT EXISTS market_asset_resource_bindings_asset_idx
+  ON market_asset_resource_bindings(asset_id, asset_version_id);
+
+CREATE INDEX IF NOT EXISTS market_asset_resource_bindings_resource_idx
+  ON market_asset_resource_bindings(
+    resource_kind,
+    resource_id,
+    resource_version_id
+  );
+
+CREATE OR REPLACE FUNCTION pluginmax_validate_market_resource_binding()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  version_asset UUID;
+  panel_version TEXT;
+  resource_exists BOOLEAN := FALSE;
+BEGIN
+  SELECT asset_id INTO version_asset
+  FROM market_asset_versions
+  WHERE id = NEW.asset_version_id;
+  IF version_asset IS NULL OR version_asset <> NEW.asset_id THEN
+    RAISE EXCEPTION 'Market resource binding asset version mismatch';
+  END IF;
+
+  IF NEW.resource_kind = 'skill_version' THEN
+    IF NEW.resource_version_id IS NULL THEN
+      RAISE EXCEPTION 'Skill resource binding requires a version id';
+    END IF;
+    SELECT EXISTS (
+      SELECT 1
+      FROM skill_versions AS version
+      JOIN skill_definitions AS definition
+        ON definition.id = version.skill_id
+      WHERE definition.id::text = NEW.resource_id
+        AND version.id::text = NEW.resource_version_id
+    ) INTO resource_exists;
+  ELSIF NEW.resource_kind = 'workflow_template_version' THEN
+    SELECT EXISTS (
+      SELECT 1
+      FROM workflow_templates
+      WHERE id::text = NEW.resource_id
+        AND (
+          NEW.resource_version_id IS NULL
+          OR NEW.resource_version_id = id::text
+          OR NEW.resource_version_id = version::text
+        )
+    ) INTO resource_exists;
+  ELSIF NEW.resource_kind = 'workbench_template_version' THEN
+    SELECT EXISTS (
+      SELECT 1
+      FROM market_templates AS template
+      JOIN market_asset_versions AS version
+        ON version.asset_id = template.asset_id
+       AND version.version = template.current_version
+      WHERE template.id::text = NEW.resource_id
+        AND (
+          NEW.resource_version_id IS NULL
+          OR NEW.resource_version_id = version.id::text
+        )
+    ) INTO resource_exists;
+  ELSIF NEW.resource_kind = 'trusted_panel' THEN
+    SELECT version, TRUE
+    INTO panel_version, resource_exists
+    FROM workbench_panels
+    WHERE plugin_id = NEW.resource_id;
+    IF resource_exists AND NEW.resource_version_id IS NULL THEN
+      NEW.resource_version_id := panel_version;
+    END IF;
+    IF resource_exists
+      AND NEW.resource_version_id IS NOT NULL
+      AND NEW.resource_version_id <> panel_version
+    THEN
+      resource_exists := FALSE;
+    END IF;
+  ELSIF NEW.resource_kind = 'mcp_provider' THEN
+    -- M12 binds to an existing MCP catalogue identity. Provider connection,
+    -- health checks and Tool invocation remain M13 responsibilities.
+    SELECT EXISTS (
+      SELECT 1
+      FROM market_assets AS asset
+      JOIN market_asset_versions AS version
+        ON version.asset_id = asset.id
+       AND version.version = asset.current_version
+       AND version.status = 'published'
+      WHERE asset.kind = 'mcp'
+        AND asset.publication_status = 'published'
+        AND asset.availability_status = 'active'
+        AND (
+          asset.id::text = NEW.resource_id
+          OR asset.asset_key = NEW.resource_id
+        )
+        AND (
+          NEW.resource_version_id IS NULL
+          OR NEW.resource_version_id = version.id::text
+          OR NEW.resource_version_id = version.version::text
+        )
+    ) INTO resource_exists;
+  ELSE
+    resource_exists := FALSE;
+  END IF;
+
+  IF NOT resource_exists THEN
+    RAISE EXCEPTION 'Market resource binding target does not exist';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_asset_resource_bindings_guard
+  ON market_asset_resource_bindings;
+CREATE TRIGGER market_asset_resource_bindings_guard
+BEFORE INSERT OR UPDATE ON market_asset_resource_bindings
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_validate_market_resource_binding();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_market_resource_binding_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Market resource bindings are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS market_asset_resource_bindings_immutable
+  ON market_asset_resource_bindings;
+CREATE TRIGGER market_asset_resource_bindings_immutable
+BEFORE UPDATE OR DELETE ON market_asset_resource_bindings
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_market_resource_binding_mutation();
+
+-- Backfill only bindings whose platform resource identity is already proven.
+INSERT INTO market_asset_resource_bindings (
+  id, asset_id, asset_version_id, resource_kind, resource_id,
+  resource_version_id, created_by_principal_id, created_at
+)
+SELECT
+  gen_random_uuid(),
+  asset.id,
+  version.id,
+  'trusted_panel',
+  panel.plugin_id,
+  panel.version,
+  'system:migration',
+  NOW()
+FROM market_assets AS asset
+JOIN market_asset_versions AS version
+  ON version.asset_id = asset.id
+ AND version.version = asset.current_version
+JOIN workbench_panels AS panel
+  ON panel.plugin_id = version.manifest ->> 'panelPluginId'
+WHERE asset.kind = 'panel'
+ON CONFLICT DO NOTHING;
+
+INSERT INTO market_asset_resource_bindings (
+  id, asset_id, asset_version_id, resource_kind, resource_id,
+  resource_version_id, created_by_principal_id, created_at
+)
+SELECT
+  gen_random_uuid(),
+  asset.id,
+  version.id,
+  'workbench_template_version',
+  template.id::text,
+  version.id::text,
+  'system:migration',
+  NOW()
+FROM market_assets AS asset
+JOIN market_asset_versions AS version
+  ON version.asset_id = asset.id
+ AND version.version = asset.current_version
+JOIN market_templates AS template
+  ON template.asset_id = asset.id
+WHERE asset.kind = 'workbench-template'
+ON CONFLICT DO NOTHING;
+
+-- M12 enable state: governance and shared supply remain off until the M12
+-- observation gate and explicit release activation.
+`;
+
+export const M13A_MCP_PROVIDER_CONTROL_PLANE_SCHEMA_SQL = `
+-- M13a adds the MCP Provider control plane. Provider connections remain
+-- server-side facts; Market can reference identity only.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES (
+  'mcp.provider_control_plane', 'platform', 'platform', 'off', 1,
+  'system:migration', NOW()
+)
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS mcp_providers (
+  id UUID PRIMARY KEY,
+  provider_key TEXT NOT NULL UNIQUE
+    CHECK (provider_key ~ '^[a-z0-9][a-z0-9._-]{1,119}$'),
+  owner_principal_id TEXT NOT NULL
+    REFERENCES principals(id) ON DELETE RESTRICT
+    CHECK (length(btrim(owner_principal_id)) BETWEEN 1 AND 180),
+  name TEXT NOT NULL CHECK (length(btrim(name)) BETWEEN 1 AND 160),
+  description TEXT NOT NULL DEFAULT ''
+    CHECK (length(description) <= 2000),
+  status TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'active', 'disabled', 'archived')),
+  current_version INTEGER NOT NULL CHECK (current_version > 0),
+  current_version_id UUID NOT NULL,
+  health_status TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (health_status IN ('unknown', 'probing', 'healthy', 'unhealthy')),
+  health_checked_at TIMESTAMPTZ,
+  health_version_id UUID,
+  discovery_status TEXT NOT NULL DEFAULT 'not_discovered'
+    CHECK (
+      discovery_status IN (
+        'not_discovered', 'discovering', 'ready', 'failed'
+      )
+    ),
+  tool_count INTEGER NOT NULL DEFAULT 0 CHECK (tool_count >= 0),
+  last_error_category TEXT
+    CHECK (
+      last_error_category IS NULL
+      OR last_error_category IN (
+        'timeout', 'dns', 'tls', 'authentication', 'authorization',
+        'http_status', 'protocol', 'schema', 'network', 'credential',
+        'unknown'
+      )
+    ),
+  last_error_code TEXT
+    CHECK (
+      last_error_code IS NULL
+      OR length(btrim(last_error_code)) BETWEEN 1 AND 160
+    ),
+  last_error_message TEXT
+    CHECK (
+      last_error_message IS NULL
+      OR length(last_error_message) <= 2000
+    ),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  CHECK (
+    health_version_id IS NULL
+    OR health_version_id = current_version_id
+  )
+);
+
+CREATE INDEX IF NOT EXISTS mcp_providers_owner_idx
+  ON mcp_providers(owner_principal_id, status, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS mcp_providers_health_idx
+  ON mcp_providers(status, health_status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS mcp_provider_versions (
+  id UUID PRIMARY KEY,
+  provider_id UUID NOT NULL
+    REFERENCES mcp_providers(id) ON DELETE RESTRICT,
+  version INTEGER NOT NULL CHECK (version > 0),
+  transport TEXT NOT NULL
+    CHECK (transport IN ('streamable-http')),
+  endpoint_url TEXT NOT NULL
+    CHECK (
+      length(btrim(endpoint_url)) BETWEEN 1 AND 2000
+      AND endpoint_url ~ '^https?://'
+    ),
+  auth_kind TEXT NOT NULL
+    CHECK (auth_kind IN ('none', 'bearer', 'header')),
+  credential_ref TEXT
+    CHECK (
+      credential_ref IS NULL
+      OR (
+        length(credential_ref) BETWEEN 9 AND 500
+        AND credential_ref ~ '^(env|secret)://[A-Za-z0-9][A-Za-z0-9._:/-]*$'
+      )
+    ),
+  credential_header_name TEXT
+    CHECK (
+      credential_header_name IS NULL
+      OR (
+        length(credential_header_name) BETWEEN 1 AND 120
+        AND credential_header_name ~ '^[A-Za-z0-9-]+$'
+      )
+    ),
+  request_timeout_ms INTEGER NOT NULL
+    CHECK (request_timeout_ms BETWEEN 1000 AND 30000),
+  config_digest TEXT NOT NULL CHECK (config_digest ~ '^[a-f0-9]{64}$'),
+  created_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(created_by_principal_id)) BETWEEN 1 AND 180),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (provider_id, version),
+  CHECK (
+    (auth_kind = 'none'
+      AND credential_ref IS NULL
+      AND credential_header_name IS NULL)
+    OR
+    (auth_kind = 'bearer'
+      AND credential_ref IS NOT NULL
+      AND credential_header_name IS NULL)
+    OR
+    (auth_kind = 'header'
+      AND credential_ref IS NOT NULL
+      AND credential_header_name IS NOT NULL)
+  )
+);
+
+CREATE INDEX IF NOT EXISTS mcp_provider_versions_provider_idx
+  ON mcp_provider_versions(provider_id, version DESC);
+
+CREATE TABLE IF NOT EXISTS mcp_provider_probes (
+  id UUID PRIMARY KEY,
+  provider_id UUID NOT NULL
+    REFERENCES mcp_providers(id) ON DELETE RESTRICT,
+  provider_version_id UUID NOT NULL
+    REFERENCES mcp_provider_versions(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL
+    CHECK (status IN ('queued', 'running', 'passed', 'failed')),
+  trigger_source TEXT NOT NULL
+    CHECK (trigger_source IN ('owner', 'admin', 'system')),
+  requested_by_principal_id TEXT NOT NULL
+    CHECK (length(btrim(requested_by_principal_id)) BETWEEN 1 AND 180),
+  error_category TEXT
+    CHECK (
+      error_category IS NULL
+      OR error_category IN (
+        'timeout', 'dns', 'tls', 'authentication', 'authorization',
+        'http_status', 'protocol', 'schema', 'network', 'credential',
+        'unknown'
+      )
+    ),
+  error_code TEXT
+    CHECK (
+      error_code IS NULL
+      OR length(btrim(error_code)) BETWEEN 1 AND 160
+    ),
+  error_message TEXT
+    CHECK (error_message IS NULL OR length(error_message) <= 2000),
+  duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+  tool_count INTEGER CHECK (tool_count IS NULL OR tool_count >= 0),
+  lease_owner TEXT,
+  lease_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  requested_at TIMESTAMPTZ NOT NULL,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  CHECK (
+    status NOT IN ('running', 'passed', 'failed')
+    OR (started_at IS NOT NULL AND lease_owner IS NOT NULL
+        AND lease_token IS NOT NULL)
+  ),
+  CHECK (
+    status NOT IN ('passed', 'failed')
+    OR completed_at IS NOT NULL
+  )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS mcp_provider_probes_active_idx
+  ON mcp_provider_probes(provider_id)
+  WHERE status IN ('queued', 'running');
+
+CREATE INDEX IF NOT EXISTS mcp_provider_probes_provider_idx
+  ON mcp_provider_probes(provider_id, requested_at DESC);
+
+CREATE INDEX IF NOT EXISTS mcp_provider_probes_claim_idx
+  ON mcp_provider_probes(status, lease_expires_at, requested_at);
+
+CREATE TABLE IF NOT EXISTS mcp_provider_tools (
+  id UUID PRIMARY KEY,
+  provider_id UUID NOT NULL
+    REFERENCES mcp_providers(id) ON DELETE RESTRICT,
+  provider_version_id UUID NOT NULL
+    REFERENCES mcp_provider_versions(id) ON DELETE RESTRICT,
+  probe_id UUID NOT NULL
+    REFERENCES mcp_provider_probes(id) ON DELETE RESTRICT,
+  tool_name TEXT NOT NULL CHECK (length(btrim(tool_name)) BETWEEN 1 AND 240),
+  description TEXT NOT NULL DEFAULT '' CHECK (length(description) <= 4000),
+  input_schema JSONB NOT NULL
+    CHECK (jsonb_typeof(input_schema) = 'object'),
+  output_schema JSONB
+    CHECK (output_schema IS NULL OR jsonb_typeof(output_schema) = 'object'),
+  schema_digest TEXT NOT NULL CHECK (schema_digest ~ '^[a-f0-9]{64}$'),
+  discovered_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (probe_id, tool_name)
+);
+
+CREATE INDEX IF NOT EXISTS mcp_provider_tools_version_idx
+  ON mcp_provider_tools(provider_version_id, discovered_at DESC);
+
+CREATE TABLE IF NOT EXISTS mcp_provider_audit_events (
+  id UUID PRIMARY KEY,
+  provider_id UUID NOT NULL
+    REFERENCES mcp_providers(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  action TEXT NOT NULL CHECK (length(btrim(action)) BETWEEN 1 AND 120),
+  actor_principal_id TEXT NOT NULL
+    CHECK (length(btrim(actor_principal_id)) BETWEEN 1 AND 180),
+  actor_role TEXT NOT NULL
+    CHECK (actor_role IN ('owner', 'platform-admin', 'system')),
+  reason TEXT NOT NULL DEFAULT '' CHECK (length(reason) <= 2000),
+  from_state JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(from_state) = 'object'),
+  to_state JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(to_state) = 'object'),
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (provider_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS mcp_provider_audit_provider_idx
+  ON mcp_provider_audit_events(provider_id, seq DESC);
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_mcp_provider_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.revision <> 1 OR NEW.current_version <> 1 THEN
+      RAISE EXCEPTION 'MCP Provider must start at revision and version one';
+    END IF;
+    RETURN NEW;
+  END IF;
+
+  IF NEW.provider_key <> OLD.provider_key
+    OR NEW.owner_principal_id <> OLD.owner_principal_id
+  THEN
+    RAISE EXCEPTION 'MCP Provider identity is immutable';
+  END IF;
+  IF NEW.revision <> OLD.revision + 1 THEN
+    RAISE EXCEPTION 'MCP Provider revision must advance by one';
+  END IF;
+  IF NEW.current_version < OLD.current_version THEN
+    RAISE EXCEPTION 'MCP Provider version cannot move backwards';
+  END IF;
+  IF NEW.status <> OLD.status
+    AND NOT (
+      (OLD.status = 'draft' AND NEW.status IN ('active', 'disabled', 'archived'))
+      OR (OLD.status = 'active' AND NEW.status IN ('draft', 'disabled', 'archived'))
+      OR (OLD.status = 'disabled' AND NEW.status IN ('active', 'archived'))
+    )
+  THEN
+    RAISE EXCEPTION 'invalid MCP Provider status transition';
+  END IF;
+  IF NEW.status = 'active' AND OLD.status <> 'active' THEN
+    IF NEW.health_status <> 'healthy'
+      OR NEW.discovery_status <> 'ready'
+      OR NEW.health_version_id IS DISTINCT FROM NEW.current_version_id
+    THEN
+      RAISE EXCEPTION 'MCP Provider activation requires a healthy current version';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_providers_mutation_guard ON mcp_providers;
+CREATE TRIGGER mcp_providers_mutation_guard
+BEFORE INSERT OR UPDATE ON mcp_providers
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_mcp_provider_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_mcp_provider_version_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'MCP Provider versions are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_provider_versions_immutable
+  ON mcp_provider_versions;
+CREATE TRIGGER mcp_provider_versions_immutable
+BEFORE UPDATE OR DELETE ON mcp_provider_versions
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_mcp_provider_version_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_mcp_provider_tool_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'MCP Provider tool schemas are immutable';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_provider_tools_immutable ON mcp_provider_tools;
+CREATE TRIGGER mcp_provider_tools_immutable
+BEFORE UPDATE OR DELETE ON mcp_provider_tools
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_mcp_provider_tool_mutation();
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_mcp_provider_audit_seq()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  SELECT COALESCE(MAX(seq), 0) + 1
+  INTO NEW.seq
+  FROM mcp_provider_audit_events
+  WHERE provider_id = NEW.provider_id;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_provider_audit_seq_guard
+  ON mcp_provider_audit_events;
+CREATE TRIGGER mcp_provider_audit_seq_guard
+BEFORE INSERT ON mcp_provider_audit_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_mcp_provider_audit_seq();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_mcp_provider_audit_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'MCP Provider audit is append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_provider_audit_append_only
+  ON mcp_provider_audit_events;
+CREATE TRIGGER mcp_provider_audit_append_only
+BEFORE UPDATE OR DELETE ON mcp_provider_audit_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_mcp_provider_audit_mutation();
+
+-- Migration 49 extends the M12 binding resolver with a Provider identity
+-- branch. The existing MCP Catalogue branch remains byte-for-byte compatible.
+CREATE OR REPLACE FUNCTION pluginmax_validate_market_resource_binding()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  version_asset UUID;
+  panel_version TEXT;
+  resource_exists BOOLEAN := FALSE;
+BEGIN
+  SELECT asset_id INTO version_asset
+  FROM market_asset_versions
+  WHERE id = NEW.asset_version_id;
+  IF version_asset IS NULL OR version_asset <> NEW.asset_id THEN
+    RAISE EXCEPTION 'Market resource binding asset version mismatch';
+  END IF;
+
+  IF NEW.resource_kind = 'skill_version' THEN
+    IF NEW.resource_version_id IS NULL THEN
+      RAISE EXCEPTION 'Skill resource binding requires a version id';
+    END IF;
+    SELECT EXISTS (
+      SELECT 1
+      FROM skill_versions AS version
+      JOIN skill_definitions AS definition
+        ON definition.id = version.skill_id
+      WHERE definition.id::text = NEW.resource_id
+        AND version.id::text = NEW.resource_version_id
+    ) INTO resource_exists;
+  ELSIF NEW.resource_kind = 'workflow_template_version' THEN
+    SELECT EXISTS (
+      SELECT 1
+      FROM workflow_templates
+      WHERE id::text = NEW.resource_id
+        AND (
+          NEW.resource_version_id IS NULL
+          OR NEW.resource_version_id = id::text
+          OR NEW.resource_version_id = version::text
+        )
+    ) INTO resource_exists;
+  ELSIF NEW.resource_kind = 'workbench_template_version' THEN
+    SELECT EXISTS (
+      SELECT 1
+      FROM market_templates AS template
+      JOIN market_asset_versions AS version
+        ON version.asset_id = template.asset_id
+       AND version.version = template.current_version
+      WHERE template.id::text = NEW.resource_id
+        AND (
+          NEW.resource_version_id IS NULL
+          OR NEW.resource_version_id = version.id::text
+        )
+    ) INTO resource_exists;
+  ELSIF NEW.resource_kind = 'trusted_panel' THEN
+    SELECT version, TRUE
+    INTO panel_version, resource_exists
+    FROM workbench_panels
+    WHERE plugin_id = NEW.resource_id;
+    IF resource_exists AND NEW.resource_version_id IS NULL THEN
+      NEW.resource_version_id := panel_version;
+    END IF;
+    IF resource_exists
+      AND NEW.resource_version_id IS NOT NULL
+      AND NEW.resource_version_id <> panel_version
+    THEN
+      resource_exists := FALSE;
+    END IF;
+  ELSIF NEW.resource_kind = 'mcp_provider' THEN
+    -- M13a binds a Market entry to the Provider control-plane identity.
+    -- Legacy M12 bindings to MCP Catalogue identities remain accepted.
+    SELECT EXISTS (
+      SELECT 1
+      FROM mcp_providers AS provider
+      JOIN mcp_provider_versions AS version
+        ON version.id = provider.current_version_id
+       AND version.provider_id = provider.id
+      WHERE provider.status = 'active'
+        AND (
+          provider.id::text = NEW.resource_id
+          OR provider.provider_key = NEW.resource_id
+        )
+        AND (
+          NEW.resource_version_id IS NULL
+          OR NEW.resource_version_id = version.id::text
+          OR NEW.resource_version_id = version.version::text
+        )
+    ) INTO resource_exists;
+    IF NOT resource_exists THEN
+      SELECT EXISTS (
+        SELECT 1
+        FROM market_assets AS asset
+        JOIN market_asset_versions AS version
+          ON version.asset_id = asset.id
+         AND version.version = asset.current_version
+         AND version.status = 'published'
+        WHERE asset.kind = 'mcp'
+          AND asset.publication_status = 'published'
+          AND asset.availability_status = 'active'
+          AND (
+            asset.id::text = NEW.resource_id
+            OR asset.asset_key = NEW.resource_id
+          )
+          AND (
+            NEW.resource_version_id IS NULL
+            OR NEW.resource_version_id = version.id::text
+            OR NEW.resource_version_id = version.version::text
+          )
+      ) INTO resource_exists;
+    END IF;
+  ELSE
+    resource_exists := FALSE;
+  END IF;
+
+  IF NOT resource_exists THEN
+    RAISE EXCEPTION 'Market resource binding target does not exist';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+-- M13a enable state: the MCP Provider control plane remains off until the
+-- observation gate and explicit release activation.
+`;
+
+export const M13B_MCP_TOOL_INVOCATION_SCHEMA_SQL = `
+-- M13b adds server-side MCP Tool execution and durable receipts. The public
+-- browser surface remains read-only; only Workers can call a Provider.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES (
+  'mcp.tool_invocation', 'platform', 'platform', 'off', 1,
+  'system:migration', NOW()
+)
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+ALTER TABLE mcp_provider_tools
+  ADD COLUMN IF NOT EXISTS tool_key TEXT;
+
+-- Existing M13a rows predate the stable key. The immutability trigger is
+-- restored immediately after this one-time backfill.
+ALTER TABLE mcp_provider_tools
+  DISABLE TRIGGER mcp_provider_tools_immutable;
+
+UPDATE mcp_provider_tools
+SET tool_key =
+  md5(
+    provider_id::text || ':' || provider_version_id::text || ':' ||
+    tool_name || ':' || schema_digest
+  ) ||
+  md5(
+    'm13b:' || provider_id::text || ':' || provider_version_id::text ||
+    ':' || tool_name || ':' || schema_digest
+  )
+WHERE tool_key IS NULL;
+
+ALTER TABLE mcp_provider_tools
+  ENABLE TRIGGER mcp_provider_tools_immutable;
+
+ALTER TABLE mcp_provider_tools
+  ALTER COLUMN tool_key SET NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS mcp_provider_tools_key_idx
+  ON mcp_provider_tools(tool_key);
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_mcp_provider_tool_key()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.tool_key IS NULL THEN
+    NEW.tool_key :=
+      md5(
+        NEW.provider_id::text || ':' || NEW.provider_version_id::text ||
+        ':' || NEW.tool_name || ':' || NEW.schema_digest
+      ) ||
+      md5(
+        'm13b:' || NEW.provider_id::text || ':' ||
+        NEW.provider_version_id::text || ':' || NEW.tool_name || ':' ||
+        NEW.schema_digest
+      );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_provider_tools_key_guard
+  ON mcp_provider_tools;
+CREATE TRIGGER mcp_provider_tools_key_guard
+BEFORE INSERT ON mcp_provider_tools
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_mcp_provider_tool_key();
+
+CREATE TABLE IF NOT EXISTS mcp_tool_calls (
+  id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  run_attempt INTEGER NOT NULL CHECK (run_attempt > 0),
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT
+    CHECK (
+      agent_principal_id IS NULL
+      OR length(btrim(agent_principal_id)) BETWEEN 1 AND 180
+    ),
+  provider_id UUID NOT NULL
+    REFERENCES mcp_providers(id) ON DELETE RESTRICT,
+  provider_key TEXT NOT NULL
+    CHECK (length(btrim(provider_key)) BETWEEN 2 AND 120),
+  provider_version_id UUID NOT NULL
+    REFERENCES mcp_provider_versions(id) ON DELETE RESTRICT,
+  provider_version INTEGER NOT NULL CHECK (provider_version > 0),
+  provider_revision INTEGER NOT NULL CHECK (provider_revision > 0),
+  tool_catalog_id UUID NOT NULL
+    REFERENCES mcp_provider_tools(id) ON DELETE RESTRICT,
+  tool_key TEXT NOT NULL CHECK (tool_key ~ '^[a-f0-9]{64}$'),
+  tool_name TEXT NOT NULL CHECK (length(btrim(tool_name)) BETWEEN 1 AND 240),
+  tool_schema_digest TEXT NOT NULL
+    CHECK (tool_schema_digest ~ '^[a-f0-9]{64}$'),
+  ticket_id UUID NOT NULL
+    REFERENCES action_tickets(id) ON DELETE RESTRICT,
+  gate_id UUID NOT NULL UNIQUE
+    REFERENCES execution_gate_requests(gate_id) ON DELETE RESTRICT,
+  policy_id UUID REFERENCES task_execution_policies(id),
+  policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+  envelope_id TEXT NOT NULL
+    CHECK (length(btrim(envelope_id)) BETWEEN 1 AND 180),
+  envelope_digest TEXT NOT NULL
+    CHECK (envelope_digest ~ '^[a-f0-9]{64}$'),
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 8 AND 240),
+  request_digest TEXT NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (
+      status IN (
+        'running', 'succeeded', 'failed', 'timed_out', 'cancelled',
+        'interrupted'
+      )
+    ),
+  input_summary JSONB NOT NULL
+    CHECK (jsonb_typeof(input_summary) = 'object'),
+  output_summary JSONB
+    CHECK (
+      output_summary IS NULL OR jsonb_typeof(output_summary) = 'object'
+    ),
+  output_digest TEXT
+    CHECK (output_digest IS NULL OR output_digest ~ '^[a-f0-9]{64}$'),
+  error_category TEXT
+    CHECK (
+      error_category IS NULL
+      OR error_category IN (
+        'timeout', 'cancelled', 'dns', 'tls', 'authentication',
+        'authorization', 'http_status', 'protocol', 'schema', 'tool',
+        'network', 'credential', 'unknown'
+      )
+    ),
+  error_code TEXT
+    CHECK (
+      error_code IS NULL
+      OR length(btrim(error_code)) BETWEEN 1 AND 160
+    ),
+  error_message TEXT
+    CHECK (error_message IS NULL OR length(error_message) <= 2000),
+  lease_owner TEXT,
+  lease_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  started_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, idempotency_key),
+  CHECK (
+    status = 'running'
+    OR (
+      completed_at IS NOT NULL
+      AND lease_owner IS NULL
+      AND lease_token IS NULL
+      AND lease_expires_at IS NULL
+    )
+  ),
+  CHECK (updated_at >= created_at),
+  CHECK (completed_at IS NULL OR completed_at >= started_at)
+);
+
+CREATE INDEX IF NOT EXISTS mcp_tool_calls_run_idx
+  ON mcp_tool_calls(run_id, started_at, id);
+
+CREATE INDEX IF NOT EXISTS mcp_tool_calls_provider_idx
+  ON mcp_tool_calls(provider_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS mcp_tool_calls_lease_idx
+  ON mcp_tool_calls(status, lease_expires_at)
+  WHERE status = 'running';
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_mcp_tool_call_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'MCP Tool calls cannot be deleted';
+  END IF;
+  IF OLD.id IS DISTINCT FROM NEW.id
+    OR OLD.run_id IS DISTINCT FROM NEW.run_id
+    OR OLD.run_attempt IS DISTINCT FROM NEW.run_attempt
+    OR OLD.task_id IS DISTINCT FROM NEW.task_id
+    OR OLD.project_id IS DISTINCT FROM NEW.project_id
+    OR OLD.agent_id IS DISTINCT FROM NEW.agent_id
+    OR OLD.agent_principal_id IS DISTINCT FROM NEW.agent_principal_id
+    OR OLD.provider_id IS DISTINCT FROM NEW.provider_id
+    OR OLD.provider_key IS DISTINCT FROM NEW.provider_key
+    OR OLD.provider_version_id IS DISTINCT FROM NEW.provider_version_id
+    OR OLD.provider_version IS DISTINCT FROM NEW.provider_version
+    OR OLD.provider_revision IS DISTINCT FROM NEW.provider_revision
+    OR OLD.tool_catalog_id IS DISTINCT FROM NEW.tool_catalog_id
+    OR OLD.tool_key IS DISTINCT FROM NEW.tool_key
+    OR OLD.tool_name IS DISTINCT FROM NEW.tool_name
+    OR OLD.tool_schema_digest IS DISTINCT FROM NEW.tool_schema_digest
+    OR OLD.ticket_id IS DISTINCT FROM NEW.ticket_id
+    OR OLD.gate_id IS DISTINCT FROM NEW.gate_id
+    OR OLD.policy_id IS DISTINCT FROM NEW.policy_id
+    OR OLD.policy_revision IS DISTINCT FROM NEW.policy_revision
+    OR OLD.envelope_id IS DISTINCT FROM NEW.envelope_id
+    OR OLD.envelope_digest IS DISTINCT FROM NEW.envelope_digest
+    OR OLD.idempotency_key IS DISTINCT FROM NEW.idempotency_key
+    OR OLD.request_digest IS DISTINCT FROM NEW.request_digest
+    OR OLD.input_summary IS DISTINCT FROM NEW.input_summary
+    OR OLD.started_at IS DISTINCT FROM NEW.started_at
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'MCP Tool call identity is immutable';
+  END IF;
+  IF OLD.status <> 'running' THEN
+    RAISE EXCEPTION 'terminal MCP Tool calls are immutable';
+  END IF;
+  IF OLD.status = 'running' AND NEW.status = 'running'
+    AND (
+      OLD.lease_token IS DISTINCT FROM NEW.lease_token
+      OR OLD.lease_owner IS DISTINCT FROM NEW.lease_owner
+    )
+  THEN
+    RAISE EXCEPTION 'MCP Tool call lease identity is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_tool_calls_mutation_guard ON mcp_tool_calls;
+CREATE TRIGGER mcp_tool_calls_mutation_guard
+BEFORE UPDATE OR DELETE ON mcp_tool_calls
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_mcp_tool_call_mutation();
+
+CREATE TABLE IF NOT EXISTS mcp_tool_call_receipts (
+  id UUID PRIMARY KEY,
+  call_id UUID NOT NULL
+    REFERENCES mcp_tool_calls(id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  status TEXT NOT NULL
+    CHECK (
+      status IN (
+        'started', 'succeeded', 'failed', 'timed_out', 'cancelled',
+        'interrupted'
+      )
+    ),
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 8 AND 240),
+  input_summary JSONB NOT NULL
+    CHECK (jsonb_typeof(input_summary) = 'object'),
+  output_summary JSONB
+    CHECK (
+      output_summary IS NULL OR jsonb_typeof(output_summary) = 'object'
+    ),
+  output_digest TEXT
+    CHECK (output_digest IS NULL OR output_digest ~ '^[a-f0-9]{64}$'),
+  error_category TEXT
+    CHECK (
+      error_category IS NULL
+      OR error_category IN (
+        'timeout', 'cancelled', 'dns', 'tls', 'authentication',
+        'authorization', 'http_status', 'protocol', 'schema', 'tool',
+        'network', 'credential', 'unknown'
+      )
+    ),
+  error_code TEXT
+    CHECK (
+      error_code IS NULL
+      OR length(btrim(error_code)) BETWEEN 1 AND 160
+    ),
+  error_message TEXT
+    CHECK (error_message IS NULL OR length(error_message) <= 2000),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (call_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS mcp_tool_call_receipts_call_idx
+  ON mcp_tool_call_receipts(call_id, seq);
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_mcp_tool_receipt_seq()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  SELECT COALESCE(MAX(seq), 0) + 1
+  INTO NEW.seq
+  FROM mcp_tool_call_receipts
+  WHERE call_id = NEW.call_id;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_tool_call_receipts_seq_guard
+  ON mcp_tool_call_receipts;
+CREATE TRIGGER mcp_tool_call_receipts_seq_guard
+BEFORE INSERT ON mcp_tool_call_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_mcp_tool_receipt_seq();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_mcp_tool_receipt_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'MCP Tool call receipts are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS mcp_tool_call_receipts_append_only
+  ON mcp_tool_call_receipts;
+CREATE TRIGGER mcp_tool_call_receipts_append_only
+BEFORE UPDATE OR DELETE ON mcp_tool_call_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_mcp_tool_receipt_mutation();
+
+-- M13b enable state: Tool invocation remains disabled until the M13b
+-- observation gate and explicit release activation.
+`;
+
+export const M13C_RUNTIME_TOOL_REQUEST_BRIDGE_SCHEMA_SQL = `
+-- M13c bridges structured Agent Runtime Tool Requests to the existing M13b
+-- Worker-only execution port. Raw arguments and result bodies never enter
+-- these tables.
+INSERT INTO feature_flag_settings (
+  flag_key, scope_type, scope_id, mode, revision, updated_by, updated_at
+) VALUES (
+  'mcp.runtime_tool_bridge', 'platform', 'platform', 'off', 1,
+  'system:migration', NOW()
+)
+ON CONFLICT (flag_key, scope_type, scope_id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS runtime_tool_requests (
+  request_id UUID PRIMARY KEY,
+  run_id UUID NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  run_attempt INTEGER NOT NULL CHECK (run_attempt > 0),
+  task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE RESTRICT,
+  project_id UUID NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+  agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE RESTRICT,
+  agent_principal_id TEXT
+    CHECK (
+      agent_principal_id IS NULL
+      OR length(btrim(agent_principal_id)) BETWEEN 1 AND 180
+    ),
+  tool_key TEXT NOT NULL CHECK (tool_key ~ '^[a-f0-9]{64}$'),
+  ticket_id UUID NOT NULL
+    REFERENCES action_tickets(id) ON DELETE RESTRICT,
+  gate_id UUID NOT NULL UNIQUE
+    REFERENCES execution_gate_requests(gate_id) ON DELETE RESTRICT,
+  policy_id UUID NOT NULL
+    REFERENCES task_execution_policies(id) ON DELETE RESTRICT,
+  policy_revision INTEGER NOT NULL CHECK (policy_revision >= 0),
+  envelope_id TEXT NOT NULL
+    CHECK (length(btrim(envelope_id)) BETWEEN 1 AND 180),
+  envelope_digest TEXT NOT NULL
+    CHECK (envelope_digest ~ '^[a-f0-9]{64}$'),
+  call_id UUID UNIQUE REFERENCES mcp_tool_calls(id) ON DELETE RESTRICT,
+  idempotency_key TEXT NOT NULL
+    CHECK (length(btrim(idempotency_key)) BETWEEN 8 AND 240),
+  request_digest TEXT NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+  status TEXT NOT NULL DEFAULT 'running'
+    CHECK (
+      status IN (
+        'running', 'succeeded', 'failed', 'timed_out', 'cancelled',
+        'interrupted'
+      )
+    ),
+  input_summary JSONB NOT NULL
+    CHECK (jsonb_typeof(input_summary) = 'object'),
+  output_summary JSONB
+    CHECK (
+      output_summary IS NULL OR jsonb_typeof(output_summary) = 'object'
+    ),
+  output_digest TEXT
+    CHECK (output_digest IS NULL OR output_digest ~ '^[a-f0-9]{64}$'),
+  error_category TEXT
+    CHECK (
+      error_category IS NULL
+      OR error_category IN (
+        'timeout', 'cancelled', 'dns', 'tls', 'authentication',
+        'authorization', 'http_status', 'protocol', 'schema', 'tool',
+        'network', 'credential', 'unknown'
+      )
+    ),
+  error_code TEXT
+    CHECK (
+      error_code IS NULL
+      OR length(btrim(error_code)) BETWEEN 1 AND 160
+    ),
+  error_message TEXT
+    CHECK (error_message IS NULL OR length(error_message) <= 2000),
+  lease_owner TEXT,
+  lease_token UUID,
+  lease_expires_at TIMESTAMPTZ,
+  started_at TIMESTAMPTZ NOT NULL,
+  completed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (run_id, idempotency_key),
+  CHECK (
+    status = 'running'
+    OR (
+      completed_at IS NOT NULL
+      AND lease_owner IS NULL
+      AND lease_token IS NULL
+      AND lease_expires_at IS NULL
+    )
+  ),
+  CHECK (
+    status <> 'running'
+    OR (
+      lease_owner IS NOT NULL
+      AND lease_token IS NOT NULL
+      AND lease_expires_at IS NOT NULL
+    )
+  ),
+  CHECK (updated_at >= created_at),
+  CHECK (completed_at IS NULL OR completed_at >= started_at)
+);
+
+CREATE INDEX IF NOT EXISTS runtime_tool_requests_run_idx
+  ON runtime_tool_requests(run_id, started_at, request_id);
+
+CREATE INDEX IF NOT EXISTS runtime_tool_requests_status_idx
+  ON runtime_tool_requests(status, lease_expires_at)
+  WHERE status = 'running';
+
+CREATE OR REPLACE FUNCTION pluginmax_assert_runtime_tool_request_scope()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  run_task_id UUID;
+  run_project_id UUID;
+  run_agent_id UUID;
+  run_attempt INTEGER;
+  run_status TEXT;
+  run_envelope_id TEXT;
+  run_envelope_digest TEXT;
+BEGIN
+  SELECT
+    task_id,
+    project_id,
+    agent_id,
+    attempt,
+    status,
+    execution_envelope_snapshot ->> 'id',
+    execution_envelope_snapshot ->> 'digest'
+  INTO
+    run_task_id,
+    run_project_id,
+    run_agent_id,
+    run_attempt,
+    run_status,
+    run_envelope_id,
+    run_envelope_digest
+  FROM runs
+  WHERE id = NEW.run_id;
+
+  IF run_task_id IS NULL THEN
+    RAISE EXCEPTION 'Runtime Tool Request Run does not exist';
+  END IF;
+  IF run_status <> 'running' THEN
+    RAISE EXCEPTION 'Runtime Tool Requests require a running Run';
+  END IF;
+  IF run_task_id IS DISTINCT FROM NEW.task_id
+    OR run_project_id IS DISTINCT FROM NEW.project_id
+    OR run_agent_id IS DISTINCT FROM NEW.agent_id
+    OR run_attempt IS DISTINCT FROM NEW.run_attempt
+    OR run_envelope_id IS DISTINCT FROM NEW.envelope_id
+    OR run_envelope_digest IS DISTINCT FROM NEW.envelope_digest
+  THEN
+    RAISE EXCEPTION 'Runtime Tool Request binding does not match its Run';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS runtime_tool_requests_scope_guard
+  ON runtime_tool_requests;
+CREATE TRIGGER runtime_tool_requests_scope_guard
+BEFORE INSERT ON runtime_tool_requests
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assert_runtime_tool_request_scope();
+
+CREATE OR REPLACE FUNCTION pluginmax_guard_runtime_tool_request_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'Runtime Tool Requests cannot be deleted';
+  END IF;
+  IF OLD.request_id IS DISTINCT FROM NEW.request_id
+    OR OLD.run_id IS DISTINCT FROM NEW.run_id
+    OR OLD.run_attempt IS DISTINCT FROM NEW.run_attempt
+    OR OLD.task_id IS DISTINCT FROM NEW.task_id
+    OR OLD.project_id IS DISTINCT FROM NEW.project_id
+    OR OLD.agent_id IS DISTINCT FROM NEW.agent_id
+    OR OLD.agent_principal_id IS DISTINCT FROM NEW.agent_principal_id
+    OR OLD.tool_key IS DISTINCT FROM NEW.tool_key
+    OR OLD.ticket_id IS DISTINCT FROM NEW.ticket_id
+    OR OLD.gate_id IS DISTINCT FROM NEW.gate_id
+    OR OLD.policy_id IS DISTINCT FROM NEW.policy_id
+    OR OLD.policy_revision IS DISTINCT FROM NEW.policy_revision
+    OR OLD.envelope_id IS DISTINCT FROM NEW.envelope_id
+    OR OLD.envelope_digest IS DISTINCT FROM NEW.envelope_digest
+    OR OLD.idempotency_key IS DISTINCT FROM NEW.idempotency_key
+    OR OLD.request_digest IS DISTINCT FROM NEW.request_digest
+    OR OLD.input_summary IS DISTINCT FROM NEW.input_summary
+    OR OLD.started_at IS DISTINCT FROM NEW.started_at
+    OR OLD.created_at IS DISTINCT FROM NEW.created_at
+  THEN
+    RAISE EXCEPTION 'Runtime Tool Request identity is immutable';
+  END IF;
+  IF OLD.status <> 'running' THEN
+    RAISE EXCEPTION 'terminal Runtime Tool Requests are immutable';
+  END IF;
+  IF NEW.status = 'running' THEN
+    RAISE EXCEPTION 'Runtime Tool Requests must transition to a terminal state';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS runtime_tool_requests_mutation_guard
+  ON runtime_tool_requests;
+CREATE TRIGGER runtime_tool_requests_mutation_guard
+BEFORE UPDATE OR DELETE ON runtime_tool_requests
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_guard_runtime_tool_request_mutation();
+
+CREATE TABLE IF NOT EXISTS runtime_tool_request_receipts (
+  id UUID PRIMARY KEY,
+  request_id UUID NOT NULL
+    REFERENCES runtime_tool_requests(request_id) ON DELETE RESTRICT,
+  seq BIGINT NOT NULL CHECK (seq > 0),
+  status TEXT NOT NULL
+    CHECK (
+      status IN (
+        'running', 'succeeded', 'failed', 'timed_out', 'cancelled',
+        'interrupted'
+      )
+    ),
+  request_digest TEXT NOT NULL CHECK (request_digest ~ '^[a-f0-9]{64}$'),
+  input_summary JSONB NOT NULL
+    CHECK (jsonb_typeof(input_summary) = 'object'),
+  output_summary JSONB
+    CHECK (
+      output_summary IS NULL OR jsonb_typeof(output_summary) = 'object'
+    ),
+  output_digest TEXT
+    CHECK (output_digest IS NULL OR output_digest ~ '^[a-f0-9]{64}$'),
+  error_category TEXT
+    CHECK (
+      error_category IS NULL
+      OR error_category IN (
+        'timeout', 'cancelled', 'dns', 'tls', 'authentication',
+        'authorization', 'http_status', 'protocol', 'schema', 'tool',
+        'network', 'credential', 'unknown'
+      )
+    ),
+  error_code TEXT
+    CHECK (
+      error_code IS NULL
+      OR length(btrim(error_code)) BETWEEN 1 AND 160
+    ),
+  error_message TEXT
+    CHECK (error_message IS NULL OR length(error_message) <= 2000),
+  created_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (request_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS runtime_tool_request_receipts_request_idx
+  ON runtime_tool_request_receipts(request_id, seq);
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_runtime_tool_receipt_seq()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  SELECT COALESCE(MAX(seq), 0) + 1
+  INTO NEW.seq
+  FROM runtime_tool_request_receipts
+  WHERE request_id = NEW.request_id;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS runtime_tool_request_receipts_seq_guard
+  ON runtime_tool_request_receipts;
+CREATE TRIGGER runtime_tool_request_receipts_seq_guard
+BEFORE INSERT ON runtime_tool_request_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_runtime_tool_receipt_seq();
+
+CREATE OR REPLACE FUNCTION pluginmax_append_runtime_tool_request_receipt()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  INSERT INTO runtime_tool_request_receipts (
+    id, request_id, seq, status, request_digest, input_summary,
+    output_summary, output_digest, error_category, error_code,
+    error_message, created_at
+  ) VALUES (
+    gen_random_uuid(), NEW.request_id, 1, NEW.status, NEW.request_digest,
+    NEW.input_summary, NEW.output_summary, NEW.output_digest,
+    NEW.error_category, NEW.error_code, NEW.error_message, NOW()
+  );
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS runtime_tool_requests_receipt_insert
+  ON runtime_tool_requests;
+CREATE TRIGGER runtime_tool_requests_receipt_insert
+AFTER INSERT ON runtime_tool_requests
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_append_runtime_tool_request_receipt();
+
+DROP TRIGGER IF EXISTS runtime_tool_requests_receipt_terminal
+  ON runtime_tool_requests;
+CREATE TRIGGER runtime_tool_requests_receipt_terminal
+AFTER UPDATE OF status ON runtime_tool_requests
+FOR EACH ROW
+WHEN (OLD.status IS DISTINCT FROM NEW.status)
+EXECUTE FUNCTION pluginmax_append_runtime_tool_request_receipt();
+
+CREATE OR REPLACE FUNCTION pluginmax_reject_runtime_tool_receipt_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  RAISE EXCEPTION 'Runtime Tool Request receipts are append-only';
+END;
+$$;
+
+DROP TRIGGER IF EXISTS runtime_tool_request_receipts_append_only
+  ON runtime_tool_request_receipts;
+CREATE TRIGGER runtime_tool_request_receipts_append_only
+BEFORE UPDATE OR DELETE ON runtime_tool_request_receipts
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_reject_runtime_tool_receipt_mutation();
+
+-- Concurrent M13c requests may hit the same Run and Provider. Serialize
+-- append-only sequence allocation without changing the event payloads.
+CREATE OR REPLACE FUNCTION pluginmax_assign_run_event_seq()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('run-events:' || NEW.run_id::text, 0)
+  );
+  SELECT COALESCE(MAX(seq), 0) + 1
+  INTO NEW.seq
+  FROM run_events
+  WHERE run_id = NEW.run_id;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS run_events_seq_guard ON run_events;
+CREATE TRIGGER run_events_seq_guard
+BEFORE INSERT ON run_events
+FOR EACH ROW
+EXECUTE FUNCTION pluginmax_assign_run_event_seq();
+
+CREATE OR REPLACE FUNCTION pluginmax_assign_mcp_provider_audit_seq()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  PERFORM pg_advisory_xact_lock(
+    hashtextextended('mcp-provider-audit:' || NEW.provider_id::text, 0)
+  );
+  SELECT COALESCE(MAX(seq), 0) + 1
+  INTO NEW.seq
+  FROM mcp_provider_audit_events
+  WHERE provider_id = NEW.provider_id;
+  RETURN NEW;
+END;
+$$;
+
+-- M13c enable state: Runtime Tool Request bridging remains disabled until
+-- the M13c observation gate and explicit release activation.
+`;

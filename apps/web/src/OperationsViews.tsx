@@ -73,6 +73,7 @@ import {
   retryWorkflowNode,
   setWorkbenchFollow,
   startWorkflow,
+  streamWorkbenchBrief,
   transferWorkflowApproval,
   updateWorkbenchBriefSettings,
   updateMeetingAiPolicy,
@@ -279,6 +280,36 @@ export function WorkbenchView({
       void queryClient.invalidateQueries({ queryKey: ["workbench-dashboard"] });
     },
   });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const connect = async () => {
+      while (!controller.signal.aborted) {
+        try {
+          await streamWorkbenchBrief(() => {
+            void queryClient.invalidateQueries({
+              queryKey: ["workbench-dashboard"],
+            });
+          }, controller.signal);
+        } catch {
+          if (controller.signal.aborted) return;
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 2_000);
+          controller.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      }
+    };
+    void connect();
+    return () => controller.abort();
+  }, [queryClient]);
 
   useEffect(() => {
     const brief = dashboard?.brief;

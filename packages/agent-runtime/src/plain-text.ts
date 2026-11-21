@@ -35,6 +35,7 @@ function executionMetadata(
 
 export class PlainTextAdapter implements AgentRuntimeAdapter {
   readonly id = "plain-text";
+  readonly mcpToolRequestProtocol = "none" as const;
   readonly planVisibility = "opaque" as const;
   readonly toolEventCompleteness = "none" as const;
   readonly textStreaming = "final-only" as const;

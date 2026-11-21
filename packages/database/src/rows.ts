@@ -53,6 +53,7 @@ export interface AgentEventRow {
 export interface TaskRow {
   id: string;
   project_id: string;
+  parent_task_id: string | null;
   title: string;
   description: string;
   acceptance: string[];
@@ -202,6 +203,9 @@ export function taskFromRow(row: TaskRow): Task {
   return {
     id: row.id,
     projectId: row.project_id,
+    ...(row.parent_task_id === null
+      ? {}
+      : { parentTaskId: row.parent_task_id }),
     title: row.title,
     description: row.description,
     acceptance: row.acceptance,

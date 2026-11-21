@@ -85,6 +85,7 @@ export type TaskExecutionKind = z.infer<typeof taskExecutionKindSchema>;
 export const taskSchema = z.object({
   id: z.string().uuid(),
   projectId: z.string().uuid(),
+  parentTaskId: z.string().uuid().optional(),
   title: z.string().trim().min(1).max(240),
   description: z.string().trim().min(1).max(20_000),
   acceptance: z.array(z.string().trim().min(1).max(1_000)).max(50),
@@ -116,6 +117,7 @@ const taskDependencyIdsSchema = z
 export const createTaskInputSchema = z
   .object({
     projectId: z.string().uuid(),
+    parentTaskId: z.string().uuid().optional(),
     title: z.string().trim().min(1).max(240),
     description: z.string().trim().min(1).max(20_000),
     acceptance: z
@@ -152,6 +154,12 @@ export const updateTaskInputSchema = z.object({
   autoRedispatchOnReturn: z.boolean().optional(),
 });
 export type UpdateTaskInput = z.infer<typeof updateTaskInputSchema>;
+
+export const updateTaskParentInputSchema = z.object({
+  parentTaskId: z.string().uuid().nullable(),
+  expectedRevision: z.number().int().positive(),
+});
+export type UpdateTaskParentInput = z.infer<typeof updateTaskParentInputSchema>;
 
 export const transferTaskInputSchema = z
   .object({
@@ -223,6 +231,7 @@ export const taskDetailSchema = z.object({
         "message",
         "review",
         "dependency",
+        "hierarchy",
         "attachment",
         "dispatch",
         "transfer",
@@ -437,13 +446,7 @@ export const runInputSnapshotSchema = z.object({
       periodEnd: z.string().datetime({ offset: true }),
       sourceDigest: z.string().regex(/^[a-f0-9]{64}$/),
       sourceCutoffAt: z.string().datetime({ offset: true }),
-      triggerSource: z.enum([
-        "manual",
-        "schedule",
-        "api",
-        "system",
-        "legacy",
-      ]),
+      triggerSource: z.enum(["manual", "schedule", "api", "system", "legacy"]),
     })
     .optional(),
 });

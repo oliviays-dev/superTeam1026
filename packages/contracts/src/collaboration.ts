@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { workbenchSourceRefSchema } from "./workbench-reports.js";
 import {
   projectStatusSchema,
   taskStatusSchema,
@@ -15,6 +16,10 @@ import {
   workflowDefinitionOriginSchema,
   workflowDefinitionScopeSchema,
 } from "./workflow-assignment.js";
+import {
+  businessChainMetadataSchema,
+  businessChainNodeMetadataSchema,
+} from "./project-business-chain.js";
 
 export const projectRoleSchema = z.object({
   id: z.string().uuid(),
@@ -151,6 +156,7 @@ export const artifactSchema = z.object({
   size: z.number().int().nonnegative(),
   sha256: z.string().length(64),
   storageKey: z.string(),
+  sourceRefs: z.array(workbenchSourceRefSchema).max(50).default([]),
   createdAt: z.string().datetime({ offset: true }),
 });
 export type Artifact = z.infer<typeof artifactSchema>;
@@ -632,6 +638,12 @@ export const workflowDefinitionSchema = z.object({
   status: z.enum(["active", "archived"]),
   sourceTemplateId: z.string().uuid().nullable().default(null),
   sourceTemplateVersion: z.number().int().positive().nullable().default(null),
+  kind: z.enum(["workflow", "business-chain"]).default("workflow"),
+  chainKey: z.string().nullable().default(null),
+  businessChainMetadata: businessChainMetadataSchema.nullable().default(null),
+  businessChainNodes: z
+    .array(businessChainNodeMetadataSchema)
+    .default([]),
   revision: z.number().int().positive(),
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),

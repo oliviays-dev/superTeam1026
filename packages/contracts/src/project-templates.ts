@@ -1,4 +1,9 @@
 import { z } from "zod";
+import {
+  projectTemplateBusinessChainPolicySchema,
+  projectTemplateBusinessChainRefInputSchema,
+  projectTemplateBusinessChainRefSchema,
+} from "./project-business-chain.js";
 
 export const templateRoleCategorySchema = z.enum([
   "management",
@@ -183,6 +188,17 @@ const workflowRefsSchema = z
     return [...unique.values()];
   });
 
+const businessChainRefsSchema = z
+  .array(projectTemplateBusinessChainRefInputSchema)
+  .max(50)
+  .default([])
+  .transform((refs) => {
+    const unique = new Map(
+      refs.map((ref) => [ref.workflowDefinitionId, ref]),
+    );
+    return [...unique.values()];
+  });
+
 const projectTemplateCodeSchema = z
   .string()
   .trim()
@@ -204,6 +220,10 @@ export const projectTemplateSchema = z.object({
   roles: z.array(templateRoleSchema).max(50),
   ownerRoleId: z.string().uuid().nullable(),
   workflowTemplates: z.array(projectTemplateWorkflowRefSchema).max(50),
+  businessChainPolicy: projectTemplateBusinessChainPolicySchema,
+  businessChainDefinitions: z
+    .array(projectTemplateBusinessChainRefSchema)
+    .max(50),
   accessPolicy: projectTemplateAccessPolicySchema,
   allowedActorIds: z.array(z.string()).max(200),
   materializedProjectCount: z.number().int().nonnegative(),
@@ -223,6 +243,8 @@ export const createProjectTemplateInputSchema = z
     roleIds: templateRoleIdsSchema,
     ownerRoleId: z.string().uuid().optional(),
     workflowTemplates: workflowRefsSchema,
+    businessChainPolicy: projectTemplateBusinessChainPolicySchema.optional(),
+    businessChainDefinitions: businessChainRefsSchema,
     accessPolicy: projectTemplateAccessPolicySchema.default("all-members"),
     allowedActorIds: actorIdsSchema,
   })
@@ -248,7 +270,7 @@ export const createProjectTemplateInputSchema = z
       });
     }
   });
-export type CreateProjectTemplateInput = z.infer<
+export type CreateProjectTemplateInput = z.input<
   typeof createProjectTemplateInputSchema
 >;
 
@@ -261,6 +283,8 @@ export const updateProjectTemplateInputSchema = z
     roleIds: templateRoleIdsSchema.optional(),
     ownerRoleId: z.string().uuid().nullable().optional(),
     workflowTemplates: workflowRefsSchema.optional(),
+    businessChainPolicy: projectTemplateBusinessChainPolicySchema.optional(),
+    businessChainDefinitions: businessChainRefsSchema.optional(),
     accessPolicy: projectTemplateAccessPolicySchema.optional(),
     allowedActorIds: actorIdsSchema.optional(),
     expectedRevision: z.number().int().positive(),
@@ -291,7 +315,7 @@ export const updateProjectTemplateInputSchema = z
       });
     }
   });
-export type UpdateProjectTemplateInput = z.infer<
+export type UpdateProjectTemplateInput = z.input<
   typeof updateProjectTemplateInputSchema
 >;
 
