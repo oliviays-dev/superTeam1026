@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh": "0.2.1-rc.3",
-    "@deepseek-ai/dsh-sdk-client": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-sdk-client": "0.2.2-rc.5",
     "@pluginmax/contracts": "workspace:*"
   }
 }

@@ -1,0 +1,10 @@
+# DSH CLI 与 SDK 客户端必须锁同一 release。本文件由 upgrade-upstream.sh v2
+# 校验与写入；人工修改后必须通过 release gate 才能合入。
+release:
+  tag: dsh-v0.2.2-rc.5
+  cliRef: 9c2670d3bce5275e0d1610272958121af87787bb
+  sdkClient: 0.2.2-rc.5
+syncedAt: "2026-11-22T00:00:00+08:00"
+syncedBy: "manual (phase1 kickoff; upgrade-upstream.sh v2 未落地前的人工锚定)"
+releaseNotes: "https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.5"
+migrationChecklist: "ops/dsh-sync/checklists/dsh-v0.2.2-rc.5.md"
