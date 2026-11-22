@@ -90,9 +90,32 @@ function stringValue(value: unknown): string | undefined {
     : undefined;
 }
 
+export type KnownDshNotificationMethod =
+  "session.status" | "subagent.started" | "subagent.finished" | "session.event";
+
+export const KNOWN_NOTIFICATION_METHODS = new Set<KnownDshNotificationMethod>([
+  "session.status",
+  "subagent.started",
+  "subagent.finished",
+  "session.event",
+]);
+
 export function mapDshNotification(
   notification: HarnessNotification,
 ): AgentRuntimeEvent[] {
+  if (
+    !KNOWN_NOTIFICATION_METHODS.has(
+      notification.method as KnownDshNotificationMethod,
+    )
+  ) {
+    return [
+      {
+        type: "warning",
+        summary: `DSH 收到未知通知 method：${notification.method}`,
+      },
+    ];
+  }
+
   if (notification.method === "session.status") {
     return notification.params.status === "running"
       ? [{ type: "progress", summary: "DSH Runtime 正在执行任务" }]
@@ -104,7 +127,6 @@ export function mapDshNotification(
   if (notification.method === "subagent.finished") {
     return [{ type: "progress", summary: "DSH 子 Agent 已完成" }];
   }
-  if (notification.method !== "session.event") return [];
 
   const event = notification.params.event as
     | {
