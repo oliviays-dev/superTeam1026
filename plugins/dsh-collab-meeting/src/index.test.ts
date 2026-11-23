@@ -94,7 +94,7 @@ function subagents(
   failures: unknown[] = [],
 ): SubagentsRuntimeLike {
   return {
-    start: async (_name, spec) => {
+    startActivation: async (spec) => {
       starts.push(spec);
       const failure = failures.shift();
       const reply =

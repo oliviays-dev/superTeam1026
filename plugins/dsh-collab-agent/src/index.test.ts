@@ -86,7 +86,7 @@ interface FakeSubagentRun {
 function fakeSubagents() {
   const runs: FakeSubagentRun[] = [];
   const runtime: SubagentsRuntimeLike = {
-    async start(_name, spec) {
+    async startActivation(spec) {
       const run: FakeSubagentRun = {
         spec,
         resolve: () => undefined,

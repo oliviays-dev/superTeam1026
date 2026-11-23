@@ -83,21 +83,19 @@ const workspaces: WorkspaceRegistryLike = {
 };
 
 const subagents = {
-  async start(
-    name: string,
-    spec: {
-      readonly label?: string;
-      readonly prompt: ReadonlyArray<{ type: "text"; text: string }>;
-      readonly parent: unknown;
-      readonly persona?: string;
-      readonly toolFilter?: { readonly allow: readonly string[] };
-      readonly signal: AbortSignal;
-    },
-  ): Promise<SubagentRunLike> {
-    expect(name).toBe("spawn");
+  async startActivation(spec: {
+    readonly provider: string;
+    readonly label: string;
+    readonly prompt: ReadonlyArray<{ type: "text"; text: string }>;
+    readonly parent: unknown;
+    readonly signal: AbortSignal;
+    readonly delivery: "caller";
+  }): Promise<SubagentRunLike> {
+    expect(spec.provider).toBe("spawn");
     expect(spec.label).toBe("contract-worker");
     expect(spec.prompt).toEqual([{ type: "text", text: "contract" }]);
     expect(spec.signal).toBeInstanceOf(AbortSignal);
+    expect(spec.delivery).toBe("caller");
     return {
       id: "subagent-run",
       result: Promise.resolve({
@@ -218,28 +216,31 @@ const context = {
 } satisfies AgentContext;
 
 describe("dsh-collab-agent host contract", () => {
-  it("H1 locks the named subagent start signature", async () => {
+  it("H1 locks the 0.2.2 activation signature", async () => {
     const resolved = context.get("subagents");
     expect(resolved).toBe(subagents);
-    expectTypeOf<SubagentsRuntimeLike["start"]>().parameters.toEqualTypeOf<
+    expectTypeOf<
+      SubagentsRuntimeLike["startActivation"]
+    >().parameters.toEqualTypeOf<
       [
-        name: string,
         spec: {
+          readonly provider: string;
           readonly label?: string;
           readonly prompt: ReadonlyArray<{ type: "text"; text: string }>;
           readonly parent: unknown;
-          readonly persona?: string;
-          readonly toolFilter?: { readonly allow: readonly string[] };
           readonly signal: AbortSignal;
+          readonly delivery: "caller";
         },
       ]
     >();
 
-    const run = await resolved.start("spawn", {
+    const run = await resolved.startActivation({
+      provider: "spawn",
       label: "contract-worker",
       prompt: [{ type: "text", text: "contract" }],
       parent: {},
       signal: new AbortController().signal,
+      delivery: "caller",
     });
     expect(run.id).toBe("subagent-run");
     await expect(run.result).resolves.toMatchObject({

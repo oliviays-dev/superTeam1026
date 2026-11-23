@@ -432,32 +432,17 @@ export interface MeetingWorkerRunLike {
   dispose(): Promise<void>;
 }
 
-export interface SubagentStartLike {
+export interface MeetingWorkerStartLike {
   readonly provider: string;
   readonly label: string;
-  readonly request: {
-    readonly prompt: readonly SubagentContentLike[];
-    readonly parent: AgentLike;
-    readonly persona?: string;
-    readonly toolFilter?: { readonly allow: readonly string[] };
-  };
-  readonly signal: AbortSignal;
-}
-
-export interface MeetingWorkerStartLike {
-  readonly label?: string;
   readonly prompt: readonly SubagentContentLike[];
   readonly parent: AgentLike;
   readonly signal: AbortSignal;
-  readonly persona?: string;
-  readonly toolFilter?: { readonly allow: readonly string[] };
+  readonly delivery: "caller";
 }
 
 export interface SubagentsRuntimeLike {
-  start(
-    name: string,
-    spec: MeetingWorkerStartLike,
-  ): Promise<MeetingWorkerRunLike>;
+  startActivation(spec: MeetingWorkerStartLike): Promise<MeetingWorkerRunLike>;
 }
 
 export interface AgentHandleLike {
@@ -1496,17 +1481,13 @@ export class MeetingRuntime {
     try {
       const prompt = await this.buildPrompt(current, instruction);
       const provider = this.deps.provider?.() ?? "spawn";
-      const personaSoul = await this.resolvePersonaSoul(
-        this.personaIdFor(current),
-      );
-      started = await subagents.start(provider, {
+      started = await subagents.startActivation({
+        provider,
         label: `meeting-worker:${current.displayName}`,
         prompt: [{ type: "text", text: prompt }],
         parent: await this.hostAgent(),
-        // persona 是人设正文，不是 id：传 SOUL 让 worker 真读到人设。
-        ...(personaSoul === "" ? {} : { persona: personaSoul }),
-        toolFilter: { allow: [] },
         signal: controller.signal,
+        delivery: "caller",
       });
       const result = await started.result;
       if (controller.signal.aborted) return;

@@ -50,22 +50,20 @@ const personas: PersonaServiceLike = {
 };
 
 const subagents = {
-  async start(
-    name: string,
-    spec: {
-      readonly label?: string;
-      readonly prompt: ReadonlyArray<{ type: "text"; text: string }>;
-      readonly parent: { readonly id: string; readonly session?: { readonly id?: string } };
-      readonly signal: AbortSignal;
-      readonly persona?: string;
-      readonly toolFilter?: { readonly allow: readonly string[] };
-    },
-  ): Promise<SubagentRunLike> {
-    expect(name).toBe("spawn");
+  async startActivation(spec: {
+    readonly provider: string;
+    readonly label: string;
+    readonly prompt: ReadonlyArray<{ type: "text"; text: string }>;
+    readonly parent: { readonly id: string; readonly session?: { readonly id?: string } };
+    readonly signal: AbortSignal;
+    readonly delivery: "caller";
+  }): Promise<SubagentRunLike> {
+    expect(spec.provider).toBe("spawn");
     expect(spec.label).toBe("meeting-worker:Contract Worker");
     expect(spec.prompt).toEqual([{ type: "text", text: "contract" }]);
     expect(spec.parent.id).toBe("meeting-agent");
     expect(spec.signal).toBeInstanceOf(AbortSignal);
+    expect(spec.delivery).toBe("caller");
     return {
       id: "meeting-worker-run",
       result: Promise.resolve({
@@ -155,19 +153,20 @@ const context = {
 } as unknown as MeetingContext;
 
 describe("dsh-collab-meeting host contract", () => {
-  it("H1 locks the named subagent start signature", async () => {
+  it("H1 locks the 0.2.2 activation signature", async () => {
     expectTypeOf<MeetingContext["subagents"]>().toEqualTypeOf<
       SubagentsRuntimeLike | undefined
     >();
     const resolved = context.get("subagents");
     expect(resolved).toBe(subagents);
 
-    const run = await resolved.start("spawn", {
+    const run = await resolved.startActivation({
+      provider: "spawn",
       label: "meeting-worker:Contract Worker",
       prompt: [{ type: "text", text: "contract" }],
       parent: { id: "meeting-agent" },
       signal: new AbortController().signal,
-      toolFilter: { allow: [] },
+      delivery: "caller",
     });
     expect(run.id).toBe("meeting-worker-run");
     await expect(run.result).resolves.toMatchObject({

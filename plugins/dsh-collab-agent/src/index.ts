@@ -478,17 +478,14 @@ function buildRepairPrompt(
 }
 
 export interface SubagentsRuntimeLike {
-  start(
-    name: string,
-    spec: {
-      readonly label?: string;
-      readonly prompt: ReadonlyArray<{ type: "text"; text: string }>;
-      readonly parent: unknown;
-      readonly persona?: string;
-      readonly toolFilter?: { readonly allow: readonly string[] };
-      readonly signal: AbortSignal;
-    },
-  ): Promise<SubagentRunLike>;
+  startActivation(spec: {
+    readonly provider: string;
+    readonly label: string;
+    readonly prompt: ReadonlyArray<{ type: "text"; text: string }>;
+    readonly parent: unknown;
+    readonly signal: AbortSignal;
+    readonly delivery: "caller";
+  }): Promise<SubagentRunLike>;
 }
 
 async function awaitSubagentResult(
@@ -2308,22 +2305,19 @@ export class AgentTaskRuntime {
           personaSoul,
         );
       } else {
-        started = await builtinSubagents.start(
-          this.deps.provider?.() ?? "spawn",
-          {
-            label: `workflow-worker:${profile.name}`,
-            prompt: [{ type: "text", text: prompt }],
-            parent: await this.hostAgent(workspacePath),
-            // persona 参数语义是人设文本（会 shadow deployment:persona），
-            // 传 personaId 只会把 id 字面量当成人设，这里改成 SOUL 正文。
-            ...(personaSoul === "" ? {} : { persona: personaSoul }),
-            // 空清单 = 不限制：不传 toolFilter，交给挂载的预设决定工具集。
-            ...(profile.allowedTools.length === 0
-              ? {}
-              : { toolFilter: { allow: profile.allowedTools } }),
-            signal,
-          },
-        );
+        started = await builtinSubagents.startActivation({
+          provider: this.deps.provider?.() ?? "spawn",
+          label: `workflow-worker:${profile.name}`,
+          // 0.2.2 activation API no longer accepts a persona field. The
+          // existing tool policy stays in the task prompt; keep the SOUL as
+          // the prompt's role prefix so worker identity is not silently lost.
+          prompt: [
+            { type: "text", text: buildExternalAgentPrompt(personaSoul, prompt) },
+          ],
+          parent: await this.hostAgent(workspacePath),
+          signal,
+          delivery: "caller",
+        });
         result = await awaitSubagentResult(started, signal);
       }
       const rawOutput = subagentOutputText(result);
@@ -2345,24 +2339,22 @@ export class AgentTaskRuntime {
           },
         });
         if (current.runSeq + 1 <= current.maxAttempts) {
-          const repaired = await builtinSubagents.start(
-            this.deps.provider?.() ?? "spawn",
-            {
-              label: `workflow-worker-repair:${profile.name}`,
-              prompt: [
-                {
-                  type: "text",
-                  text: buildRepairPrompt(current, rawOutput, outputIssues),
-                },
-              ],
-              parent: await this.hostAgent(workspacePath),
-              ...(personaSoul === "" ? {} : { persona: personaSoul }),
-              ...(profile.allowedTools.length === 0
-                ? {}
-                : { toolFilter: { allow: profile.allowedTools } }),
-              signal,
-            },
-          );
+          const repaired = await builtinSubagents.startActivation({
+            provider: this.deps.provider?.() ?? "spawn",
+            label: `workflow-worker-repair:${profile.name}`,
+            prompt: [
+              {
+                type: "text",
+                text: buildExternalAgentPrompt(
+                  personaSoul,
+                  buildRepairPrompt(current, rawOutput, outputIssues),
+                ),
+              },
+            ],
+            parent: await this.hostAgent(workspacePath),
+            signal,
+            delivery: "caller",
+          });
           result = await awaitSubagentResult(repaired, signal);
         }
       }
