@@ -571,7 +571,7 @@ interface AssignmentServiceLike {
   }[];
 }
 
-interface TaskContext {
+export interface TaskContext {
   storageDomain: {
     open(spec: typeof taskDomainSpec): Promise<{
       table(name: "tasks"): KvTableLike<TaskRecord>;

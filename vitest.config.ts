@@ -12,6 +12,10 @@ export default defineConfig({
         import.meta.dirname,
         "packages/shared/src/index.ts",
       ),
+      zod: resolve(
+        import.meta.dirname,
+        "packages/shared/node_modules/zod/index.js",
+      ),
       "@pluginmax/application": resolve(
         import.meta.dirname,
         "packages/application/src/index.ts",
@@ -50,6 +54,7 @@ export default defineConfig({
       "packages/*/src/**/*.test.ts",
       "apps/*/src/**/*.test.ts",
       "apps/*/src/**/*.test.tsx",
+      "plugins/*/src/**/host-contract.test.ts",
     ],
   },
 });
