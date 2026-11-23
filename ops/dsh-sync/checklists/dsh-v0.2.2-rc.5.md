@@ -7,19 +7,22 @@
 ## L1 — npm SDK API 层（`packages/agent-runtime`）
 
 - [x] 锁定 `@deepseek-ai/dsh-sdk-client@0.2.2-rc.5`（package.json + pnpm-lock.yaml）
-  （2026-11-22 经 `scripts/upgrade-upstream.sh` 完成，agent-runtime tsdown+dts 构建通过）
-- [ ] 核对 `DeepSeekHarness` 构造参数仍被接受：
+      （2026-11-22 经 `scripts/upgrade-upstream.sh` 完成，agent-runtime tsdown+dts 构建通过）
+- [x] 核对 `DeepSeekHarness` 构造参数仍被接受：
       `dshBin / profile / dshHome / cwd / provider / model / maxTokens / requestTimeoutMs`
       （`packages/agent-runtime/src/dsh-sdk.ts`）
-- [ ] 核对 `run(instruction, { sessionId, onNotification })` 签名与
+- [x] 核对 `run(instruction, { sessionId, onNotification })` 签名与
       `RunResult.finalResponse` 仍存在
-- [ ] 核对通知事件枚举未改名：
+- [x] 核对通知事件枚举未改名：
       `session.status / subagent.started / subagent.finished / session.event`
-- [ ] 核对 `session.event.type` 枚举未改名：
+- [x] 核对 `session.event.type` 枚举未改名：
       `turn/start, turn/end, tool/call, tool/result`
-- [ ] `mapDshNotification` 改造为白名单 + 未知事件告警
+- [x] `mapDshNotification` 改造为白名单 + 未知事件告警
       （未知 method 产出 progress 类 warning 事件，不再静默丢弃）
-- [ ] 核对 `harness.close()` 幂等语义
+- [x] 核对 `harness.close()` 幂等语义
+
+  （2026-11-23 C1–C6 由 `dsh-contract.test.ts` 验证；C7 保留给带 `DSH_BIN`
+  的 smoke 阶段。`mapDshNotification` 另有 `dsh-sdk.test.ts` 覆盖。）
 
 ## L2 — CLI 子进程协议层（`DSH_BIN`）
 
@@ -49,9 +52,10 @@
 
 ## 验证（release gate）
 
-- [ ] G1 manifest 一致性四条规则全过
-- [ ] G2 gitlink = cliRef，lockfile 中 sdk-client = 0.2.2-rc.5
+- [x] G1 manifest 一致性四条规则全过
+- [x] G2 gitlink = cliRef，lockfile 中 sdk-client = 0.2.2-rc.5
 - [ ] G3 `./scripts/bootstrap.sh` 通过
-- [ ] G4/G5 契约测试落地并通过（可与本 checklist 并行开发）
+- [x] G4/G5 契约测试落地并通过（可与本 checklist 并行开发）
+      （2026-11-23 C1–C6/C4 白名单与三个插件 H1–H6 全绿；C7 待 smoke）
 - [ ] G6 `pnpm check` 全绿
 - [ ] G7 `./scripts/smoke.sh` 全绿
