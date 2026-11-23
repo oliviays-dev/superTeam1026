@@ -21,34 +21,52 @@
       （未知 method 产出 progress 类 warning 事件，不再静默丢弃）
 - [x] 核对 `harness.close()` 幂等语义
 
-  （2026-11-23 C1–C6 由 `dsh-contract.test.ts` 验证；C7 保留给带 `DSH_BIN`
-  的 smoke 阶段。`mapDshNotification` 另有 `dsh-sdk.test.ts` 覆盖。）
+  （2026-11-23 C1–C6 由 `dsh-contract.test.ts` 验证；同日使用 Node 24 serial
+  vendor build 产物执行 `DSH_BIN=... pnpm exec vitest run dsh-contract`，
+  C7 通过（6 passed）。`mapDshNotification` 另有 `dsh-sdk.test.ts` 覆盖。）
 
 ## L2 — CLI 子进程协议层（`DSH_BIN`）
 
-- [ ] vendor 构建产物存在：`vendor/deepseek-harness/apps/cli/lib/bin.js`
-- [ ] `DSH_BIN --version` 输出与 manifest.tag 一致（0.2.2-rc.5）
-- [ ] `scripts/smoke.sh`、`scripts/install-profile.sh` 中的 DSH_BIN 路径仍有效
+- [x] vendor 构建产物存在：`vendor/deepseek-harness/apps/cli/lib/bin.js`
+      （2026-11-23 Node 24.9.0 下执行 `pnpm run build --serial` 后产出）
+- [x] `DSH_BIN --version` 输出与 manifest.tag 一致（0.2.2-rc.5）
+- [x] `scripts/smoke.sh`、`scripts/install-profile.sh` 中的 DSH_BIN 路径仍有效
+      （2026-11-23 审计两者均指向 anchored submodule 的同一 `bin.js`）
 - [ ] 用 0.2.2-rc.5 CLI 完成一次 profile 初始化，确认 connection row 配置
       不受 0.2.1-rc.2 类静默破坏影响
 
 ## L3 — cordis 宿主服务层（`plugins/dsh-collab-*`）
 
-- [ ] `dsh-collab-agent`：`ctx.get("subagents")` 适配 0.2.2 具名子代理 API
-      （0.2.1 已删除 service 级 `start(provider, request)`，确认现用签名）
-- [ ] `dsh-collab-agent`：AgentTeam 统一具名子代理迁移
-- [ ] 检查各插件引用的技能名称与路径（0.2.2-rc.2 Creator 指引迁移项）
-- [ ] 检查插件是否有自定义 Session 事件追加包装（0.2.2-rc.2 批量接口适配项）
-- [ ] 检查账号通知相关插件逻辑（0.2.2-rc.2 通知调整迁移项）
-- [ ] `ctx.on("agent/assistant-stream")` / `ctx.emit("agent-run-settled")`
+- [x] `dsh-collab-agent`：`ctx.get("subagents")` 适配 0.2.2 具名子代理 API
+      （0.2.1 已删除 service 级 `start(provider, request)`；commit `6fda492`
+      迁移 agent/meeting 到 `startActivation`，锁定 provider/label/delivery）
+- [x] `dsh-collab-agent`：AgentTeam 统一具名子代理迁移
+      （2026-11-23 审计三个插件无 `AgentTeam` / `team/member` / `team/task`
+      等旧服务引用；一次性 worker 已走 activation API）
+- [x] 检查各插件引用的技能名称与路径（0.2.2-rc.2 Creator 指引迁移项）
+      （2026-11-23 审计无旧技能路径引用；agent 仅挂载 `standard` preset）
+- [x] 检查插件是否有自定义 Session 事件追加包装（0.2.2-rc.2 批量接口适配项）
+      （2026-11-23 审计仅读取 `snapshotEvents` 并记录 execution evidence，
+      未包装或追加宿主 Session 事件）
+- [x] 检查账号通知相关插件逻辑（0.2.2-rc.2 通知调整迁移项）
+      （2026-11-23 审计无宿主账号通知服务依赖；仅保留插件内 announce/
+      minutes owner notification 业务逻辑）
+- [x] `ctx.on("agent/assistant-stream")` / `ctx.emit("agent-run-settled")`
       事件名在 0.2.2 宿主中仍有效
+      （host stream 名与 vendor runtime 类型一致；`collab/agent-run-settled`
+      是插件域内自定义事件，agent 发射、meeting/workbench 监听保持配对）
 
 ## L4 — 构建与依赖层
 
-- [ ] vendor `pnpm install --frozen-lockfile` + `build` 通过
-- [ ] Zod 4.6.6（宿主版本）与 workspace `zod: ^4` 回归：
+- [x] vendor `pnpm install --frozen-lockfile` + `build` 通过
+      （2026-11-23 Node 24.9.0 bounded serial build；install already up to date）
+- [x] Zod 4.6.6（宿主版本）与 workspace `zod: ^4` 回归：
       `packages/contracts` schema 测试全绿
-- [ ] Office 原生工具变更不影响 `dsh-collab-*` 引用的工具面
+      （2026-11-23 `pnpm exec vitest run packages/contracts`：17 files /
+      88 tests passed）
+- [x] Office 原生工具变更不影响 `dsh-collab-*` 引用的工具面
+      （2026-11-23 审计三个插件未引用 Office/LibreOffice native tools，
+      仅注册 `collab_agent` / `collab_task` / `collab_meeting` 工具面）
 
 ## 验证（release gate）
 
@@ -56,6 +74,6 @@
 - [x] G2 gitlink = cliRef，lockfile 中 sdk-client = 0.2.2-rc.5
 - [ ] G3 `./scripts/bootstrap.sh` 通过
 - [x] G4/G5 契约测试落地并通过（可与本 checklist 并行开发）
-      （2026-11-23 C1–C6/C4 白名单与三个插件 H1–H6 全绿；C7 待 smoke）
+      （2026-11-23 C1–C7 白名单与修复后三个插件 H1–H6 全绿）
 - [ ] G6 `pnpm check` 全绿
 - [ ] G7 `./scripts/smoke.sh` 全绿
