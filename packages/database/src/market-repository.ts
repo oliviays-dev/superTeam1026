@@ -3,6 +3,8 @@ import type { PoolClient } from "pg";
 import {
   canonicalWorkbenchJson,
   marketAssetManifestSchema,
+  mapVisibilityToSharingScope,
+  type MarketAdminLockInput,
   type CopyMarketTemplateInput,
   type CreateMarketAssetInput,
   type GrantMarketEntitlementInput,
@@ -10,13 +12,24 @@ import {
   type MarketAsset,
   type MarketAssetDetail,
   type MarketAssetKind,
+  type MarketAssetResourceBinding,
   type MarketAssetStatus,
   type MarketAssetVersion,
   type MarketAssetVersionStatus,
+  type MarketAvailabilityStatus,
   type MarketCompatibility,
   type MarketEntitlement,
+  type MarketGovernanceActionInput,
+  type MarketGovernanceAudit,
   type MarketInstallResult,
   type MarketInstallation,
+  type MarketInstallationImpact,
+  type MarketOrigin,
+  type MarketPublicationStatus,
+  type MarketResourceBindingInput,
+  type MarketResourceKind,
+  type MarketSharingScope,
+  type MarketSuspendInput,
   type MarketTemplate,
   type MarketTemplateCopy,
   type PublishMarketAssetVersionInput,
@@ -33,6 +46,22 @@ interface MarketAssetRow {
   readonly name: string;
   readonly description: string;
   readonly publisher_principal_id: string;
+  readonly origin: MarketOrigin;
+  readonly sharing_scope: MarketSharingScope;
+  readonly sharing_scope_id: string | null;
+  readonly publication_status: MarketPublicationStatus;
+  readonly availability_status: MarketAvailabilityStatus;
+  readonly admin_locked: boolean;
+  readonly admin_locked_at: Date | null;
+  readonly admin_locked_by_principal_id: string | null;
+  readonly admin_lock_reason: string | null;
+  readonly published_at: Date | null;
+  readonly delisted_at: Date | null;
+  readonly archived_at: Date | null;
+  readonly suspended_at: Date | null;
+  readonly suspended_reason: string | null;
+  readonly publication_changed_at: Date;
+  readonly availability_changed_at: Date;
   readonly trust_level: "official" | "verified" | "private";
   readonly visibility: "public" | "private" | "workspace" | "project";
   readonly visibility_scope_id: string | null;
@@ -79,6 +108,34 @@ interface MarketInstallationRow {
   readonly installed_at: Date;
   readonly updated_at: Date;
   readonly asset_version: number;
+  readonly publication_status: MarketPublicationStatus;
+  readonly availability_status: MarketAvailabilityStatus;
+  readonly suspended_reason: string | null;
+}
+
+interface MarketGovernanceAuditRow {
+  readonly id: string;
+  readonly asset_id: string;
+  readonly seq: string | number;
+  readonly action: string;
+  readonly actor_principal_id: string;
+  readonly actor_role: "owner" | "platform-admin" | "system";
+  readonly reason: string;
+  readonly from_state: Record<string, unknown>;
+  readonly to_state: Record<string, unknown>;
+  readonly revision: number;
+  readonly created_at: Date;
+}
+
+interface MarketResourceBindingRow {
+  readonly id: string;
+  readonly asset_id: string;
+  readonly asset_version_id: string;
+  readonly resource_kind: MarketResourceKind;
+  readonly resource_id: string;
+  readonly resource_version_id: string | null;
+  readonly created_by_principal_id: string;
+  readonly created_at: Date;
 }
 
 interface MarketTemplateRow {
@@ -128,7 +185,11 @@ export type MarketRepositoryErrorCode =
   | "market_template_not_found"
   | "market_template_dependency_missing"
   | "market_template_copy_not_found"
-  | "market_compatibility_unsupported";
+  | "market_compatibility_unsupported"
+  | "market_governance_transition_invalid"
+  | "market_admin_lock_conflict"
+  | "market_resource_binding_conflict"
+  | "market_resource_not_found";
 
 export class MarketRepositoryError extends Error {
   constructor(
@@ -155,9 +216,14 @@ export class MarketRepository {
   ): Promise<MarketAsset[]> {
     const result = await this.database.query<MarketAssetRow>(
       `${visibilityAssetSelect}
-       WHERE asset.status <> 'archived'
-         AND ($1::text IS NULL OR asset.kind = $1)
+       WHERE ($1::text IS NULL OR asset.kind = $1)
        ORDER BY
+         CASE asset.publication_status
+           WHEN 'published' THEN 0
+           WHEN 'draft' THEN 1
+           WHEN 'delisted' THEN 2
+           ELSE 3
+         END,
          CASE asset.trust_level
            WHEN 'official' THEN 0
            WHEN 'verified' THEN 1
@@ -167,7 +233,13 @@ export class MarketRepository {
          asset.id`,
       [kind ?? null],
     );
-    const visible = await this.filterVisibleAssets(actor, result.rows);
+    const visible = (await this.filterVisibleAssets(actor, result.rows)).filter(
+      (asset) =>
+        asset.publisher_principal_id === actor.principalId ||
+        actor.platformAdministrator ||
+        (asset.publication_status === "published" &&
+          asset.availability_status === "active"),
+    );
     return visible.map(marketAssetFromRow);
   }
 
@@ -186,43 +258,78 @@ export class MarketRepository {
     const versions = includeVersions
       ? await this.listVersions(assetId)
       : [];
+    const resourceBindings = await this.listResourceBindings(assetId);
+    const impact = await this.installationImpact(row);
     return {
       ...marketAssetFromRow(row),
       versions,
+      resourceBindings,
+      installationImpact: impact,
     };
   }
 
   async createAsset(
     actor: MarketVisibilityActor,
     input: CreateMarketAssetInput,
+    recordGovernanceAudit = false,
   ): Promise<MarketAssetDetail> {
     const id = randomUUID();
-    try {
-      await this.database.query(
-        `INSERT INTO market_assets (
-           id, asset_key, kind, name, description, publisher_principal_id,
-           trust_level, visibility, visibility_scope_id, status,
-           current_version, revision, created_at, updated_at
-         ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', 1, 1,
-           NOW(), NOW()
-         )`,
-        [
-          id,
-          input.assetKey,
-          input.kind,
-          input.name,
-          input.description,
-          actor.principalId,
-          input.trustLevel,
-          input.visibility,
-          input.visibilityScopeId ?? null,
-        ],
-      );
-    } catch (error) {
-      throw translateMarketConstraint(error, "market_asset_key_conflict");
-    }
+    const sharingScope =
+      input.sharingScope ??
+      (input.visibility === undefined
+        ? "private"
+        : mapVisibilityToSharingScope(input.visibility));
+    const origin =
+      input.origin ??
+      (input.trustLevel === "official" || input.trustLevel === "verified"
+        ? "platform"
+        : "user");
     await this.database.transaction(async (client) => {
+      try {
+        await client.query(
+          `INSERT INTO market_assets (
+             id, asset_key, kind, name, description, publisher_principal_id,
+             origin, sharing_scope, sharing_scope_id, publication_status,
+             availability_status, current_version, revision, created_at,
+             updated_at
+           ) VALUES (
+             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', 1, 1,
+             NOW(), NOW()
+           )`,
+          [
+            id,
+            input.assetKey,
+            input.kind,
+            input.name,
+            input.description,
+            actor.principalId,
+            origin,
+            sharingScope,
+            sharingScope === "project" || sharingScope === "workspace"
+              ? (input.visibilityScopeId ?? null)
+              : null,
+            input.publicationStatus,
+          ],
+        );
+      } catch (error) {
+        throw translateMarketConstraint(error, "market_asset_key_conflict");
+      }
+      if (recordGovernanceAudit) {
+        await appendMarketGovernanceAuditWithClient(client, {
+          assetId: id,
+          action: "market.asset.created",
+          actor,
+          reason: "",
+          fromState: {},
+          toState: {
+            origin,
+            sharingScope,
+            publicationStatus: input.publicationStatus,
+            availabilityStatus: "active",
+          },
+          revision: 1,
+        });
+      }
       await appendAuditEventWithClient(client, {
         action: "market.asset.created",
         actorPrincipalId: actor.principalId,
@@ -230,9 +337,9 @@ export class MarketRepository {
           assetId: id,
           assetKey: input.assetKey,
           kind: input.kind,
-          trustLevel: input.trustLevel,
-          visibility: input.visibility,
-          visibilityScopeId: input.visibilityScopeId ?? null,
+          origin,
+          sharingScope,
+          publicationStatus: input.publicationStatus,
         },
       });
     });
@@ -245,6 +352,7 @@ export class MarketRepository {
     actor: MarketVisibilityActor,
     assetId: string,
     input: PublishMarketAssetVersionInput,
+    recordGovernanceAudit = false,
   ): Promise<MarketAssetVersion> {
     return this.database.transaction(async (client) => {
       const assetResult = await client.query<MarketAssetRow>(
@@ -258,19 +366,16 @@ export class MarketRepository {
           "Market asset not found",
         );
       }
-      if (asset.status !== "active") {
+      if (asset.publication_status === "archived") {
         throw new MarketRepositoryError(
           "market_asset_not_active",
-          "Market asset is not active",
+          "Archived Market assets cannot receive versions",
         );
       }
-      if (
-        !actor.platformAdministrator &&
-        asset.publisher_principal_id !== actor.principalId
-      ) {
+      if (!this.canGovernAsset(actor, asset)) {
         throw new MarketRepositoryError(
           "market_visibility_denied",
-          "Only the publisher or platform administrator can publish versions",
+          "Only the owner or an authorized platform administrator can publish versions",
         );
       }
       const manifest = marketAssetManifestSchema.parse(input.manifest);
@@ -343,6 +448,23 @@ export class MarketRepository {
           kind: asset.kind,
         },
       });
+      if (recordGovernanceAudit) {
+        await appendMarketGovernanceAuditWithClient(client, {
+          assetId,
+          action: "market.asset.version.published",
+          actor,
+          reason: "",
+          fromState: {
+            currentVersion: asset.current_version,
+            publicationStatus: asset.publication_status,
+          },
+          toState: {
+            currentVersion: version,
+            publicationStatus: asset.publication_status,
+          },
+          revision: asset.revision + 1,
+        });
+      }
       return {
         id: versionId,
         assetId,
@@ -361,7 +483,586 @@ export class MarketRepository {
     actor: MarketVisibilityActor,
     assetId: string,
     input: SetMarketAssetStatusInput,
+    recordGovernanceAudit = false,
   ): Promise<MarketAsset> {
+    return this.database.transaction(async (client) => {
+      const asset = await lockMarketAssetWithClient(client, assetId);
+      if (asset === undefined) {
+        throw new MarketRepositoryError(
+          "market_asset_not_found",
+          "Market asset not found",
+        );
+      }
+      if (!this.canGovernAsset(actor, asset)) {
+        throw new MarketRepositoryError(
+          "market_visibility_denied",
+          "Only the owner or an authorized platform administrator can change lifecycle",
+        );
+      }
+      requireMarketRevision(asset, input.expectedRevision);
+      const publicationStatus: MarketPublicationStatus =
+        input.status === "active"
+          ? "published"
+          : input.status === "delisted"
+            ? "delisted"
+            : "archived";
+      const availabilityStatus =
+        input.status === "active" ? asset.availability_status : "active";
+      const updated = await client.query<MarketAssetRow>(
+        `UPDATE market_assets
+         SET publication_status = $2,
+             availability_status = $3,
+             revision = revision + 1,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [assetId, publicationStatus, availabilityStatus],
+      );
+      const row = updated.rows[0]!;
+      if (recordGovernanceAudit) {
+        await appendMarketGovernanceAuditWithClient(client, {
+          assetId,
+          action: "market.asset.legacy_status.changed",
+          actor,
+          reason: "",
+          fromState: marketGovernanceState(asset),
+          toState: marketGovernanceState(row),
+          revision: row.revision,
+        });
+      }
+      await appendAuditEventWithClient(client, {
+        action: "market.asset.status.changed",
+        actorPrincipalId: actor.principalId,
+        metadata: {
+          assetId,
+          previousStatus: asset.status,
+          status: row.status,
+          publicationStatus,
+          availabilityStatus,
+          revision: row.revision,
+        },
+      });
+      return marketAssetFromRow(row);
+    });
+  }
+
+  async delistAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.delisted",
+      (asset) => {
+        if (asset.publication_status !== "published") {
+          throw invalidGovernanceTransition("Only published assets can be delisted");
+        }
+        return {
+          publicationStatus: "delisted",
+          availabilityStatus: asset.availability_status,
+        };
+      },
+    );
+  }
+
+  async publishAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.published",
+      (asset) => {
+        if (asset.publication_status !== "draft") {
+          throw invalidGovernanceTransition(
+            "Only draft assets can be published for the first time",
+          );
+        }
+        return {
+          publicationStatus: "published",
+          availabilityStatus: asset.availability_status,
+        };
+      },
+    );
+  }
+
+  async relistAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.relisted",
+      (asset) => {
+        if (asset.publication_status !== "delisted") {
+          throw invalidGovernanceTransition(
+            "Only delisted assets can be relisted",
+          );
+        }
+        if (asset.admin_locked && !actor.platformAdministrator) {
+          throw new MarketRepositoryError(
+            "market_admin_lock_conflict",
+            "An administrator lock blocks the owner from relisting this asset",
+          );
+        }
+        return {
+          publicationStatus: "published",
+          availabilityStatus: asset.availability_status,
+        };
+      },
+    );
+  }
+
+  async suspendAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketSuspendInput,
+  ): Promise<MarketAsset> {
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.suspended",
+      (asset) => {
+        if (asset.availability_status !== "active") {
+          throw invalidGovernanceTransition(
+            "Only active assets can be suspended",
+          );
+        }
+        return {
+          publicationStatus: asset.publication_status,
+          availabilityStatus: "suspended",
+          suspendedReason: input.reason,
+        };
+      },
+    );
+  }
+
+  async resumeAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.resumed",
+      (asset) => {
+        if (asset.availability_status !== "suspended") {
+          throw invalidGovernanceTransition(
+            "Only suspended assets can be resumed",
+          );
+        }
+        if (asset.admin_locked && !actor.platformAdministrator) {
+          throw new MarketRepositoryError(
+            "market_admin_lock_conflict",
+            "An administrator lock blocks the owner from resuming this asset",
+          );
+        }
+        return {
+          publicationStatus: asset.publication_status,
+          availabilityStatus: "active",
+          suspendedReason: null,
+        };
+      },
+    );
+  }
+
+  async archiveAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.archived",
+      (asset) => {
+        if (asset.publication_status === "archived") {
+          throw invalidGovernanceTransition("Market asset is already archived");
+        }
+        return {
+          publicationStatus: "archived",
+          availabilityStatus: asset.availability_status,
+        };
+      },
+    );
+  }
+
+  async lockAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketAdminLockInput,
+  ): Promise<MarketAsset> {
+    if (!actor.platformAdministrator) {
+      throw new MarketRepositoryError(
+        "market_visibility_denied",
+        "Only platform administrators can lock Market governance",
+      );
+    }
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.admin_locked",
+      (asset) => {
+        if (asset.admin_locked) {
+          throw invalidGovernanceTransition("Market asset is already locked");
+        }
+        if (asset.sharing_scope === "private") {
+          throw new MarketRepositoryError(
+            "market_visibility_denied",
+            "Administrators cannot lock another Principal's private resource",
+          );
+        }
+        return {
+          publicationStatus: asset.publication_status,
+          availabilityStatus: asset.availability_status,
+          adminLocked: true,
+          adminLockReason: input.reason,
+        };
+      },
+    );
+  }
+
+  async unlockAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    if (!actor.platformAdministrator) {
+      throw new MarketRepositoryError(
+        "market_visibility_denied",
+        "Only platform administrators can unlock Market governance",
+      );
+    }
+    return this.changeGovernance(
+      actor,
+      assetId,
+      input,
+      "market.asset.admin_unlocked",
+      (asset) => {
+        if (!asset.admin_locked) {
+          throw invalidGovernanceTransition("Market asset is not locked");
+        }
+        return {
+          publicationStatus: asset.publication_status,
+          availabilityStatus: asset.availability_status,
+          adminLocked: false,
+          adminLockReason: null,
+        };
+      },
+    );
+  }
+
+  async getGovernanceAudit(
+    actor: MarketVisibilityActor,
+    assetId: string,
+  ): Promise<MarketGovernanceAudit[]> {
+    const asset = await this.getAssetRow(assetId);
+    if (asset === undefined || !(await this.canViewAsset(actor, asset))) {
+      throw new MarketRepositoryError(
+        "market_asset_not_found",
+        "Market asset not found",
+      );
+    }
+    const result = await this.database.query<MarketGovernanceAuditRow>(
+      `SELECT *
+       FROM market_governance_audit_events
+       WHERE asset_id = $1
+       ORDER BY seq DESC`,
+      [assetId],
+    );
+    return result.rows.map(marketGovernanceAuditFromRow);
+  }
+
+  async installationImpactForAsset(
+    actor: MarketVisibilityActor,
+    assetId: string,
+  ): Promise<MarketInstallationImpact> {
+    const asset = await this.getAssetRow(assetId);
+    if (asset === undefined || !(await this.canViewAsset(actor, asset))) {
+      throw new MarketRepositoryError(
+        "market_asset_not_found",
+        "Market asset not found",
+      );
+    }
+    return this.installationImpact(asset);
+  }
+
+  async listResourceBindings(
+    assetId: string,
+  ): Promise<MarketAssetResourceBinding[]> {
+    const result = await this.database.query<MarketResourceBindingRow>(
+      `SELECT *
+       FROM market_asset_resource_bindings
+       WHERE asset_id = $1
+       ORDER BY created_at DESC, id`,
+      [assetId],
+    );
+    return result.rows.map(marketResourceBindingFromRow);
+  }
+
+  async bindResource(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketResourceBindingInput,
+  ): Promise<MarketAssetResourceBinding> {
+    return this.database.transaction(async (client) => {
+      const asset = await lockMarketAssetWithClient(client, assetId);
+      if (asset === undefined) {
+        throw new MarketRepositoryError(
+          "market_asset_not_found",
+          "Market asset not found",
+        );
+      }
+      if (!this.canGovernAsset(actor, asset)) {
+        throw new MarketRepositoryError(
+          "market_visibility_denied",
+          "Only the owner or an authorized platform administrator can bind resources",
+        );
+      }
+      const version = await client.query(
+        `SELECT 1
+         FROM market_asset_versions
+         WHERE id = $1 AND asset_id = $2`,
+        [input.assetVersionId, assetId],
+      );
+      if (version.rowCount === 0) {
+        throw new MarketRepositoryError(
+          "market_asset_version_not_found",
+          "Market asset version not found",
+        );
+      }
+      try {
+        const result = await client.query<MarketResourceBindingRow>(
+          `INSERT INTO market_asset_resource_bindings (
+             id, asset_id, asset_version_id, resource_kind, resource_id,
+             resource_version_id, created_by_principal_id, created_at
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+           RETURNING *`,
+          [
+            randomUUID(),
+            assetId,
+            input.assetVersionId,
+            input.resourceKind,
+            input.resourceId,
+            input.resourceVersionId,
+            actor.principalId,
+          ],
+        );
+        await appendMarketGovernanceAuditWithClient(client, {
+          assetId,
+          action: "market.asset.resource.bound",
+          actor,
+          reason: "",
+          fromState: {},
+          toState: {
+            assetVersionId: input.assetVersionId,
+            resourceKind: input.resourceKind,
+            resourceId: input.resourceId,
+            resourceVersionId: input.resourceVersionId,
+          },
+          revision: asset.revision,
+        });
+        return marketResourceBindingFromRow(result.rows[0]!);
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          /resource binding target does not exist/i.test(error.message)
+        ) {
+          throw new MarketRepositoryError(
+            "market_resource_not_found",
+            "Market resource binding target does not exist",
+          );
+        }
+        throw translateMarketConstraint(
+          error,
+          "market_resource_binding_conflict",
+        );
+      }
+    });
+  }
+
+  private async changeGovernance(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+    action: string,
+    transition: (
+      asset: MarketAssetRow,
+    ) => {
+      readonly publicationStatus: MarketPublicationStatus;
+      readonly availabilityStatus: MarketAvailabilityStatus;
+      readonly suspendedReason?: string | null;
+      readonly adminLocked?: boolean;
+      readonly adminLockReason?: string | null;
+    },
+  ): Promise<MarketAsset> {
+    return this.database.transaction(async (client) => {
+      const asset = await lockMarketAssetWithClient(client, assetId);
+      if (asset === undefined) {
+        throw new MarketRepositoryError(
+          "market_asset_not_found",
+          "Market asset not found",
+        );
+      }
+      if (!this.canGovernAsset(actor, asset)) {
+        throw new MarketRepositoryError(
+          "market_visibility_denied",
+          "Only the owner or an authorized platform administrator can govern this asset",
+        );
+      }
+      requireMarketRevision(asset, input.expectedRevision);
+      const target = transition(asset);
+      const adminLocked = target.adminLocked ?? asset.admin_locked;
+      const needLockFields = target.adminLocked === true;
+      const clearLockFields = target.adminLocked === false;
+      const updated = await client.query<MarketAssetRow>(
+        `UPDATE market_assets
+         SET publication_status = $2,
+             availability_status = $3,
+             suspended_reason = $4,
+             admin_locked = $5,
+             admin_locked_at = CASE
+               WHEN $6::boolean THEN NOW()
+               WHEN $7::boolean THEN NULL
+               ELSE admin_locked_at
+             END,
+             admin_locked_by_principal_id = CASE
+               WHEN $6::boolean THEN $8
+               WHEN $7::boolean THEN NULL
+               ELSE admin_locked_by_principal_id
+             END,
+             admin_lock_reason = CASE
+               WHEN $6::boolean THEN $9
+               WHEN $7::boolean THEN NULL
+               ELSE admin_lock_reason
+             END,
+             revision = revision + 1,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [
+          assetId,
+          target.publicationStatus,
+          target.availabilityStatus,
+          target.availabilityStatus === "suspended"
+            ? (target.suspendedReason ?? asset.suspended_reason)
+            : null,
+          adminLocked,
+          needLockFields,
+          clearLockFields,
+          actor.principalId,
+          target.adminLockReason ?? input.reason,
+        ],
+      );
+      const row = updated.rows[0]!;
+      await appendMarketGovernanceAuditWithClient(client, {
+        assetId,
+        action,
+        actor,
+        reason: input.reason,
+        fromState: marketGovernanceState(asset),
+        toState: marketGovernanceState(row),
+        revision: row.revision,
+      });
+      await appendAuditEventWithClient(client, {
+        action,
+        actorPrincipalId: actor.principalId,
+        metadata: {
+          assetId,
+          assetKey: asset.asset_key,
+          fromState: marketGovernanceState(asset),
+          toState: marketGovernanceState(row),
+          revision: row.revision,
+          reason: input.reason,
+        },
+      });
+      return marketAssetFromRow(row);
+    });
+  }
+
+  private async getAssetRow(assetId: string): Promise<MarketAssetRow | undefined> {
+    const result = await this.database.query<MarketAssetRow>(
+      `SELECT * FROM market_assets WHERE id = $1`,
+      [assetId],
+    );
+    return result.rows[0];
+  }
+
+  private async installationImpact(
+    asset: MarketAssetRow,
+  ): Promise<MarketInstallationImpact> {
+    const counts = await this.database.query<{
+      readonly active_installations: string;
+      readonly uninstalled_installations: string;
+      readonly active_template_copies: string;
+    }>(
+      `SELECT
+         (
+           SELECT COUNT(*)::text
+           FROM market_installations
+           WHERE asset_id = $1 AND status = 'active'
+         ) AS active_installations,
+         (
+           SELECT COUNT(*)::text
+           FROM market_installations
+           WHERE asset_id = $1 AND status = 'uninstalled'
+         ) AS uninstalled_installations,
+         (
+           SELECT COUNT(*)::text
+           FROM market_template_copies AS copy
+           JOIN market_templates AS template ON template.id = copy.template_id
+           WHERE template.asset_id = $1 AND copy.status = 'active'
+         ) AS active_template_copies`,
+      [asset.id],
+    );
+    const row = counts.rows[0]!;
+    const newInstallAllowed =
+      asset.publication_status === "published" &&
+      asset.availability_status === "active";
+    const existingRunsAllowed =
+      asset.publication_status !== "draft" &&
+      asset.availability_status === "active";
+    return {
+      activeInstallations: Number(row.active_installations),
+      uninstalledInstallations: Number(row.uninstalled_installations),
+      activeTemplateCopies: Number(row.active_template_copies),
+      newInstallAllowed,
+      existingRunsAllowed,
+      blockedReason: marketExecutionBlockedReason(asset),
+    };
+  }
+
+  private canGovernAsset(
+    actor: MarketVisibilityActor,
+    asset: MarketAssetRow,
+  ): boolean {
+    if (asset.publisher_principal_id === actor.principalId) return true;
+    return (
+      actor.platformAdministrator &&
+      asset.sharing_scope !== "private"
+    );
+  }
+
+  async setVersionStatus(
+    actor: MarketVisibilityActor,
+    assetId: string,
+    version: number,
+    input: SetMarketAssetVersionStatusInput,
+  ): Promise<MarketAssetVersion> {
     return this.database.transaction(async (client) => {
       const result = await client.query<MarketAssetRow>(
         `SELECT * FROM market_assets WHERE id = $1 FOR UPDATE`,
@@ -374,79 +1075,20 @@ export class MarketRepository {
           "Market asset not found",
         );
       }
-      if (
-        !actor.platformAdministrator &&
-        asset.publisher_principal_id !== actor.principalId
-      ) {
+      if (!this.canGovernAsset(actor, asset)) {
         throw new MarketRepositoryError(
           "market_visibility_denied",
-          "Only the publisher or platform administrator can change lifecycle",
+          "Only the owner or an authorized platform administrator can revoke versions",
         );
       }
-      if (asset.revision !== input.expectedRevision) {
-        throw new MarketRepositoryError(
-          "market_asset_revision_conflict",
-          "Market asset revision changed",
-        );
-      }
-      const updated = await client.query<MarketAssetRow>(
-        `UPDATE market_assets
-         SET status = $2,
-             revision = revision + 1,
-             updated_at = NOW()
-         WHERE id = $1
-         RETURNING *`,
-        [assetId, input.status],
-      );
-      await appendAuditEventWithClient(client, {
-        action: "market.asset.status.changed",
-        actorPrincipalId: actor.principalId,
-        metadata: {
-          assetId,
-          previousStatus: asset.status,
-          status: input.status,
-          revision: input.expectedRevision + 1,
-        },
-      });
-      return marketAssetFromRow(updated.rows[0]!);
-    });
-  }
-
-  async setVersionStatus(
-    actor: MarketVisibilityActor,
-    assetId: string,
-    version: number,
-    input: SetMarketAssetVersionStatusInput,
-  ): Promise<MarketAssetVersion> {
-    return this.database.transaction(async (client) => {
-      const assetResult = await client.query<MarketAssetRow>(
-        `SELECT * FROM market_assets WHERE id = $1 FOR UPDATE`,
-        [assetId],
-      );
-      const asset = assetResult.rows[0];
-      if (asset === undefined) {
-        throw new MarketRepositoryError(
-          "market_asset_not_found",
-          "Market asset not found",
-        );
-      }
-      if (
-        !actor.platformAdministrator &&
-        asset.publisher_principal_id !== actor.principalId
-      ) {
-        throw new MarketRepositoryError(
-          "market_visibility_denied",
-          "Only the publisher or platform administrator can revoke versions",
-        );
-      }
-      const result = await client.query<MarketAssetVersionRow>(
+      const versionResult = await client.query<MarketAssetVersionRow>(
         `UPDATE market_asset_versions
          SET status = $3
          WHERE asset_id = $1 AND version = $2
          RETURNING *`,
         [assetId, version, input.status],
       );
-      const row = result.rows[0];
+      const row = versionResult.rows[0];
       if (row === undefined) {
         throw new MarketRepositoryError(
           "market_asset_version_not_found",
@@ -483,13 +1125,10 @@ export class MarketRepository {
           "Market asset not found",
         );
       }
-      if (
-        !actor.platformAdministrator &&
-        assetRow.publisher_principal_id !== actor.principalId
-      ) {
+      if (!this.canGovernAsset(actor, assetRow)) {
         throw new MarketRepositoryError(
           "market_visibility_denied",
-          "Only the publisher or platform administrator can grant entitlements",
+          "Only the owner or an authorized platform administrator can grant entitlements",
         );
       }
       const principal = await client.query(
@@ -552,13 +1191,10 @@ export class MarketRepository {
         [row.asset_id],
       );
       const assetRow = asset.rows[0];
-      if (
-        !actor.platformAdministrator &&
-        assetRow?.publisher_principal_id !== actor.principalId
-      ) {
+      if (assetRow === undefined || !this.canGovernAsset(actor, assetRow)) {
         throw new MarketRepositoryError(
           "market_visibility_denied",
-          "Only the publisher or platform administrator can revoke entitlements",
+          "Only the owner or an authorized platform administrator can revoke entitlements",
         );
       }
       const updated = await client.query<MarketEntitlementRow>(
@@ -623,24 +1259,34 @@ export class MarketRepository {
     principalId: string,
     pluginId: string,
     minimumVersion: number,
+    mode: "install" | "runtime" = "runtime",
   ): Promise<boolean> {
     const result = await this.database.query(
       `SELECT 1
        FROM market_entitlements AS entitlement
        JOIN market_assets AS asset
          ON asset.id = entitlement.asset_id
-        AND asset.status = 'active'
         AND asset.kind = 'panel'
+        AND asset.availability_status = 'active'
+        AND (
+          ($4::text = 'install' AND asset.publication_status = 'published')
+          OR
+          ($4::text = 'runtime' AND asset.publication_status <> 'draft')
+        )
        JOIN market_asset_versions AS version
          ON version.asset_id = asset.id
         AND version.version = asset.current_version
         AND version.status = 'published'
         AND COALESCE((version.manifest ->> 'panelPluginId'), '') = $2
+       JOIN market_installations AS installation
+         ON installation.principal_id = entitlement.principal_id
+        AND installation.asset_id = asset.id
+        AND installation.status = 'active'
        WHERE entitlement.principal_id = $1
          AND entitlement.status = 'active'
          AND asset.current_version >= $3
        LIMIT 1`,
-      [principalId, pluginId, minimumVersion],
+      [principalId, pluginId, minimumVersion, mode],
     );
     return result.rowCount === 1;
   }
@@ -679,10 +1325,18 @@ export class MarketRepository {
           "Market asset not found",
         );
       }
-      if (asset.status !== "active") {
+      if (asset.publication_status !== "published") {
         throw new MarketRepositoryError(
           "market_asset_not_active",
-          "Market asset is not active",
+          "Market asset is not published for new installation",
+        );
+      }
+      if (asset.availability_status !== "active") {
+        throw new MarketRepositoryError(
+          "market_asset_not_active",
+          asset.suspended_reason === null
+            ? "Market asset is suspended"
+            : `Market asset is suspended: ${asset.suspended_reason}`,
         );
       }
       const versionResult = await client.query<MarketAssetVersionRow>(
@@ -710,10 +1364,16 @@ export class MarketRepository {
         );
       }
       const existing = await client.query<MarketInstallationRow>(
-        `SELECT installation.*, version.version AS asset_version
+        `SELECT
+           installation.*,
+           version.version AS asset_version,
+           asset.publication_status,
+           asset.availability_status,
+           asset.suspended_reason
          FROM market_installations AS installation
          JOIN market_asset_versions AS version
            ON version.id = installation.asset_version_id
+         JOIN market_assets AS asset ON asset.id = installation.asset_id
          WHERE installation.principal_id = $1
            AND installation.asset_id = $2
          FOR UPDATE`,
@@ -793,7 +1453,12 @@ export class MarketRepository {
         },
       });
       return {
-        installation: marketInstallationFromRow(inserted.rows[0]!),
+        installation: marketInstallationFromRow({
+          ...inserted.rows[0]!,
+          publication_status: asset.publication_status,
+          availability_status: asset.availability_status,
+          suspended_reason: asset.suspended_reason,
+        }),
         created: current === undefined,
         deduplicated: false,
       };
@@ -808,13 +1473,19 @@ export class MarketRepository {
       const result = await client.query<MarketInstallationRow>(
         `UPDATE market_installations AS installation
          SET status = 'uninstalled',
-             revision = revision + 1,
+             revision = installation.revision + 1,
              updated_at = NOW()
          FROM market_asset_versions AS version
+         JOIN market_assets AS asset ON asset.id = version.asset_id
          WHERE installation.asset_id = $2
            AND installation.principal_id = $1
            AND version.id = installation.asset_version_id
-         RETURNING installation.*, version.version AS asset_version`,
+         RETURNING
+           installation.*,
+           version.version AS asset_version,
+           asset.publication_status,
+           asset.availability_status,
+           asset.suspended_reason`,
         [actorId, assetId],
       );
       const row = result.rows[0];
@@ -842,10 +1513,16 @@ export class MarketRepository {
     principalId: string,
   ): Promise<MarketInstallation[]> {
     const result = await this.database.query<MarketInstallationRow>(
-      `SELECT installation.*, version.version AS asset_version
+      `SELECT
+         installation.*,
+         version.version AS asset_version,
+         asset.publication_status,
+         asset.availability_status,
+         asset.suspended_reason
        FROM market_installations AS installation
        JOIN market_asset_versions AS version
          ON version.id = installation.asset_version_id
+       JOIN market_assets AS asset ON asset.id = installation.asset_id
        WHERE installation.principal_id = $1
        ORDER BY installation.updated_at DESC, installation.id`,
       [principalId],
@@ -872,7 +1549,11 @@ export class MarketRepository {
       const assetRow = asset.rows[0];
       if (
         assetRow !== undefined &&
-        (await this.canViewAsset(actor, assetRow))
+        (await this.canViewAsset(actor, assetRow)) &&
+        (assetRow.publisher_principal_id === actor.principalId ||
+          actor.platformAdministrator ||
+          (assetRow.publication_status === "published" &&
+            assetRow.availability_status === "active"))
       ) {
         visible.push(await this.templateFromRow(row));
       }
@@ -924,14 +1605,18 @@ export class MarketRepository {
       );
     }
     const assetResult = await this.database.query<MarketAssetRow>(
-      `SELECT * FROM market_assets WHERE id = $1 AND status = 'active'`,
+      `SELECT *
+       FROM market_assets
+       WHERE id = $1
+         AND publication_status = 'published'
+         AND availability_status = 'active'`,
       [template.asset_id],
     );
     const asset = assetResult.rows[0];
     if (asset === undefined) {
       throw new MarketRepositoryError(
         "market_asset_not_active",
-        "Market template asset is not active",
+        "Market template asset is not published and available",
       );
     }
     const versionResult = await this.database.query<MarketAssetVersionRow>(
@@ -979,6 +1664,7 @@ export class MarketRepository {
          ) AS installed
        FROM market_template_dependencies AS dependency
        JOIN market_assets AS asset ON asset.id = dependency.dependency_asset_id
+         AND asset.availability_status = 'active'
        WHERE dependency.template_id = $1
          AND dependency.asset_version_id = $2
        ORDER BY asset.asset_key`,
@@ -1146,7 +1832,9 @@ export class MarketRepository {
     for (const dependency of input.manifest.dependencies) {
       const asset = await client.query<MarketAssetRow>(
         `SELECT * FROM market_assets
-         WHERE asset_key = $1 AND status = 'active'`,
+         WHERE asset_key = $1
+           AND publication_status = 'published'
+           AND availability_status = 'active'`,
         [dependency.dependencyAssetKey],
       );
       const dependencyAsset = asset.rows[0];
@@ -1255,11 +1943,16 @@ export class MarketRepository {
     actor: MarketVisibilityActor,
     asset: MarketAssetRow,
   ): Promise<boolean> {
-    if (
-      actor.platformAdministrator ||
-      asset.publisher_principal_id === actor.principalId ||
-      asset.visibility === "public"
-    ) {
+    if (asset.publisher_principal_id === actor.principalId) {
+      return true;
+    }
+    if (asset.sharing_scope === "private") {
+      return false;
+    }
+    if (asset.sharing_scope === "platform") {
+      return true;
+    }
+    if (actor.platformAdministrator) {
       return true;
     }
     const entitlement = await this.database.query(
@@ -1268,23 +1961,23 @@ export class MarketRepository {
       [actor.principalId, asset.id],
     );
     if (entitlement.rowCount === 1) return true;
-    if (asset.visibility === "workspace") {
+    if (asset.sharing_scope === "workspace") {
       const membership = await this.database.query(
         `SELECT 1
          FROM workspace_members
          WHERE workspace_id = $1 AND principal_id = $2 AND status = 'active'`,
-        [asset.visibility_scope_id, actor.principalId],
+        [asset.sharing_scope_id, actor.principalId],
       );
       return membership.rowCount === 1;
     }
-    if (asset.visibility === "project") {
+    if (asset.sharing_scope === "project") {
       const membership = await this.database.query(
         `SELECT 1
          FROM project_members
          WHERE project_id::text = $1
            AND principal_id = $2
            AND status = 'active'`,
-        [asset.visibility_scope_id, actor.principalId],
+        [asset.sharing_scope_id, actor.principalId],
       );
       return membership.rowCount === 1;
     }
@@ -1295,6 +1988,12 @@ export class MarketRepository {
 const visibilityAssetSelect = `SELECT asset.* FROM market_assets AS asset`;
 
 function marketAssetFromRow(row: MarketAssetRow): MarketAsset {
+  const newInstallAllowed =
+    row.publication_status === "published" &&
+    row.availability_status === "active";
+  const existingRunsAllowed =
+    row.publication_status !== "draft" &&
+    row.availability_status === "active";
   return {
     id: row.id,
     assetKey: row.asset_key,
@@ -1302,10 +2001,26 @@ function marketAssetFromRow(row: MarketAssetRow): MarketAsset {
     name: row.name,
     description: row.description,
     publisherPrincipalId: row.publisher_principal_id,
+    origin: row.origin,
+    sharingScope: row.sharing_scope,
+    sharingScopeId: row.sharing_scope_id,
+    publicationStatus: row.publication_status,
+    availabilityStatus: row.availability_status,
+    adminLocked: row.admin_locked,
+    adminLockedAt: row.admin_locked_at?.toISOString() ?? null,
+    adminLockedByPrincipalId: row.admin_locked_by_principal_id,
+    adminLockReason: row.admin_lock_reason,
+    publicationChangedAt: row.publication_changed_at.toISOString(),
+    availabilityChangedAt: row.availability_changed_at.toISOString(),
+    suspendedReason: row.suspended_reason,
     trustLevel: row.trust_level,
     visibility: row.visibility,
     visibilityScopeId: row.visibility_scope_id,
     status: row.status,
+    legacyStatus: row.status,
+    legacyVisibility: row.visibility,
+    newInstallAllowed,
+    existingRunsAllowed,
     currentVersion: row.current_version,
     revision: row.revision,
     createdAt: row.created_at.toISOString(),
@@ -1346,6 +2061,18 @@ function marketEntitlementFromRow(
 function marketInstallationFromRow(
   row: MarketInstallationRow,
 ): MarketInstallation {
+  const runtimeAvailable =
+    row.status === "active" &&
+    row.publication_status !== "draft" &&
+    row.availability_status === "active";
+  const blockedReason =
+    row.status !== "active"
+      ? null
+      : row.availability_status === "suspended"
+        ? (row.suspended_reason ?? "资源已安全停用")
+        : row.publication_status === "draft"
+          ? "资源尚未发布"
+          : null;
   return {
     id: row.id,
     principalId: row.principal_id,
@@ -1354,12 +2081,49 @@ function marketInstallationFromRow(
     assetVersion: row.asset_version,
     entitlementId: row.entitlement_id,
     status: row.status,
+    publicationStatus: row.publication_status,
+    availabilityStatus: row.availability_status,
+    runtimeAvailable,
+    blockedReason,
     revision: row.revision,
     config: row.config,
     installedByPrincipalId: row.installed_by_principal_id,
     installedAt: row.installed_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
     grantsAuthorization: false,
+  };
+}
+
+function marketGovernanceAuditFromRow(
+  row: MarketGovernanceAuditRow,
+): MarketGovernanceAudit {
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    seq: Number(row.seq),
+    action: row.action,
+    actorPrincipalId: row.actor_principal_id,
+    actorRole: row.actor_role,
+    reason: row.reason,
+    fromState: row.from_state,
+    toState: row.to_state,
+    revision: row.revision,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+function marketResourceBindingFromRow(
+  row: MarketResourceBindingRow,
+): MarketAssetResourceBinding {
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    assetVersionId: row.asset_version_id,
+    resourceKind: row.resource_kind,
+    resourceId: row.resource_id,
+    resourceVersionId: row.resource_version_id,
+    createdByPrincipalId: row.created_by_principal_id,
+    createdAt: row.created_at.toISOString(),
   };
 }
 
@@ -1378,6 +2142,102 @@ function marketTemplateCopyFromRow(
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
+}
+
+async function lockMarketAssetWithClient(
+  client: PoolClient,
+  assetId: string,
+): Promise<MarketAssetRow | undefined> {
+  const result = await client.query<MarketAssetRow>(
+    `SELECT * FROM market_assets WHERE id = $1 FOR UPDATE`,
+    [assetId],
+  );
+  return result.rows[0];
+}
+
+function requireMarketRevision(
+  asset: MarketAssetRow,
+  expectedRevision: number,
+): void {
+  if (asset.revision !== expectedRevision) {
+    throw new MarketRepositoryError(
+      "market_asset_revision_conflict",
+      "Market asset revision changed",
+    );
+  }
+}
+
+function invalidGovernanceTransition(message: string): MarketRepositoryError {
+  return new MarketRepositoryError(
+    "market_governance_transition_invalid",
+    message,
+  );
+}
+
+function marketGovernanceState(
+  asset: MarketAssetRow,
+): Record<string, unknown> {
+  return {
+    origin: asset.origin,
+    sharingScope: asset.sharing_scope,
+    sharingScopeId: asset.sharing_scope_id,
+    publicationStatus: asset.publication_status,
+    availabilityStatus: asset.availability_status,
+    adminLocked: asset.admin_locked,
+    adminLockReason: asset.admin_lock_reason,
+    suspendedReason: asset.suspended_reason,
+    revision: asset.revision,
+  };
+}
+
+function marketExecutionBlockedReason(asset: MarketAssetRow): string | null {
+  if (asset.availability_status === "suspended") {
+    return asset.suspended_reason ?? "资源已安全停用";
+  }
+  if (asset.publication_status === "draft") {
+    return "资源尚未发布，已有安装不可运行";
+  }
+  return null;
+}
+
+async function appendMarketGovernanceAuditWithClient(
+  client: PoolClient,
+  input: {
+    readonly assetId: string;
+    readonly action: string;
+    readonly actor: MarketVisibilityActor;
+    readonly reason: string;
+    readonly fromState: Record<string, unknown>;
+    readonly toState: Record<string, unknown>;
+    readonly revision: number;
+  },
+): Promise<void> {
+  const seq = await client.query<{ readonly seq: string }>(
+    `SELECT COALESCE(MAX(seq), 0) + 1 AS seq
+     FROM market_governance_audit_events
+     WHERE asset_id = $1`,
+    [input.assetId],
+  );
+  await client.query(
+    `INSERT INTO market_governance_audit_events (
+       id, asset_id, seq, action, actor_principal_id, actor_role, reason,
+       from_state, to_state, revision, created_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, NOW()
+     )`,
+    [
+      randomUUID(),
+      input.assetId,
+      seq.rows[0]!.seq,
+      input.action,
+      input.actor.principalId,
+      input.actor.platformAdministrator ? "platform-admin" : "owner",
+      input.reason,
+      JSON.stringify(input.fromState),
+      JSON.stringify(input.toState),
+      input.revision,
+    ],
+  );
 }
 
 function marketVersionDigest(input: {

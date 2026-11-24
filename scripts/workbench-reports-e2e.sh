@@ -81,6 +81,8 @@ done
 psql_database postgres "CREATE DATABASE $DATABASE_NAME;"
 
 export DATABASE_URL
+export NODE_ENV=test
+export AUTH_MODE=local-development
 export API_HOST=127.0.0.1
 export API_PORT
 export WEB_PORT

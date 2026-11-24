@@ -7,11 +7,14 @@ import {
   Download,
   FileText,
   LoaderCircle,
+  Link2,
   MessagesSquare,
   RefreshCw,
+  Route,
   ShieldCheck,
   ShieldX,
   Ticket,
+  Wrench,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -25,6 +28,8 @@ import {
   getRunEvents,
   getRunSceneContext,
   listArtifacts,
+  listRunMcpToolCalls,
+  listRunRuntimeToolRequests,
   replayRunSceneContext,
   streamRun,
 } from "./api.js";
@@ -79,6 +84,16 @@ export function RunView({ runId }: { runId: string }) {
   const actionTicketQuery = useQuery({
     queryKey: ["run-action-ticket", runId],
     queryFn: () => getRunActionTicket(runId),
+    retry: false,
+  });
+  const mcpToolCallsQuery = useQuery({
+    queryKey: ["run-mcp-tool-calls", runId],
+    queryFn: () => listRunMcpToolCalls(runId),
+    retry: false,
+  });
+  const runtimeToolRequestsQuery = useQuery({
+    queryKey: ["run-runtime-tool-requests", runId],
+    queryFn: () => listRunRuntimeToolRequests(runId),
     retry: false,
   });
   const sceneContextQuery = useQuery({
@@ -154,6 +169,17 @@ export function RunView({ runId }: { runId: string }) {
                     });
                     void queryClient.invalidateQueries({
                       queryKey: ["run", runId],
+                    });
+                  }
+                  if (
+                    event.type === "tool.call" ||
+                    event.type === "tool.result"
+                  ) {
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run-mcp-tool-calls", runId],
+                    });
+                    void queryClient.invalidateQueries({
+                      queryKey: ["run-runtime-tool-requests", runId],
                     });
                   }
                   if (event.type === "context.ready") {
@@ -394,6 +420,98 @@ export function RunView({ runId }: { runId: string }) {
         </section>
       )}
 
+      {(mcpToolCallsQuery.data?.length ?? 0) > 0 && (
+        <section className="run-section">
+          <div className="section-title">
+            <Wrench size={15} />
+            <h3>MCP Tool Calls</h3>
+            <span className="gate-ticket-meta">
+              {mcpToolCallsQuery.data?.length ?? 0} calls
+            </span>
+          </div>
+          <div className="gate-list">
+            {mcpToolCallsQuery.data?.map((item) => (
+              <article className="gate-card" key={item.call.id}>
+                <div className="gate-card-heading">
+                  <strong>{item.call.toolName}</strong>
+                  <span
+                    className={`pm-pill gate-status-${
+                      item.call.status === "succeeded"
+                        ? "approved"
+                        : item.call.status === "running"
+                          ? "pending"
+                          : "denied"
+                    }`}
+                  >
+                    {item.call.status}
+                  </span>
+                </div>
+                <div className="gate-meta">
+                  <span>{item.call.providerKey}</span>
+                  <span>v{item.call.providerVersion}</span>
+                  <span>p{item.call.policyRevision}</span>
+                  <span>{item.call.inputSummary.argumentCount} args</span>
+                  <time>{formatDateTime(item.call.startedAt)}</time>
+                </div>
+                {item.call.errorCategory !== null && (
+                  <p className="gate-decision">
+                    {item.call.errorCategory} · {item.call.errorCode}
+                  </p>
+                )}
+                <code>{shortId(item.call.toolKey)}</code>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {(runtimeToolRequestsQuery.data?.length ?? 0) > 0 && (
+        <section className="run-section">
+          <div className="section-title">
+            <Route size={15} />
+            <h3>Runtime Tool Requests</h3>
+            <span className="gate-ticket-meta">
+              {runtimeToolRequestsQuery.data?.length ?? 0} requests
+            </span>
+          </div>
+          <div className="gate-list">
+            {runtimeToolRequestsQuery.data?.map((item) => (
+              <article className="gate-card" key={item.request.requestId}>
+                <div className="gate-card-heading">
+                  <strong>{shortId(item.request.toolKey)}</strong>
+                  <span
+                    className={`pm-pill gate-status-${
+                      item.request.status === "succeeded"
+                        ? "approved"
+                        : item.request.status === "running"
+                          ? "pending"
+                          : "denied"
+                    }`}
+                  >
+                    {item.request.status}
+                  </span>
+                </div>
+                <div className="gate-meta">
+                  <span>attempt {item.request.runAttempt}</span>
+                  <span>p{item.request.policyRevision}</span>
+                  <span>
+                    {item.request.inputSummary.argumentCount} args
+                  </span>
+                  <time>{formatDateTime(item.request.startedAt)}</time>
+                </div>
+                {item.request.errorCategory !== null && (
+                  <p className="gate-decision">
+                    {item.request.errorCategory} ·{" "}
+                    {item.request.errorCode}
+                  </p>
+                )}
+                <code>{shortId(item.request.requestId)}</code>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="run-section">
         <div className="section-title">
           <Bot size={15} />
@@ -619,6 +737,15 @@ export function RunView({ runId }: { runId: string }) {
               >
                 <FileText size={14} />
                 <span>{artifact.name}</span>
+                {artifact.sourceRefs.length > 0 && (
+                  <span
+                    className="artifact-source-count"
+                    title={`${artifact.sourceRefs.length} 个来源`}
+                  >
+                    <Link2 size={11} />
+                    {artifact.sourceRefs.length}
+                  </span>
+                )}
                 <Download size={13} />
               </button>
             ))}

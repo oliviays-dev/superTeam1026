@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   type ApiError,
+  MCP_PROJECT_SOURCE_FLAG,
+  MCP_RUNTIME_TOOL_BRIDGE_FLAG,
   acceptCredentialActivationInputSchema,
+  acknowledgeProjectAlertInputSchema,
   agentRuntimePreflightInputSchema,
   agentStatusInputSchema,
   accountDirectoryQuerySchema,
@@ -53,6 +56,9 @@ import {
   createWorkflowTemplateInputSchema,
   copyProjectTemplateInputSchema,
   archiveProjectTemplateInputSchema,
+  assignProjectAlertInputSchema,
+  bindProjectBusinessChainInputSchema,
+  businessChainDefinitionInputSchema,
   createSupplyExceptionInputSchema,
   createSupplierRiskInputSchema,
   createTaskMessageInputSchema,
@@ -114,6 +120,9 @@ import {
   platformGrantQuerySchema,
   provisionProjectAiPmInputSchema,
   projectReportQuerySchema,
+  projectSourceMcpReconcileInputSchema,
+  projectSourceMcpRetentionQuerySchema,
+  projectSourceRefreshInputSchema,
   publishMemoryTruthInputSchema,
   publishMeetingMinutesInputSchema,
   restoreMeetingInputSchema,
@@ -124,6 +133,7 @@ import {
   refreshWorkbenchBriefInputSchema,
   removeAgentRuntimeBindingInputSchema,
   reviewMemoryClaimsInputSchema,
+  resolveProjectAlertInputSchema,
   requestTaskInputSchema,
   resetTaskSessionInputSchema,
   resumeTaskInputSchema,
@@ -159,12 +169,24 @@ import {
   createWorkflowPlanInputSchema,
   createWorkflowPlanVersionInputSchema,
   createMarketAssetInputSchema,
+  createMcpProviderInputSchema,
+  createMcpProviderVersionInputSchema,
   createWorkbenchInputSchema,
   createWorkbenchLayoutInputSchema,
   copyMarketTemplateInputSchema,
   grantMarketEntitlementInputSchema,
   installMarketAssetInputSchema,
+  marketAdminLockInputSchema,
   marketAssetKindSchema,
+  marketGovernanceActionInputSchema,
+  marketResourceBindingInputSchema,
+  marketSuspendInputSchema,
+  mcpProviderHealthCheckInputSchema,
+  mcpProviderProbeInputSchema,
+  mcpProviderRevisionInputSchema,
+  mcpToolCallReconcileInputSchema,
+  runtimeToolRequestReconcileInputSchema,
+  runtimeToolRequestRetentionQuerySchema,
   publishMarketAssetVersionInputSchema,
   rollbackMarketAssetInputSchema,
   saveWorkbenchLayoutInputSchema,
@@ -175,9 +197,15 @@ import {
   finalizeWorkflowPlanInputSchema,
   materializeWorkflowPlanInputSchema,
   provisionRouterTemplateInputSchema,
+  planningRetryInputSchema,
+  planningReviewRequiredInputSchema,
+  planningRunRevisionInputSchema,
+  planningStartInputSchema,
+  planningSubmitPlanInputSchema,
   registerRouterAgentInputSchema,
   resumeWorkflowPlanInputSchema,
   setRouterFeatureGateInputSchema,
+  suppressProjectAlertInputSchema,
   sweepWorkflowPlansInputSchema,
   submitTaskAcceptanceEvidenceInputSchema,
   submitTaskInputSchema,
@@ -199,9 +227,12 @@ import {
   updateProjectInputSchema,
   updateProjectRoleInputSchema,
   updateProjectTemplateInputSchema,
+  updateProjectFeatureFlagsInputSchema,
   updateTemplateRoleInputSchema,
   updateWorkflowTemplateInputSchema,
+  updatePlanningSettingsInputSchema,
   updateTaskInputSchema,
+  updateTaskParentInputSchema,
   updateTaskExecutionPolicyInputSchema,
   type TaskExecutionPolicyContextType,
   updateWorkbenchBriefSettingsInputSchema,
@@ -209,6 +240,7 @@ import {
   updateWorkspaceMemberStatusInputSchema,
   workspaceListQuerySchema,
   transferWorkflowApprovalInputSchema,
+  unbindProjectBusinessChainInputSchema,
   validateWorkflowMarkdownInputSchema,
   workflowAuditQuerySchema,
   workflowReasonInputSchema,
@@ -225,6 +257,8 @@ import {
   DataFabricApplication,
   DataFabricApplicationError,
   MarketApplication,
+  McpProviderApplicationError,
+  McpToolCallApplicationError,
   PlatformApplication,
   SharedSpaceApplication,
   SharedSpaceApplicationError,
@@ -233,6 +267,7 @@ import {
   renderRuntimePrometheusMetrics,
   type AuthorizedRequestPrincipal,
   type DataFabricQueryAdapter,
+  type ProjectSourceAdapter,
 } from "@pluginmax/application";
 import {
   Database,
@@ -242,6 +277,7 @@ import {
   IdentityRepositoryError,
   LATEST_MIGRATION_VERSION,
   MarketRepositoryError,
+  McpProviderRepositoryError,
   PlatformRepositories,
   SharedSpaceRepositoryError,
   SkillRepositoryError,
@@ -268,6 +304,7 @@ export interface BuildApiOptions {
   readonly logger?: FastifyServerOptions["logger"];
   readonly database?: Database;
   readonly dataFabricQueryAdapter?: DataFabricQueryAdapter;
+  readonly projectSourceAdapters?: readonly ProjectSourceAdapter[];
 }
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
@@ -287,12 +324,14 @@ const taskAttachmentParamsSchema = z.object({
 });
 const jobParamsSchema = z.object({ jobId: z.string().uuid() });
 const workflowParamsSchema = z.object({ workflowId: z.string().uuid() });
+const projectAlertParamsSchema = z.object({ alertId: z.string().uuid() });
 const workflowInstanceParamsSchema = z.object({
   instanceId: z.string().uuid(),
 });
 const meetingParamsSchema = z.object({ meetingId: z.string().uuid() });
 const directChatParamsSchema = z.object({ threadId: z.string().uuid() });
 const runtimeParamsSchema = z.object({ runtimeId: z.string().uuid() });
+const mcpProviderParamsSchema = z.object({ providerId: z.string().uuid() });
 const teammateParamsSchema = z.object({ teammateId: z.string().uuid() });
 const teammateTemplateParamsSchema = z.object({
   templateId: z.string().uuid(),
@@ -715,7 +754,12 @@ export function buildApi(options: BuildApiOptions): {
   const database = options.database ?? new Database(options.databaseUrl);
   const fileStore = new LocalFileStore(options.fileStoreRoot);
   const repositories = new PlatformRepositories(database);
-  const application = new PlatformApplication(repositories, fileStore);
+  const application = new PlatformApplication(
+    repositories,
+    fileStore,
+    {},
+    options.projectSourceAdapters,
+  );
   const sharedSpace = new SharedSpaceApplication(repositories, fileStore);
   const dataFabric =
     options.dataFabricQueryAdapter === undefined
@@ -793,6 +837,21 @@ export function buildApi(options: BuildApiOptions): {
     return {
       principalId: principal.principalId,
       authSource: principal.authSource,
+      platformAdministrator: principal.platformAdministrator,
+    } as const;
+  }
+
+  function requestMcpProviderActor(request: FastifyRequest) {
+    const principal = requestPrincipals.get(request);
+    if (principal === undefined) {
+      throw new ApplicationError(
+        "unauthorized",
+        "Authentication is required",
+        401,
+      );
+    }
+    return {
+      principalId: principal.principalId,
       platformAdministrator: principal.platformAdministrator,
     } as const;
   }
@@ -1145,6 +1204,27 @@ export function buildApi(options: BuildApiOptions): {
         .status(error.statusCode)
         .send(apiError(String(request.id), error.code, error.message));
     }
+    if (error instanceof McpProviderApplicationError) {
+      return reply
+        .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof McpToolCallApplicationError) {
+      return reply
+        .status(error.statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
+    if (error instanceof McpProviderRepositoryError) {
+      const statusCode =
+        error.code === "mcp_provider_not_found"
+          ? 404
+          : error.code === "mcp_provider_forbidden"
+            ? 403
+            : 409;
+      return reply
+        .status(statusCode)
+        .send(apiError(String(request.id), error.code, error.message));
+    }
     if (error instanceof WorkbenchConfigurationRepositoryError) {
       const statusCode =
         error.code === "workbench_not_found" ||
@@ -1171,7 +1251,12 @@ export function buildApi(options: BuildApiOptions): {
               error.code === "market_entitlement_required"
             ? 403
             : error.code === "market_asset_not_active" ||
-                error.code === "market_manifest_invalid"
+                error.code === "market_manifest_invalid" ||
+                error.code === "market_asset_revision_conflict" ||
+                error.code === "market_governance_transition_invalid" ||
+                error.code === "market_admin_lock_conflict" ||
+                error.code === "market_resource_binding_conflict" ||
+                error.code === "market_resource_not_found"
               ? 409
               : 400;
       return reply
@@ -2209,9 +2294,23 @@ export function buildApi(options: BuildApiOptions): {
       expectedMigrationVersion,
       workerHeartbeatStaleAfterSeconds,
     });
+    const runtimeToolRequests =
+      await repositories.featureFlags.isEnabled(MCP_RUNTIME_TOOL_BRIDGE_FLAG)
+        ? await repositories.runtimeToolRequests.summary()
+        : null;
+    const projectSourceMcpReads =
+      await repositories.featureFlags.isEnabled(MCP_PROJECT_SOURCE_FLAG)
+        ? await repositories.projectSourceMcp.summary()
+        : null;
     return reply
       .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-      .send(renderRuntimePrometheusMetrics(snapshot));
+      .send(
+        renderRuntimePrometheusMetrics(
+          snapshot,
+          runtimeToolRequests,
+          projectSourceMcpReads,
+        ),
+      );
   });
 
   app.get("/api/v1/jobs", async (request, reply) => {
@@ -2487,6 +2586,169 @@ export function buildApi(options: BuildApiOptions): {
     const input = updateProjectInputSchema.parse(request.body);
     return reply.send(await application.updateProject(projectId, input));
   });
+
+  app.get(
+    "/api/v1/projects/:projectId/business-chain",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      return reply.send(
+        await application.getProjectBusinessChainSettings(
+          projectId,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.patch(
+    "/api/v1/projects/:projectId/business-chain/flags",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = updateProjectFeatureFlagsInputSchema.parse(request.body);
+      return reply.send({
+        items: await application.updateProjectFeatureFlags(
+          projectId,
+          input,
+          requestActorId(request.headers),
+          requestIsAdministrator(request.headers),
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/business-chain/bind",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = bindProjectBusinessChainInputSchema.parse(
+        request.body ?? {},
+      );
+      return reply
+        .status(201)
+        .send(
+          await application.bindProjectBusinessChain(
+            projectId,
+            input,
+            requestActorId(request.headers),
+          ),
+        );
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/business-chain/unbind",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = unbindProjectBusinessChainInputSchema.parse(request.body);
+      return reply.send(
+        await application.unbindProjectBusinessChain(
+          projectId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/projects/:projectId/business-chain/refresh",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = projectSourceRefreshInputSchema.parse(
+        request.body ?? {},
+      );
+      return reply.send(
+        await application.refreshProjectSources(
+          projectId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/projects/:projectId/overview",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      return reply.send(
+        await application.getProjectProgressOverview(
+          projectId,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/project-alerts/:alertId", async (request, reply) => {
+    const { alertId } = projectAlertParamsSchema.parse(request.params);
+    return reply.send(
+      await application.getProjectAlertDetail(
+        alertId,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/project-alerts/:alertId/acknowledge",
+    async (request, reply) => {
+      const { alertId } = projectAlertParamsSchema.parse(request.params);
+      const input = acknowledgeProjectAlertInputSchema.parse(request.body);
+      return reply.send(
+        await application.acknowledgeProjectAlert(
+          alertId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/project-alerts/:alertId/suppress",
+    async (request, reply) => {
+      const { alertId } = projectAlertParamsSchema.parse(request.params);
+      const input = suppressProjectAlertInputSchema.parse(request.body);
+      return reply.send(
+        await application.suppressProjectAlert(
+          alertId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/project-alerts/:alertId/resolve",
+    async (request, reply) => {
+      const { alertId } = projectAlertParamsSchema.parse(request.params);
+      const input = resolveProjectAlertInputSchema.parse(request.body);
+      return reply.send(
+        await application.resolveProjectAlert(
+          alertId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/project-alerts/:alertId/assign",
+    async (request, reply) => {
+      const { alertId } = projectAlertParamsSchema.parse(request.params);
+      const input = assignProjectAlertInputSchema.parse(request.body);
+      return reply.send(
+        await application.assignProjectAlert(
+          alertId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
 
   app.get("/api/v1/projects/:projectId/ai-pm", async (request, reply) => {
     const { projectId } = projectParamsSchema.parse(request.params);
@@ -3390,6 +3652,283 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
+  app.get("/api/v1/mcp-providers", async (request, reply) => {
+    return reply.send({
+      items: await application.mcpProviders.list(
+        requestMcpProviderActor(request),
+      ),
+    });
+  });
+
+  app.post("/api/v1/mcp-providers", async (request, reply) => {
+    const input = createMcpProviderInputSchema.parse(request.body);
+    return reply
+      .status(201)
+      .send(
+        await application.mcpProviders.create(
+          requestMcpProviderActor(request),
+          input,
+        ),
+      );
+  });
+
+  app.get(
+    "/api/v1/mcp-providers/:providerId",
+    async (request, reply) => {
+      const { providerId } = mcpProviderParamsSchema.parse(request.params);
+      return reply.send(
+        await application.mcpProviders.get(
+          requestMcpProviderActor(request),
+          providerId,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/mcp-providers/:providerId/versions",
+    async (request, reply) => {
+      const { providerId } = mcpProviderParamsSchema.parse(request.params);
+      const input = createMcpProviderVersionInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await application.mcpProviders.createVersion(
+            requestMcpProviderActor(request),
+            providerId,
+            input,
+          ),
+        );
+    },
+  );
+
+  for (const action of ["activate", "disable", "archive"] as const) {
+    app.post(
+      `/api/v1/mcp-providers/:providerId/${action}`,
+      async (request, reply) => {
+        const { providerId } = mcpProviderParamsSchema.parse(request.params);
+        const input = mcpProviderRevisionInputSchema.parse(request.body);
+        const actor = requestMcpProviderActor(request);
+        const result =
+          action === "activate"
+            ? await application.mcpProviders.activate(actor, providerId, input)
+            : action === "disable"
+              ? await application.mcpProviders.disable(
+                  actor,
+                  providerId,
+                  input,
+                )
+              : await application.mcpProviders.archive(
+                  actor,
+                  providerId,
+                  input,
+                );
+        return reply.send(result);
+      },
+    );
+  }
+
+  app.post(
+    "/api/v1/mcp-providers/:providerId/probes",
+    async (request, reply) => {
+      const { providerId } = mcpProviderParamsSchema.parse(request.params);
+      const input = mcpProviderProbeInputSchema.parse(request.body);
+      return reply
+        .status(202)
+        .send(
+          await application.mcpProviders.requestProbe(
+            requestMcpProviderActor(request),
+            providerId,
+            input,
+          ),
+        );
+    },
+  );
+
+  app.get(
+    "/api/v1/mcp-providers/:providerId/tools",
+    async (request, reply) => {
+      const { providerId } = mcpProviderParamsSchema.parse(request.params);
+      return reply.send(
+        await application.mcpProviders.listTools(
+          requestMcpProviderActor(request),
+          providerId,
+        ),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/mcp-providers/:providerId/audit",
+    async (request, reply) => {
+      const { providerId } = mcpProviderParamsSchema.parse(request.params);
+      const detail = await application.mcpProviders.get(
+        requestMcpProviderActor(request),
+        providerId,
+      );
+      return reply.send({ items: detail.audit });
+    },
+  );
+
+  app.post(
+    "/api/v1/admin/mcp-providers/health-check",
+    async (request, reply) => {
+      const input = mcpProviderHealthCheckInputSchema.parse(
+        request.body ?? {},
+      );
+      return reply.send(
+        await application.mcpProviders.requestPlatformHealthCheck(
+          requestMcpProviderActor(request),
+          input,
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/admin/mcp-tool-calls/reconcile",
+    async (request, reply) => {
+      const input = mcpToolCallReconcileInputSchema.parse(
+        request.body ?? {},
+      );
+      return reply.send(
+        await application.mcpToolCalls.reconcilePlatform({
+          actor: requestMcpProviderActor(request),
+          limit: input.limit,
+        }),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/admin/runtime-tool-requests/summary",
+    async (request, reply) => {
+      return reply.send(
+        await application.mcpToolCalls.runtimeToolRequestSummary({
+          actor: requestMcpProviderActor(request),
+        }),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/admin/runtime-tool-requests/reconcile",
+    async (request, reply) => {
+      const input = runtimeToolRequestReconcileInputSchema.parse(
+        request.body ?? {},
+      );
+      return reply.send(
+        await application.mcpToolCalls.reconcileRuntimeToolRequestsPlatform({
+          actor: requestMcpProviderActor(request),
+          limit: input.limit,
+        }),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/admin/runtime-tool-requests/retention",
+    async (request, reply) => {
+      const input = runtimeToolRequestRetentionQuerySchema.parse(request.query);
+      return reply.send(
+        await application.mcpToolCalls.runtimeToolRequestRetentionPreview({
+          actor: requestMcpProviderActor(request),
+          retentionDays: input.retentionDays,
+        }),
+      );
+    },
+  );
+
+  app.get(
+    "/api/v1/admin/project-source-mcp/summary",
+    async (request, reply) => {
+      const actor = requestMcpProviderActor(request);
+      if (!actor.platformAdministrator) {
+        throw new ApplicationError(
+          "forbidden",
+          "Platform administrator permission is required",
+          403,
+        );
+      }
+      if (
+        !(await repositories.featureFlags.isEnabled(
+          MCP_PROJECT_SOURCE_FLAG,
+        ))
+      ) {
+        throw new ApplicationError(
+          "project_source_mcp_disabled",
+          "MCP project source reads are disabled",
+          503,
+        );
+      }
+      return reply.send(await repositories.projectSourceMcp.summary());
+    },
+  );
+
+  app.post(
+    "/api/v1/admin/project-source-mcp/reconcile",
+    async (request, reply) => {
+      const actor = requestMcpProviderActor(request);
+      if (!actor.platformAdministrator) {
+        throw new ApplicationError(
+          "forbidden",
+          "Platform administrator permission is required",
+          403,
+        );
+      }
+      if (
+        !(await repositories.featureFlags.isEnabled(
+          MCP_PROJECT_SOURCE_FLAG,
+        ))
+      ) {
+        throw new ApplicationError(
+          "project_source_mcp_disabled",
+          "MCP project source reads are disabled",
+          503,
+        );
+      }
+      const input = projectSourceMcpReconcileInputSchema.parse(
+        request.body ?? {},
+      );
+      return reply.send({
+        reconciled: await repositories.projectSourceMcp.reconcileExpired(
+          input.limit,
+        ),
+      });
+    },
+  );
+
+  app.get(
+    "/api/v1/admin/project-source-mcp/retention",
+    async (request, reply) => {
+      const actor = requestMcpProviderActor(request);
+      if (!actor.platformAdministrator) {
+        throw new ApplicationError(
+          "forbidden",
+          "Platform administrator permission is required",
+          403,
+        );
+      }
+      if (
+        !(await repositories.featureFlags.isEnabled(
+          MCP_PROJECT_SOURCE_FLAG,
+        ))
+      ) {
+        throw new ApplicationError(
+          "project_source_mcp_disabled",
+          "MCP project source reads are disabled",
+          503,
+        );
+      }
+      const input = projectSourceMcpRetentionQuerySchema.parse(request.query);
+      return reply.send(
+        await repositories.projectSourceMcp.retentionPreview(
+          input.retentionDays,
+        ),
+      );
+    },
+  );
+
   app.get("/api/v1/runs/:runId/economics", async (request, reply) => {
     const { runId } = runParamsSchema.parse(request.params);
     return reply.send(
@@ -4214,6 +4753,18 @@ export function buildApi(options: BuildApiOptions): {
     return reply.send(await application.updateTask(id, input));
   });
 
+  app.patch("/api/v1/tasks/:id/parent", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    const input = updateTaskParentInputSchema.parse(request.body);
+    return reply.send(
+      await application.setTaskParent(
+        id,
+        input,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
   app.post("/api/v1/tasks/:id/dispatch", async (request, reply) => {
     const { id } = idParamsSchema.parse(request.params);
     const actorId = requestActorId(request.headers);
@@ -4728,6 +5279,172 @@ export function buildApi(options: BuildApiOptions): {
     );
   });
 
+  app.get(
+    "/api/v1/projects/:projectId/planning/settings",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      return reply.send(
+        await application.getPlanningSettings(
+          projectId,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.patch(
+    "/api/v1/projects/:projectId/planning/settings",
+    async (request, reply) => {
+      const { projectId } = projectParamsSchema.parse(request.params);
+      const input = updatePlanningSettingsInputSchema.parse(request.body);
+      return reply.send(
+        await application.updatePlanningSettings(
+          projectId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/tasks/:id/planning/start",
+    async (request, reply) => {
+      const { id } = idParamsSchema.parse(request.params);
+      const input = planningStartInputSchema.parse(request.body ?? {});
+      return reply.status(201).send(
+        await application.startPlanning(
+          id,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.get("/api/v1/tasks/:id/planning", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    return reply.send(
+      await application.getPlanningOverview(
+        id,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.get("/api/v1/tasks/:id/dispatch-readiness", async (request, reply) => {
+    const { id } = idParamsSchema.parse(request.params);
+    return reply.send(
+      await application.getTaskPlanningReadiness(
+        id,
+        requestActorId(request.headers),
+      ),
+    );
+  });
+
+  app.post(
+    "/api/v1/planning-runs/:runId/pause",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const input = planningRunRevisionInputSchema.parse(request.body);
+      return reply.send(
+        await application.pausePlanningRun(
+          runId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/planning-runs/:runId/start",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const input = planningRunRevisionInputSchema.parse(request.body);
+      return reply.send(
+        await application.resumePlanningRun(
+          runId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/planning-runs/:runId/cancel",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const input = planningRunRevisionInputSchema.parse(request.body);
+      return reply.send(
+        await application.cancelPlanningRun(
+          runId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/planning-runs/:runId/review-required",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const input = planningReviewRequiredInputSchema.parse(request.body);
+      return reply.send(
+        await application.markPlanningReviewRequired(
+          runId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/planning-runs/:runId/retry",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const input = planningRetryInputSchema.parse(request.body);
+      return reply.send(
+        await application.retryPlanningRun(
+          runId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/planning-runs/:runId/run",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      return reply.send(
+        await application.runPlanningRun(
+          runId,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
+  app.post(
+    "/api/v1/planning-runs/:runId/plan",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const input = planningSubmitPlanInputSchema.parse(request.body);
+      return reply.send(
+        await application.submitPlanningPlan(
+          runId,
+          input,
+          requestActorId(request.headers),
+        ),
+      );
+    },
+  );
+
   app.post(
     "/api/v1/projects/:projectId/router-template",
     async (request, reply) => {
@@ -5083,6 +5800,30 @@ export function buildApi(options: BuildApiOptions): {
       items: await repositories.agentTools.listByRun(runId),
     });
   });
+
+  app.get("/api/v1/runs/:runId/mcp-tool-calls", async (request, reply) => {
+    const { runId } = runParamsSchema.parse(request.params);
+    const actorId = requestActorId(request.headers);
+    await application.getRunDetail(runId, actorId);
+    return reply.send({
+      items: await application.mcpToolCalls.listForRun(runId),
+    });
+  });
+
+  app.get(
+    "/api/v1/runs/:runId/runtime-tool-requests",
+    async (request, reply) => {
+      const { runId } = runParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      await application.getRunDetail(runId, actorId);
+      return reply.send({
+        items:
+          await application.mcpToolCalls.listRuntimeToolRequestsForRun(
+            runId,
+          ),
+      });
+    },
+  );
 
   app.post(
     "/api/v1/execution-gates/:gateId/decisions",
@@ -5565,6 +6306,108 @@ export function buildApi(options: BuildApiOptions): {
     },
   );
 
+  app.get(
+    "/api/v1/market/assets/:assetId/governance",
+    async (request, reply) => {
+      const { assetId } = marketAssetParamsSchema.parse(request.params);
+      return reply.send(
+        await market.getGovernance(
+          requestWorkbenchMarketActor(request),
+          assetId,
+        ),
+      );
+    },
+  );
+
+  for (const action of [
+    "publish",
+    "delist",
+    "relist",
+    "suspend",
+    "resume",
+    "archive",
+    "lock",
+    "unlock",
+  ] as const) {
+    app.post(
+      `/api/v1/market/assets/:assetId/governance/${action}`,
+      async (request, reply) => {
+        const { assetId } = marketAssetParamsSchema.parse(request.params);
+        const actor = requestWorkbenchMarketActor(request);
+        const input =
+          action === "suspend"
+            ? marketSuspendInputSchema.parse(request.body)
+            : action === "lock"
+              ? marketAdminLockInputSchema.parse(request.body)
+              : marketGovernanceActionInputSchema.parse(request.body);
+        switch (action) {
+          case "publish":
+            return reply.send(
+              await market.publishAsset(actor, assetId, input),
+            );
+          case "delist":
+            return reply.send(
+              await market.delistAsset(actor, assetId, input),
+            );
+          case "relist":
+            return reply.send(
+              await market.relistAsset(actor, assetId, input),
+            );
+          case "suspend":
+            return reply.send(
+              await market.suspendAsset(actor, assetId, input),
+            );
+          case "resume":
+            return reply.send(
+              await market.resumeAsset(actor, assetId, input),
+            );
+          case "archive":
+            return reply.send(
+              await market.archiveAsset(actor, assetId, input),
+            );
+          case "lock":
+            return reply.send(
+              await market.lockAsset(actor, assetId, input),
+            );
+          case "unlock":
+            return reply.send(
+              await market.unlockAsset(actor, assetId, input),
+            );
+        }
+      },
+    );
+  }
+
+  app.get(
+    "/api/v1/market/assets/:assetId/bindings",
+    async (request, reply) => {
+      const { assetId } = marketAssetParamsSchema.parse(request.params);
+      return reply.send({
+        items: await market.listResourceBindings(
+          requestWorkbenchMarketActor(request),
+          assetId,
+        ),
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/market/assets/:assetId/bindings",
+    async (request, reply) => {
+      const { assetId } = marketAssetParamsSchema.parse(request.params);
+      const input = marketResourceBindingInputSchema.parse(request.body);
+      return reply
+        .status(201)
+        .send(
+          await market.bindResource(
+            requestWorkbenchMarketActor(request),
+            assetId,
+            input,
+          ),
+        );
+    },
+  );
+
   app.get("/api/v1/market/entitlements", async (request, reply) => {
     const { all } = z
       .object({ all: z.enum(["1", "true"]).optional() })
@@ -5727,6 +6570,63 @@ export function buildApi(options: BuildApiOptions): {
   app.get("/api/v1/workbench/dashboard", async (request, reply) => {
     const actorId = requestActorId(request.headers);
     return reply.send(await application.getWorkbenchDashboard(actorId));
+  });
+
+  app.get("/api/v1/workbench/brief/stream", async (request, reply) => {
+    const actorId = requestActorId(request.headers);
+    await application.getWorkbenchBriefSettings(actorId);
+
+    reply.hijack();
+    const response = reply.raw;
+    response.writeHead(200, {
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      "content-type": "text/event-stream; charset=utf-8",
+    });
+    response.write("retry: 1500\n\n");
+
+    let closed = false;
+    let lastBriefId: string | null = null;
+    let lastVersion = 0;
+    let lastKeepaliveAt = Date.now();
+    request.raw.on("close", () => {
+      closed = true;
+    });
+    response.on("error", () => {
+      closed = true;
+    });
+
+    while (!closed) {
+      try {
+        const brief =
+          await repositories.workbenchReports.getLatestBrief(actorId);
+        if (
+          brief !== null &&
+          (brief.id !== lastBriefId || brief.version > lastVersion)
+        ) {
+          lastBriefId = brief.id;
+          lastVersion = brief.version;
+          response.write(
+            `id: ${brief.id}:${brief.version}\n` +
+              "event: workbench.brief\n" +
+              `data: ${JSON.stringify(brief)}\n\n`,
+          );
+        }
+        if (Date.now() - lastKeepaliveAt >= 15_000) {
+          lastKeepaliveAt = Date.now();
+          response.write(": keepalive\n\n");
+        }
+      } catch {
+        response.write(
+          "event: workbench.error\n" +
+            'data: {"code":"workbench_brief_stream_failed"}\n\n',
+        );
+        break;
+      }
+      await sleep(2_000);
+    }
+    response.end();
+    return reply;
   });
 
   app.post("/api/v1/workbench/brief/refresh", async (request, reply) => {
@@ -5898,6 +6798,23 @@ export function buildApi(options: BuildApiOptions): {
       ),
     );
   });
+
+  app.post(
+    "/api/v1/workflows/:workflowId/business-chain",
+    async (request, reply) => {
+      const { workflowId } = workflowParamsSchema.parse(request.params);
+      const actorId = requestActorId(request.headers);
+      const input = businessChainDefinitionInputSchema.parse(request.body);
+      return reply.send(
+        await application.configureWorkflowBusinessChain(
+          workflowId,
+          input,
+          actorId,
+          requestIsAdministrator(request.headers),
+        ),
+      );
+    },
+  );
 
   app.post(
     "/api/v1/workflows/:workflowId/publish",

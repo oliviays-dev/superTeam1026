@@ -94,7 +94,12 @@ try {
   await database.query(
     `UPDATE feature_flag_settings
      SET mode = 'on', revision = revision + 1, updated_at = NOW()
-     WHERE flag_key IN ('workbench.v2', 'market')
+     WHERE flag_key IN (
+       'workbench.v2',
+       'market',
+       'market.governance_v2',
+       'market.shared_supply'
+     )
        AND scope_type = 'platform'
        AND scope_id = 'platform'`,
   );

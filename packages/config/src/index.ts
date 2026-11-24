@@ -28,6 +28,10 @@ export interface PlatformConfig {
   readonly runtimeProbePollIntervalMs: number;
   readonly runtimeProbeTimeoutMs: number;
   readonly runtimeProbeLeaseSeconds: number;
+  readonly secretStoreFile: string | undefined;
+  readonly secretResolutionTimeoutMs: number;
+  readonly secretResolutionCacheTtlMs: number;
+  readonly secretStoreAllowLoosePermissions: boolean;
   readonly authMode: "bearer" | "local-development";
   readonly authSessionTtlSeconds: number;
   readonly localActorId: string;
@@ -73,6 +77,19 @@ function integer(
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function nonNegativeInteger(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
   }
   return parsed;
 }
@@ -226,6 +243,23 @@ export function loadConfig(
       30,
       "RUNTIME_PROBE_LEASE_SECONDS",
     ),
+    secretStoreFile:
+      env.MCP_SECRET_STORE_FILE === undefined ||
+      env.MCP_SECRET_STORE_FILE.trim() === ""
+        ? undefined
+        : resolve(root, env.MCP_SECRET_STORE_FILE),
+    secretResolutionTimeoutMs: integer(
+      env.MCP_SECRET_RESOLUTION_TIMEOUT_MS,
+      5_000,
+      "MCP_SECRET_RESOLUTION_TIMEOUT_MS",
+    ),
+    secretResolutionCacheTtlMs: nonNegativeInteger(
+      env.MCP_SECRET_RESOLUTION_CACHE_TTL_MS,
+      30_000,
+      "MCP_SECRET_RESOLUTION_CACHE_TTL_MS",
+    ),
+    secretStoreAllowLoosePermissions:
+      env.MCP_SECRET_STORE_ALLOW_LOOSE_PERMISSIONS === "1",
     authMode,
     authSessionTtlSeconds: integer(
       env.AUTH_SESSION_TTL_SECONDS,

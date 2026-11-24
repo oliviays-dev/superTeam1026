@@ -23,6 +23,7 @@ import {
   History,
   LayoutTemplate,
   ListTodo,
+  ListTree,
   LoaderCircle,
   MessageSquare,
   MessageSquarePlus,
@@ -69,6 +70,7 @@ import {
   setWorkbenchFollow,
   updateProject,
   updateTask,
+  updateTaskParent,
   uploadTaskAttachment,
 } from "./api.js";
 import { ProjectMembershipPanel } from "./ProjectMembershipPanel.js";
@@ -79,6 +81,7 @@ import {
 } from "./MemoryClosurePanels.js";
 import { RunView } from "./RunView.js";
 import { ProjectReportsPanel } from "./ProjectReportsPanel.js";
+import { ProjectBusinessChainPanel } from "./ProjectBusinessChainPanel.js";
 
 interface SharedViewProps {
   projects: Project[];
@@ -380,6 +383,7 @@ export function ProjectsView({
   initialReportId,
   initialTab,
   canManageTemplates,
+  platformAdministrator,
   onOpenTemplates,
   capability,
 }: SharedViewProps & {
@@ -389,6 +393,7 @@ export function ProjectsView({
   initialReportId?: string;
   initialTab?: "overview" | "tasks" | "memory" | "members" | "reports";
   canManageTemplates: boolean;
+  platformAdministrator: boolean;
   onOpenTemplates: () => void;
 }) {
   const [search, setSearch] = useState("");
@@ -609,6 +614,13 @@ export function ProjectsView({
               </div>
 
               {tab === "overview" && (
+                <>
+                <ProjectBusinessChainPanel
+                  projectId={project.id}
+                  canWrite={canWrite}
+                  platformAdministrator={platformAdministrator}
+                  onOpenTask={(taskId) => onOpenTask(taskId, project.id)}
+                />
                 <div className="project-overview-grid">
                   <section className="pm-panel">
                     <div className="pm-section-head">
@@ -658,6 +670,7 @@ export function ProjectsView({
                     </div>
                   </section>
                 </div>
+                </>
               )}
 
               {tab === "tasks" && (
@@ -1568,6 +1581,8 @@ function TaskDetailDrawer({
   const [dependencyDraft, setDependencyDraft] = useState<string[]>(
     task.dependsOn,
   );
+  const [editingHierarchy, setEditingHierarchy] = useState(false);
+  const [parentDraft, setParentDraft] = useState(task.parentTaskId ?? "");
   const [comment, setComment] = useState("");
   const [replyingTo, setReplyingTo] = useState<TaskMessage | null>(null);
   const [controlReason, setControlReason] = useState("");
@@ -1585,6 +1600,16 @@ function TaskDetailDrawer({
     .filter((candidate): candidate is Task => candidate !== undefined);
   const unresolvedDependencies = dependencies.filter(
     (dependency) => dependency.status !== "done",
+  );
+  const parentTask =
+    task.parentTaskId === undefined
+      ? undefined
+      : tasks.find((candidate) => candidate.id === task.parentTaskId);
+  const childTasks = tasks.filter(
+    (candidate) => candidate.parentTaskId === task.id,
+  );
+  const hierarchyCandidates = projectTasks.filter(
+    (candidate) => candidate.parentTaskId === undefined,
   );
   const role = roles.find((candidate) => candidate.id === task.roleId);
   const detailQuery = useQuery({
@@ -1628,6 +1653,10 @@ function TaskDetailDrawer({
     setDependencyDraft(task.dependsOn);
     setEditingDependencies(false);
   }, [task.dependsOn, task.updatedAt]);
+  useEffect(() => {
+    setParentDraft(task.parentTaskId ?? "");
+    setEditingHierarchy(false);
+  }, [task.parentTaskId, task.updatedAt]);
   const dispatchMutation = useMutation({
     mutationFn: () => dispatchTask(task.id),
     onSuccess: ({ runId: createdRunId }) => {
@@ -1737,6 +1766,20 @@ function TaskDetailDrawer({
     mutationFn: () => updateTask(task.id, { dependsOn: dependencyDraft }),
     onSuccess: () => {
       setEditingDependencies(false);
+      onTaskChanged();
+      void queryClient.invalidateQueries({
+        queryKey: ["task-detail", task.id],
+      });
+    },
+  });
+  const hierarchyMutation = useMutation({
+    mutationFn: () =>
+      updateTaskParent(task.id, {
+        parentTaskId: parentDraft === "" ? null : parentDraft,
+        expectedRevision: task.revision,
+      }),
+    onSuccess: () => {
+      setEditingHierarchy(false);
       onTaskChanged();
       void queryClient.invalidateQueries({
         queryKey: ["task-detail", task.id],
@@ -1996,6 +2039,94 @@ function TaskDetailDrawer({
           )}
           {dependencyMutation.error !== null && (
             <div className="pm-error">{dependencyMutation.error.message}</div>
+          )}
+        </div>
+
+        <div className="task-dependency-panel">
+          <header>
+            <div>
+              <ListTree size={14} />
+              <strong>任务层级</strong>
+              <span>
+                {parentTask === undefined
+                  ? `${childTasks.length} 个子任务`
+                  : `隶属于 ${parentTask.title}`}
+              </span>
+            </div>
+            {canWrite && !editingHierarchy && childTasks.length === 0 && (
+              <button
+                className="pm-btn secondary"
+                type="button"
+                onClick={() => setEditingHierarchy(true)}
+              >
+                <Edit3 size={12} />
+                调整层级
+              </button>
+            )}
+          </header>
+          {editingHierarchy ? (
+            <div className="task-dependency-editor">
+              <label>
+                <span>主任务</span>
+                <select
+                  value={parentDraft}
+                  onChange={(event) => setParentDraft(event.target.value)}
+                >
+                  <option value="">无主任务</option>
+                  {hierarchyCandidates.map((candidate) => (
+                    <option key={candidate.id} value={candidate.id}>
+                      {candidate.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div>
+                <button
+                  className="pm-btn secondary"
+                  type="button"
+                  onClick={() => {
+                    setParentDraft(task.parentTaskId ?? "");
+                    setEditingHierarchy(false);
+                  }}
+                >
+                  取消
+                </button>
+                <button
+                  className="pm-btn primary"
+                  type="button"
+                  disabled={hierarchyMutation.isPending}
+                  onClick={() => hierarchyMutation.mutate()}
+                >
+                  保存层级
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="task-dependency-list">
+              {parentTask !== undefined && (
+                <span className="task-dependency-chip">
+                  <b>主任务 · {parentTask.title}</b>
+                  <small>{taskStatusLabel[parentTask.status]}</small>
+                </span>
+              )}
+              {childTasks.map((child) => (
+                <span
+                  className={`task-dependency-chip ${
+                    child.status === "done" ? "done" : ""
+                  }`}
+                  key={child.id}
+                >
+                  <b>子任务 · {child.title}</b>
+                  <small>{taskStatusLabel[child.status]}</small>
+                </span>
+              ))}
+              {parentTask === undefined && childTasks.length === 0 && (
+                <span className="muted">当前任务是独立任务</span>
+              )}
+            </div>
+          )}
+          {hierarchyMutation.error !== null && (
+            <div className="pm-error">{hierarchyMutation.error.message}</div>
           )}
         </div>
 

@@ -32,6 +32,7 @@ export const workbenchSourceKindSchema = z.enum([
   "action-item",
   "memory-topic",
   "memory-truth",
+  "project-source",
   "supply-exception",
   "supplier-risk",
 ]);

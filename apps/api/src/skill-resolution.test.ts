@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,10 +96,7 @@ integration("M4 Skill resolution, installation, and binding", () => {
         capabilities: ["project-reporting"],
       },
     });
-    requiredInstallation = await installSkill(
-      requiredSkill,
-      ownerActor,
-    );
+    requiredInstallation = await installSkill(requiredSkill, ownerActor);
     requiredBinding = await bindSkill({
       templateId: template.id,
       skill: requiredSkill,
@@ -327,6 +324,10 @@ integration("M4 Skill resolution, installation, and binding", () => {
     readonly templateId: string;
     readonly skill: SkillDetail;
     readonly required: boolean;
+    readonly mode?: "required" | "default" | "additive" | "primary";
+    readonly scenes?: Array<
+      "task-planning" | "task-execution" | "meeting" | "project-report"
+    >;
     readonly actorId: string;
   }): Promise<TeammateTemplateSkillBinding> {
     return request<TeammateTemplateSkillBinding>(
@@ -337,6 +338,8 @@ integration("M4 Skill resolution, installation, and binding", () => {
         versionId: input.skill.versions[0]!.id,
         required: input.required,
         enabled: true,
+        ...(input.mode === undefined ? {} : { mode: input.mode }),
+        ...(input.scenes === undefined ? {} : { scenes: input.scenes }),
       },
       201,
       input.actorId,
@@ -363,6 +366,9 @@ integration("M4 Skill resolution, installation, and binding", () => {
       } satisfies SkillVersionContentValue,
     });
     expect(recomputed).toBe(version.digest);
+    expect(version.instructionsHash).toBe(
+      createHash("sha256").update(version.instructions).digest("hex"),
+    );
     await expect(
       database.query(
         "UPDATE skill_versions SET instructions = 'rewritten' WHERE id = $1",
@@ -521,6 +527,14 @@ integration("M4 Skill resolution, installation, and binding", () => {
     ).toBe("required_template");
     expect(
       effective.skills.find(
+        (skill) => skill.skillId === requiredSkill.definition.id,
+      ),
+    ).toMatchObject({
+      mode: "required",
+      scenes: ["task-execution"],
+    });
+    expect(
+      effective.skills.find(
         (skill) => skill.skillId === extensionSkill.definition.id,
       )?.source,
     ).toBe("required_template");
@@ -529,6 +543,14 @@ integration("M4 Skill resolution, installation, and binding", () => {
         (skill) => skill.skillId === defaultSkill.definition.id,
       )?.source,
     ).toBe("default_template");
+    expect(
+      effective.skills.find(
+        (skill) => skill.skillId === defaultSkill.definition.id,
+      ),
+    ).toMatchObject({
+      mode: "default",
+      scenes: ["task-execution"],
+    });
     expect(
       effective.skills.filter(
         (skill) => skill.skillId === extensionSkill.definition.id,

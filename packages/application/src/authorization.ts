@@ -63,6 +63,15 @@ const SELF_WRITE_ROUTES = new Set([
   "POST /api/v1/market/assets/:assetId/versions",
   "POST /api/v1/market/assets/:assetId/versions/:version/status",
   "POST /api/v1/market/assets/:assetId/status",
+  "POST /api/v1/market/assets/:assetId/governance/publish",
+  "POST /api/v1/market/assets/:assetId/governance/delist",
+  "POST /api/v1/market/assets/:assetId/governance/relist",
+  "POST /api/v1/market/assets/:assetId/governance/suspend",
+  "POST /api/v1/market/assets/:assetId/governance/resume",
+  "POST /api/v1/market/assets/:assetId/governance/archive",
+  "POST /api/v1/market/assets/:assetId/governance/lock",
+  "POST /api/v1/market/assets/:assetId/governance/unlock",
+  "POST /api/v1/market/assets/:assetId/bindings",
   "POST /api/v1/market/entitlements",
   "DELETE /api/v1/market/entitlements/:entitlementId",
   "POST /api/v1/market/installations",
@@ -616,6 +625,11 @@ export class AuthorizationService {
     ) {
       // Data Fabric intersects Project, Workspace, Runtime Profile, dataset,
       // row and column policy in its application service.
+      return { required: false };
+    }
+    if (input.route.startsWith("/api/v1/mcp-providers")) {
+      // MCP Provider ownership is evaluated by the provider application
+      // service. Platform-level health checks use the administrator route.
       return { required: false };
     }
     if (

@@ -16,6 +16,7 @@ import type {
   TaskReviewInput,
   UpdateMemoryClaimInput,
   WorkbenchSummary,
+  WorkbenchSourceRef,
   WorkflowDefinition,
   WorkflowGraph,
   WorkflowInstance,
@@ -24,6 +25,10 @@ import type {
 } from "@pluginmax/contracts";
 import type { FileRef } from "@pluginmax/files";
 import type { Database } from "./database.js";
+import {
+  businessChainMetadataSchema,
+  businessChainNodeMetadataSchema,
+} from "@pluginmax/contracts";
 
 interface ArtifactRow {
   id: string;
@@ -34,6 +39,7 @@ interface ArtifactRow {
   size: string;
   sha256: string;
   storage_key: string;
+  source_refs: WorkbenchSourceRef[];
   created_at: Date;
 }
 
@@ -44,12 +50,13 @@ export class ArtifactRepository {
     readonly runId: string;
     readonly projectId: string;
     readonly ref: FileRef;
+    readonly sourceRefs?: readonly WorkbenchSourceRef[];
   }): Promise<Artifact> {
     const result = await this.database.query<ArtifactRow>(
       `INSERT INTO artifacts (
          id, run_id, project_id, name, mime_type, size,
-         sha256, storage_key, created_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+         sha256, storage_key, source_refs, created_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
        RETURNING *`,
       [
         input.ref.id,
@@ -60,6 +67,7 @@ export class ArtifactRepository {
         input.ref.size,
         input.ref.sha256,
         input.ref.storageKey,
+        JSON.stringify(input.sourceRefs ?? []),
       ],
     );
     return artifactFromRow(result.rows[0]!);
@@ -433,6 +441,10 @@ interface WorkflowRow {
   status: WorkflowDefinition["status"];
   source_template_id: string | null;
   source_template_version: number | null;
+  kind: WorkflowDefinition["kind"];
+  chain_key: string | null;
+  business_chain_metadata: unknown;
+  business_chain_nodes: unknown;
   scope: WorkflowDefinition["scope"];
   origin: WorkflowDefinition["origin"];
   published_by_principal_id: string | null;
@@ -1072,6 +1084,7 @@ function artifactFromRow(row: ArtifactRow): Artifact {
     size: Number(row.size),
     sha256: row.sha256,
     storageKey: row.storage_key,
+    sourceRefs: row.source_refs,
     createdAt: row.created_at.toISOString(),
   };
 }
@@ -1093,6 +1106,18 @@ function workflowFromRow(row: WorkflowRow): WorkflowDefinition {
     status: row.status,
     sourceTemplateId: row.source_template_id,
     sourceTemplateVersion: row.source_template_version,
+    kind: row.kind ?? "workflow",
+    chainKey: row.chain_key ?? null,
+    businessChainMetadata:
+      row.business_chain_metadata === null ||
+      row.business_chain_metadata === undefined
+        ? null
+        : businessChainMetadataSchema.parse(row.business_chain_metadata),
+    businessChainNodes: Array.isArray(row.business_chain_nodes)
+      ? row.business_chain_nodes.map((node) =>
+          businessChainNodeMetadataSchema.parse(node),
+        )
+      : [],
     revision: row.revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),

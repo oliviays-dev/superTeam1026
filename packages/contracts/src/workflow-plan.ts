@@ -115,6 +115,7 @@ export const workflowPlanSchema = z.object({
   projectId: z.string().uuid(),
   rootTaskId: z.string().uuid(),
   source: workflowPlanSourceSchema,
+  planningRunId: z.string().uuid().nullable(),
   currentVersion: z.number().int().positive(),
   status: workflowPlanStatusSchema,
   revision: z.number().int().positive(),
@@ -221,6 +222,21 @@ export const createWorkflowPlanInputSchema = z.object({
   settings: workflowPlanSettingsSchema.default({}),
   reason: z.string().trim().max(4_000).default(""),
   routerAgentId: z.string().uuid().optional(),
+  planningRunId: z.string().uuid().optional(),
+  planningRunRevision: z.number().int().positive().optional(),
+}).strict().superRefine((value, context) => {
+  if (
+    value.source === "router" &&
+    (value.planningRunId === undefined ||
+      value.planningRunRevision === undefined)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "Router plans require a server-verifiable Planning Run and revision",
+      path: ["planningRunId"],
+    });
+  }
 });
 export type CreateWorkflowPlanInput = z.input<
   typeof createWorkflowPlanInputSchema

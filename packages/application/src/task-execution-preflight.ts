@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   AGENT_TASK_TOOLS_FLAG,
   AGENT_WORKSPACE_FILES_FLAG,
+  MCP_TOOL_CATEGORY,
+  MCP_TOOL_INVOCATION_FLAG,
   type ActionTicket,
   type ActionTicketAction,
   type Agent,
@@ -126,6 +128,9 @@ function builtinCapability(
     "structuredPlan",
     "structuredToolEvents",
   ]);
+  if (additionalToolCategories.includes(MCP_TOOL_CATEGORY)) {
+    supported.add("mcp");
+  }
   const state = (key: keyof RuntimeCapabilityProfile["capabilities"]) =>
     supported.has(key) ? ("supported" as const) : ("unsupported" as const);
   return {
@@ -1027,7 +1032,7 @@ export class TaskExecutionPreflightService {
   > {
     const taskContext =
       input.contextType === "task" || input.contextType === "workflow-task";
-    const [taskTools, workspaceFiles] = taskContext
+    const [taskTools, workspaceFiles, mcpTools] = taskContext
       ? await Promise.all([
           this.repositories.featureFlags.isEnabled(
             AGENT_TASK_TOOLS_FLAG,
@@ -1037,11 +1042,16 @@ export class TaskExecutionPreflightService {
             AGENT_WORKSPACE_FILES_FLAG,
             input.projectId,
           ),
+          this.repositories.featureFlags.isEnabled(
+            MCP_TOOL_INVOCATION_FLAG,
+            input.projectId,
+          ),
         ])
-      : [false, false];
+      : [false, false, false];
     const binding = builtinCapability(input.agent, [
       ...(taskTools ? ["task.read", "task.write"] : []),
       ...(workspaceFiles ? ["fs.read", "fs.write"] : []),
+      ...(mcpTools ? [MCP_TOOL_CATEGORY] : []),
     ]);
     assertPolicyRequirements(input.policy.policy, binding.profile);
     const raw = builtinEnvelope({

@@ -2,6 +2,8 @@ import { z } from "zod";
 
 export const WORKBENCH_V2_FLAG = "workbench.v2";
 export const MARKET_FLAG = "market";
+export const MARKET_GOVERNANCE_V2_FLAG = "market.governance_v2";
+export const MARKET_SHARED_SUPPLY_FLAG = "market.shared_supply";
 
 export const WORKBENCH_HOST_VERSION = "2.0.0";
 
@@ -431,6 +433,56 @@ export const marketAssetStatusSchema = z.enum([
 ]);
 export type MarketAssetStatus = z.infer<typeof marketAssetStatusSchema>;
 
+export const marketOriginSchema = z.enum(["platform", "user"]);
+export type MarketOrigin = z.infer<typeof marketOriginSchema>;
+
+export const marketSharingScopeSchema = z.enum([
+  "private",
+  "project",
+  "workspace",
+  "platform",
+]);
+export type MarketSharingScope = z.infer<typeof marketSharingScopeSchema>;
+
+export const marketPublicationStatusSchema = z.enum([
+  "draft",
+  "published",
+  "delisted",
+  "archived",
+]);
+export type MarketPublicationStatus = z.infer<
+  typeof marketPublicationStatusSchema
+>;
+
+export const marketAvailabilityStatusSchema = z.enum([
+  "active",
+  "suspended",
+]);
+export type MarketAvailabilityStatus = z.infer<
+  typeof marketAvailabilityStatusSchema
+>;
+
+export const marketResourceKindSchema = z.enum([
+  "skill_version",
+  "mcp_provider",
+  "workflow_template_version",
+  "workbench_template_version",
+  "trusted_panel",
+]);
+export type MarketResourceKind = z.infer<typeof marketResourceKindSchema>;
+
+export function mapSharingScopeToVisibility(
+  scope: MarketSharingScope,
+): MarketVisibility {
+  return scope === "platform" ? "public" : scope;
+}
+
+export function mapVisibilityToSharingScope(
+  visibility: MarketVisibility,
+): MarketSharingScope {
+  return visibility === "public" ? "platform" : visibility;
+}
+
 export const marketAssetVersionStatusSchema = z.enum([
   "published",
   "deprecated",
@@ -507,6 +559,49 @@ export const marketAssetVersionSchema = z.object({
 });
 export type MarketAssetVersion = z.infer<typeof marketAssetVersionSchema>;
 
+export const marketInstallationImpactSchema = z.object({
+  activeInstallations: z.number().int().nonnegative(),
+  uninstalledInstallations: z.number().int().nonnegative(),
+  activeTemplateCopies: z.number().int().nonnegative(),
+  newInstallAllowed: z.boolean(),
+  existingRunsAllowed: z.boolean(),
+  blockedReason: z.string().max(2_000).nullable(),
+});
+export type MarketInstallationImpact = z.infer<
+  typeof marketInstallationImpactSchema
+>;
+
+export const marketGovernanceAuditSchema = z.object({
+  id: z.string().uuid(),
+  assetId: z.string().uuid(),
+  seq: z.number().int().positive(),
+  action: z.string().min(1).max(120),
+  actorPrincipalId: z.string().min(1).max(180),
+  actorRole: z.enum(["owner", "platform-admin", "system"]),
+  reason: z.string().max(2_000),
+  fromState: z.record(z.string(), z.unknown()),
+  toState: z.record(z.string(), z.unknown()),
+  revision: z.number().int().positive(),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type MarketGovernanceAudit = z.infer<
+  typeof marketGovernanceAuditSchema
+>;
+
+export const marketAssetResourceBindingSchema = z.object({
+  id: z.string().uuid(),
+  assetId: z.string().uuid(),
+  assetVersionId: z.string().uuid(),
+  resourceKind: marketResourceKindSchema,
+  resourceId: z.string().min(1).max(180),
+  resourceVersionId: z.string().min(1).max(180).nullable(),
+  createdByPrincipalId: z.string().min(1).max(180),
+  createdAt: z.string().datetime({ offset: true }),
+});
+export type MarketAssetResourceBinding = z.infer<
+  typeof marketAssetResourceBindingSchema
+>;
+
 export const marketAssetSchema = z.object({
   id: z.string().uuid(),
   assetKey: z.string().min(2).max(120),
@@ -514,10 +609,26 @@ export const marketAssetSchema = z.object({
   name: z.string().min(1).max(160),
   description: z.string().max(4_000),
   publisherPrincipalId: z.string().min(1).max(180),
+  origin: marketOriginSchema,
+  sharingScope: marketSharingScopeSchema,
+  sharingScopeId: z.string().max(180).nullable(),
+  publicationStatus: marketPublicationStatusSchema,
+  availabilityStatus: marketAvailabilityStatusSchema,
+  adminLocked: z.boolean(),
+  adminLockedAt: z.string().datetime({ offset: true }).nullable(),
+  adminLockedByPrincipalId: z.string().max(180).nullable(),
+  adminLockReason: z.string().max(2_000).nullable(),
+  publicationChangedAt: z.string().datetime({ offset: true }),
+  availabilityChangedAt: z.string().datetime({ offset: true }),
+  suspendedReason: z.string().max(2_000).nullable(),
   trustLevel: marketTrustLevelSchema,
   visibility: marketVisibilitySchema,
   visibilityScopeId: z.string().max(180).nullable(),
   status: marketAssetStatusSchema,
+  legacyStatus: marketAssetStatusSchema,
+  legacyVisibility: marketVisibilitySchema,
+  newInstallAllowed: z.boolean(),
+  existingRunsAllowed: z.boolean(),
   currentVersion: z.number().int().positive(),
   revision: z.number().int().positive(),
   createdAt: z.string().datetime({ offset: true }),
@@ -527,6 +638,8 @@ export type MarketAsset = z.infer<typeof marketAssetSchema>;
 
 export const marketAssetDetailSchema = marketAssetSchema.extend({
   versions: z.array(marketAssetVersionSchema),
+  resourceBindings: z.array(marketAssetResourceBindingSchema),
+  installationImpact: marketInstallationImpactSchema,
 });
 export type MarketAssetDetail = z.infer<typeof marketAssetDetailSchema>;
 
@@ -541,14 +654,23 @@ export const createMarketAssetInputSchema = z
     kind: marketAssetKindSchema,
     name: z.string().trim().min(1).max(160),
     description: z.string().trim().max(4_000).default(""),
-    trustLevel: marketTrustLevelSchema.default("private"),
-    visibility: marketVisibilitySchema.default("private"),
+    origin: marketOriginSchema.optional(),
+    sharingScope: marketSharingScopeSchema.optional(),
+    publicationStatus: marketPublicationStatusSchema.default("published"),
+    trustLevel: marketTrustLevelSchema.optional(),
+    visibility: marketVisibilitySchema.optional(),
     visibilityScopeId: z.string().trim().min(1).max(180).optional(),
   })
   .strict()
   .superRefine((input, context) => {
+    const effectiveVisibility =
+      input.visibility ??
+      (input.sharingScope === undefined
+        ? "private"
+        : mapSharingScopeToVisibility(input.sharingScope));
     if (
-      (input.visibility === "workspace" || input.visibility === "project") &&
+      (effectiveVisibility === "workspace" ||
+        effectiveVisibility === "project") &&
       input.visibilityScopeId === undefined
     ) {
       context.addIssue({
@@ -558,14 +680,36 @@ export const createMarketAssetInputSchema = z
       });
     }
     if (
-      input.visibility !== "workspace" &&
-      input.visibility !== "project" &&
+      effectiveVisibility !== "workspace" &&
+      effectiveVisibility !== "project" &&
       input.visibilityScopeId !== undefined
     ) {
       context.addIssue({
         code: "custom",
         path: ["visibilityScopeId"],
         message: "scope id is only valid for workspace/project visibility",
+      });
+    }
+    if (
+      input.sharingScope !== undefined &&
+      input.visibility !== undefined &&
+      mapSharingScopeToVisibility(input.sharingScope) !== input.visibility
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["sharingScope"],
+        message: "sharingScope conflicts with legacy visibility",
+      });
+    }
+    if (
+      (input.sharingScope === "private" ||
+        input.sharingScope === "platform") &&
+      input.visibilityScopeId !== undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["visibilityScopeId"],
+        message: "private/platform sharing cannot carry a scope id",
       });
     }
   });
@@ -592,6 +736,53 @@ export const setMarketAssetStatusInputSchema = z
   .strict();
 export type SetMarketAssetStatusInput = z.infer<
   typeof setMarketAssetStatusInputSchema
+>;
+
+export const marketGovernanceActionInputSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    reason: z.string().trim().max(2_000).default(""),
+  })
+  .strict();
+export type MarketGovernanceActionInput = z.infer<
+  typeof marketGovernanceActionInputSchema
+>;
+
+export const marketSuspendInputSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    reason: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+export type MarketSuspendInput = z.infer<typeof marketSuspendInputSchema>;
+
+export const marketAdminLockInputSchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    reason: z.string().trim().min(1).max(2_000),
+  })
+  .strict();
+export type MarketAdminLockInput = z.infer<typeof marketAdminLockInputSchema>;
+
+export const marketResourceBindingInputSchema = z
+  .object({
+    assetVersionId: z.string().uuid(),
+    resourceKind: marketResourceKindSchema,
+    resourceId: z.string().trim().min(1).max(180),
+    resourceVersionId: z.string().trim().min(1).max(180).nullable().default(null),
+  })
+  .strict();
+export type MarketResourceBindingInput = z.infer<
+  typeof marketResourceBindingInputSchema
+>;
+
+export const marketGovernanceViewSchema = z.object({
+  asset: marketAssetDetailSchema,
+  impact: marketInstallationImpactSchema,
+  audit: z.array(marketGovernanceAuditSchema),
+});
+export type MarketGovernanceView = z.infer<
+  typeof marketGovernanceViewSchema
 >;
 
 export const setMarketAssetVersionStatusInputSchema = z
@@ -655,6 +846,10 @@ export const marketInstallationSchema = z.object({
   assetVersion: z.number().int().positive(),
   entitlementId: z.string().uuid(),
   status: z.enum(["active", "uninstalled"]),
+  publicationStatus: marketPublicationStatusSchema,
+  availabilityStatus: marketAvailabilityStatusSchema,
+  runtimeAvailable: z.boolean(),
+  blockedReason: z.string().max(2_000).nullable(),
   revision: z.number().int().positive(),
   config: z.record(z.string(), z.unknown()),
   installedByPrincipalId: z.string().min(1).max(180),

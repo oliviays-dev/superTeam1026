@@ -14,6 +14,9 @@ import type {
   Task,
   Teammate,
   TeammateTemplate,
+  PlanningOverview,
+  PlanningRunDetail,
+  PlanningSettings,
   WorkflowGraph,
   WorkflowPlanDetail,
   WorkflowPlanDiff,
@@ -108,6 +111,18 @@ integration("M3 Router dynamic plans and materialization", () => {
       },
     );
     rootTask = await createRootTask("M3 root");
+    const planning = await request<PlanningSettings>(
+      "GET",
+      `/api/v1/projects/${project.id}/planning/settings`,
+    );
+    await request<PlanningSettings>(
+      "PATCH",
+      `/api/v1/projects/${project.id}/planning/settings`,
+      {
+        expectedRevision: planning.policy.revision,
+        flags: { manual: true },
+      },
+    );
   });
 
   afterAll(async () => {
@@ -267,6 +282,10 @@ integration("M3 Router dynamic plans and materialization", () => {
     routerAgentId?: string | null;
   }): Promise<WorkflowPlanDetail> {
     const source = input?.source ?? "router";
+    const planning =
+      source === "router"
+        ? await createRouterPlanningRun()
+        : undefined;
     return request<WorkflowPlanDetail>(
       "POST",
       `/api/v1/tasks/${rootTask.id}/plans`,
@@ -277,11 +296,54 @@ integration("M3 Router dynamic plans and materialization", () => {
         settings,
         reason: "M3 materialization fixture",
         ...(source === "router"
-          ? { routerAgentId: input?.routerAgentId ?? routerAgent.id }
+          ? {
+              routerAgentId: input?.routerAgentId ?? routerAgent.id,
+              planningRunId: planning!.run.id,
+              planningRunRevision: planning!.run.revision,
+            }
           : {}),
       },
       201,
     );
+  }
+
+  async function createRouterPlanningRun(): Promise<PlanningRunDetail> {
+    const overview = await request<PlanningOverview>(
+      "GET",
+      `/api/v1/tasks/${rootTask.id}/planning`,
+    );
+    let run =
+      overview.latestRun === null ||
+      ["succeeded", "failed", "cancelled"].includes(
+        overview.latestRun.run.status,
+      )
+        ? overview.latestRun === null
+          ? await request<PlanningRunDetail>(
+              "POST",
+              `/api/v1/tasks/${rootTask.id}/planning/start`,
+              { reason: "M3 router plan fixture" },
+              201,
+            )
+          : await request<PlanningRunDetail>(
+              "POST",
+              `/api/v1/planning-runs/${overview.latestRun.run.id}/retry`,
+              {
+                expectedRevision: overview.latestRun.run.revision,
+                reason: "M3 router plan retry fixture",
+              },
+            )
+        : overview.latestRun;
+    if (run.run.status !== "review_required") {
+      run = await request<PlanningRunDetail>(
+        "POST",
+        `/api/v1/planning-runs/${run.run.id}/review-required`,
+        {
+          expectedRevision: run.run.revision,
+          reason: "M3 router plan ready for host review",
+        },
+      );
+    }
+    return run;
   }
 
   async function approveAndMaterialize(

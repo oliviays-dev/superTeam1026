@@ -4,6 +4,7 @@ import type {
   AccountDirectoryQuery,
   AddWorkspaceMemberInput,
   ActionTicketBundle,
+  AcknowledgeProjectAlertInput,
   Agent,
   AgentDetail,
   AgentEpisode,
@@ -26,6 +27,8 @@ import type {
   CreateMemoryClaimInput,
   CreateMemoryTopicInput,
   CreateMarketAssetInput,
+  CreateMcpProviderInput,
+  CreateMcpProviderVersionInput,
   CreateProjectMemberInput,
   CreateProjectRoleInput,
   CreateSupplyExceptionInput,
@@ -38,6 +41,9 @@ import type {
   DecideWorkflowApprovalInput,
   ExecutionGateRecord,
   ArchiveTaskAttachmentInput,
+  AssignProjectAlertInput,
+  BindProjectBusinessChainInput,
+  BusinessChainDefinitionInput,
   CreateProjectInput,
   CreateProjectTemplateInput,
   CreatePlatformGrantInput,
@@ -107,7 +113,12 @@ import type {
   MemoryTopic,
   PlatformRunEvent,
   Project,
+  ProjectAlertDetail,
+  ProjectBusinessChainBinding,
+  ProjectBusinessChainSettings,
   ProjectCapability,
+  ProjectFeatureFlagState,
+  ProjectProgressOverview,
   ProjectMember,
   ProjectRole,
   ProjectTemplate,
@@ -121,9 +132,12 @@ import type {
   ProjectAiPmProvisionResult,
   ProjectReportKind,
   ProjectReportSummary,
+  ProjectSourceRefreshInput,
+  ProjectSourceRefreshResult,
   PublishMemoryTruthInput,
   ReadinessResponse,
   ReviewMemoryClaimsInput,
+  ResolveProjectAlertInput,
   RetryWorkflowNodeInput,
   Run,
   RunDelta,
@@ -139,6 +153,7 @@ import type {
   TaskQueueItem,
   RevealTaskDocumentResult,
   TransferWorkflowApprovalInput,
+  UnbindProjectBusinessChainInput,
   TriggerMeetingAiInput,
   TriggerMeetingAiResult,
   UploadTaskAttachmentInput,
@@ -153,6 +168,8 @@ import type {
   UpdateProjectInput,
   UpdateProjectRoleInput,
   UpdateProjectTemplateInput,
+  UpdateProjectFeatureFlagsInput,
+  UpdateTaskParentInput,
   UpdateTemplateRoleInput,
   UpdateWorkflowTemplateInput,
   UpdateTaskInput,
@@ -161,7 +178,9 @@ import type {
   UpdateWorkspaceInput,
   UpdateWorkspaceMemberStatusInput,
   ValidateWorkflowMarkdownInput,
+  SuppressProjectAlertInput,
   WorkbenchSummary,
+  WorkbenchBrief,
   WorkbenchBriefGenerationResult,
   WorkbenchBriefSettings,
   WorkbenchDashboard,
@@ -173,14 +192,30 @@ import type {
   MarketAsset,
   MarketAssetDetail,
   MarketAssetKind,
+  MarketAssetResourceBinding,
   MarketEntitlement,
+  MarketGovernanceActionInput,
+  MarketGovernanceView,
   MarketInstallResult,
   MarketInstallation,
+  MarketAdminLockInput,
+  MarketResourceBindingInput,
+  MarketSuspendInput,
   MarketTemplate,
   MarketTemplateCopy,
   MarketTemplateCopyResult,
   GrantMarketEntitlementInput,
   PublishMarketAssetVersionInput,
+  McpProvider,
+  McpProviderDetail,
+  McpProviderHealthCheckInput,
+  McpProviderHealthCheckResult,
+  McpProviderProbeInput,
+  McpProviderProbeRequestResult,
+  McpProviderRevisionInput,
+  McpProviderToolList,
+  McpToolCallDetail,
+  RuntimeToolRequestDetail,
   SetMarketAssetStatusInput,
   SetMarketAssetVersionStatusInput,
   CreateWorkbenchInput,
@@ -1002,6 +1037,107 @@ export async function listProjectTemplateHistory(
   ).items;
 }
 
+export function getProjectBusinessChainSettings(
+  projectId: string,
+): Promise<ProjectBusinessChainSettings> {
+  return request(`/projects/${projectId}/business-chain`);
+}
+
+export function bindProjectBusinessChain(
+  projectId: string,
+  input: BindProjectBusinessChainInput,
+): Promise<ProjectBusinessChainBinding> {
+  return request(`/projects/${projectId}/business-chain/bind`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function unbindProjectBusinessChain(
+  projectId: string,
+  input: UnbindProjectBusinessChainInput,
+): Promise<ProjectBusinessChainSettings> {
+  return request(`/projects/${projectId}/business-chain/unbind`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function updateProjectFeatureFlags(
+  projectId: string,
+  input: UpdateProjectFeatureFlagsInput,
+): Promise<ProjectFeatureFlagState[]> {
+  return request<{ items: ProjectFeatureFlagState[] }>(
+    `/projects/${projectId}/business-chain/flags`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    },
+  ).then((response) => response.items);
+}
+
+export function refreshProjectSources(
+  projectId: string,
+  input: ProjectSourceRefreshInput = {},
+): Promise<ProjectSourceRefreshResult> {
+  return request(`/projects/${projectId}/business-chain/refresh`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getProjectProgressOverview(
+  projectId: string,
+): Promise<ProjectProgressOverview> {
+  return request(`/projects/${projectId}/overview`);
+}
+
+export function getProjectAlertDetail(
+  alertId: string,
+): Promise<ProjectAlertDetail> {
+  return request(`/project-alerts/${alertId}`);
+}
+
+export function acknowledgeProjectAlert(
+  alertId: string,
+  input: AcknowledgeProjectAlertInput,
+): Promise<ProjectAlertDetail> {
+  return request(`/project-alerts/${alertId}/acknowledge`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function suppressProjectAlert(
+  alertId: string,
+  input: SuppressProjectAlertInput,
+): Promise<ProjectAlertDetail> {
+  return request(`/project-alerts/${alertId}/suppress`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function resolveProjectAlert(
+  alertId: string,
+  input: ResolveProjectAlertInput,
+): Promise<ProjectAlertDetail> {
+  return request(`/project-alerts/${alertId}/resolve`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function assignProjectAlert(
+  alertId: string,
+  input: AssignProjectAlertInput,
+): Promise<ProjectAlertDetail> {
+  return request(`/project-alerts/${alertId}/assign`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export async function listTemplateRoles(
   includeArchived = false,
 ): Promise<TemplateRole[]> {
@@ -1336,6 +1472,16 @@ export function updateTask(
   });
 }
 
+export function updateTaskParent(
+  taskId: string,
+  input: UpdateTaskParentInput,
+): Promise<TaskDetail> {
+  return request(`/tasks/${taskId}/parent`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
+  });
+}
+
 export function getTaskDetail(taskId: string): Promise<TaskDetail> {
   return request(`/tasks/${taskId}/detail`);
 }
@@ -1380,6 +1526,73 @@ export function getRuntimeAccess(
   runtimeId: string,
 ): Promise<RuntimeAccessProjection> {
   return request(`/runtimes/${runtimeId}/access`);
+}
+
+export async function listMcpProviders(): Promise<McpProvider[]> {
+  return (
+    await request<{ items: McpProvider[] }>("/mcp-providers")
+  ).items;
+}
+
+export function getMcpProvider(
+  providerId: string,
+): Promise<McpProviderDetail> {
+  return request(`/mcp-providers/${providerId}`);
+}
+
+export function createMcpProvider(
+  input: CreateMcpProviderInput,
+): Promise<McpProviderDetail> {
+  return request("/mcp-providers", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function createMcpProviderVersion(
+  providerId: string,
+  input: CreateMcpProviderVersionInput,
+): Promise<McpProviderDetail> {
+  return request(`/mcp-providers/${providerId}/versions`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function transitionMcpProvider(
+  providerId: string,
+  action: "activate" | "disable" | "archive",
+  input: McpProviderRevisionInput,
+): Promise<McpProviderDetail> {
+  return request(`/mcp-providers/${providerId}/${action}`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function probeMcpProvider(
+  providerId: string,
+  input: McpProviderProbeInput,
+): Promise<McpProviderProbeRequestResult> {
+  return request(`/mcp-providers/${providerId}/probes`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function getMcpProviderTools(
+  providerId: string,
+): Promise<McpProviderToolList> {
+  return request(`/mcp-providers/${providerId}/tools`);
+}
+
+export function checkAllMcpProviders(
+  input: McpProviderHealthCheckInput,
+): Promise<McpProviderHealthCheckResult> {
+  return request("/admin/mcp-providers/health-check", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 function economicsQuery(query: WorkspaceRuntimeEconomicsQuery): string {
@@ -1795,6 +2008,26 @@ export function getRunActionTicket(runId: string): Promise<ActionTicketBundle> {
   return request(`/runs/${runId}/action-ticket`);
 }
 
+export async function listRunMcpToolCalls(
+  runId: string,
+): Promise<McpToolCallDetail[]> {
+  return (
+    await request<{ items: McpToolCallDetail[] }>(
+      `/runs/${runId}/mcp-tool-calls`,
+    )
+  ).items;
+}
+
+export async function listRunRuntimeToolRequests(
+  runId: string,
+): Promise<RuntimeToolRequestDetail[]> {
+  return (
+    await request<{ items: RuntimeToolRequestDetail[] }>(
+      `/runs/${runId}/runtime-tool-requests`,
+    )
+  ).items;
+}
+
 export function decideExecutionGate(
   gateId: string,
   decision: "approve" | "reject",
@@ -2110,6 +2343,101 @@ export function setMarketAssetStatus(
   });
 }
 
+export function getMarketGovernance(
+  assetId: string,
+): Promise<MarketGovernanceView> {
+  return request(`/market/assets/${assetId}/governance`);
+}
+
+async function marketGovernanceAction(
+  assetId: string,
+  action:
+    | "publish"
+    | "delist"
+    | "relist"
+    | "resume"
+    | "archive"
+    | "unlock",
+  input: MarketGovernanceActionInput,
+): Promise<MarketAsset> {
+  return request(`/market/assets/${assetId}/governance/${action}`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function publishMarketAsset(
+  assetId: string,
+  input: MarketGovernanceActionInput,
+): Promise<MarketAsset> {
+  return marketGovernanceAction(assetId, "publish", input);
+}
+
+export function delistMarketAsset(
+  assetId: string,
+  input: MarketGovernanceActionInput,
+): Promise<MarketAsset> {
+  return marketGovernanceAction(assetId, "delist", input);
+}
+
+export function relistMarketAsset(
+  assetId: string,
+  input: MarketGovernanceActionInput,
+): Promise<MarketAsset> {
+  return marketGovernanceAction(assetId, "relist", input);
+}
+
+export function suspendMarketAsset(
+  assetId: string,
+  input: MarketSuspendInput,
+): Promise<MarketAsset> {
+  return request(`/market/assets/${assetId}/governance/suspend`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function resumeMarketAsset(
+  assetId: string,
+  input: MarketGovernanceActionInput,
+): Promise<MarketAsset> {
+  return marketGovernanceAction(assetId, "resume", input);
+}
+
+export function archiveMarketAsset(
+  assetId: string,
+  input: MarketGovernanceActionInput,
+): Promise<MarketAsset> {
+  return marketGovernanceAction(assetId, "archive", input);
+}
+
+export function lockMarketAsset(
+  assetId: string,
+  input: MarketAdminLockInput,
+): Promise<MarketAsset> {
+  return request(`/market/assets/${assetId}/governance/lock`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function unlockMarketAsset(
+  assetId: string,
+  input: MarketGovernanceActionInput,
+): Promise<MarketAsset> {
+  return marketGovernanceAction(assetId, "unlock", input);
+}
+
+export function bindMarketAssetResource(
+  assetId: string,
+  input: MarketResourceBindingInput,
+): Promise<MarketAssetResourceBinding> {
+  return request(`/market/assets/${assetId}/bindings`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
 export function setMarketAssetVersionStatus(
   assetId: string,
   version: number,
@@ -2228,6 +2556,61 @@ export function updateWorkbenchBriefSettings(
     method: "PATCH",
     body: JSON.stringify(input),
   });
+}
+
+export async function streamWorkbenchBrief(
+  onBrief: (brief: WorkbenchBrief) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  const headers = new Headers({ accept: "text/event-stream" });
+  const token = authToken();
+  if (token !== undefined) headers.set("authorization", `Bearer ${token}`);
+  const response = await fetch(`${API_BASE}/workbench/brief/stream`, {
+    headers,
+    signal,
+  });
+  if (!response.ok) {
+    if (response.status === 401) clearAuthToken();
+    throw new ApiRequestError(
+      `Workbench brief stream failed: ${response.status}`,
+      "request_failed",
+      response.status,
+    );
+  }
+  if (response.body === null) return;
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const dispatch = (frame: string) => {
+    if (frame.trim() === "") return;
+    let eventName = "message";
+    const data: string[] = [];
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("event:")) {
+        eventName = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        data.push(line.slice("data:".length).trimStart());
+      }
+    }
+    if (eventName === "workbench.brief" && data.length > 0) {
+      onBrief(JSON.parse(data.join("\n")) as WorkbenchBrief);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      dispatch(buffer.slice(0, boundary));
+      buffer = buffer.slice(boundary + 2);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+  buffer += decoder.decode();
+  dispatch(buffer);
 }
 
 export async function listWorkbenchFollows(): Promise<WorkbenchFollow[]> {
@@ -2391,6 +2774,16 @@ export async function listWorkflows(
   ).items;
 }
 
+export async function listPlatformWorkflowTemplates(): Promise<
+  WorkflowDefinition[]
+> {
+  return (
+    await request<ListResponse<WorkflowDefinition>>(
+      "/workflows/platform-templates",
+    )
+  ).items;
+}
+
 export function validateWorkflowMarkdown(
   input: ValidateWorkflowMarkdownInput,
 ): Promise<WorkflowValidationResult> {
@@ -2413,6 +2806,16 @@ export function createWorkflow(
   input: CreateWorkflowInput,
 ): Promise<WorkflowDefinition> {
   return request("/workflows", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export function configureWorkflowBusinessChain(
+  workflowId: string,
+  input: BusinessChainDefinitionInput,
+): Promise<WorkflowDefinition> {
+  return request(`/workflows/${workflowId}/business-chain`, {
     method: "POST",
     body: JSON.stringify(input),
   });

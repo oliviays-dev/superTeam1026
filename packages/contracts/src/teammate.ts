@@ -43,8 +43,8 @@ export type TeammateDefinition = z.infer<typeof teammateDefinitionSchema>;
 
 export const teammateTemplateSchema = z.object({
   id: z.string().uuid(),
-  projectId: z.string().uuid(),
-  workspaceId: idSchema,
+  projectId: z.string().uuid().nullable(),
+  workspaceId: idSchema.nullable(),
   scope: teammateTemplateScopeSchema,
   ownerPrincipalId: idSchema.nullable(),
   status: teammateTemplateStatusSchema,
@@ -60,7 +60,7 @@ export type TeammateTemplate = z.infer<typeof teammateTemplateSchema>;
 export const teammateTemplateVersionSchema = z.object({
   id: z.string().uuid(),
   templateId: z.string().uuid(),
-  projectId: z.string().uuid(),
+  projectId: z.string().uuid().nullable(),
   version: z.number().int().positive(),
   definition: teammateDefinitionSchema,
   contentDigest: z.string().length(64),

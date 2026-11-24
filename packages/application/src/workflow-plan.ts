@@ -135,10 +135,55 @@ export class WorkflowPlanApplicationService {
       );
     }
     if (parsed.source === "router") {
-      await this.assertRouterGate(task.projectId);
+      if (parsed.routerAgentId !== undefined) {
+        await this.assertRouterGate(task.projectId);
+      }
+    }
+    if (parsed.source === "router" && parsed.planningRunId === undefined) {
+      throw new WorkflowPlanApplicationError(
+        "planning_run_required",
+        "Router plans require a Planning Run",
+        400,
+      );
+    }
+    if (parsed.planningRunId !== undefined) {
+      const planning = await this.repositories.planning.getRunDetail(
+        parsed.planningRunId,
+      );
+      if (
+        planning.run.projectId !== task.projectId ||
+        planning.run.rootTaskId !== task.id
+      ) {
+        throw new WorkflowPlanApplicationError(
+          "planning_run_scope_mismatch",
+          "Planning Run scope does not match the Root Task",
+          409,
+        );
+      }
+      if (planning.run.status !== "review_required") {
+        throw new WorkflowPlanApplicationError(
+          "planning_run_not_ready",
+          "Planning Run must be review_required before binding a plan",
+          409,
+        );
+      }
+      if (
+        parsed.planningRunRevision !== undefined &&
+        planning.run.revision !== parsed.planningRunRevision
+      ) {
+        throw new WorkflowPlanApplicationError(
+          "planning_run_revision_conflict",
+          "Planning Run revision changed",
+          409,
+          {
+            expectedRevision: parsed.planningRunRevision,
+            revision: planning.run.revision,
+          },
+        );
+      }
     }
     const routerAgent =
-      parsed.source === "router"
+      parsed.source === "router" && parsed.routerAgentId !== undefined
         ? await this.resolveRouterAgent(
             task.projectId,
             parsed.routerAgentId,
@@ -164,6 +209,8 @@ export class WorkflowPlanApplicationService {
       reason: parsed.reason,
       actorId: input.actorId,
       routerAgent: routerAgent === null ? null : routerSnapshot(routerAgent),
+      planningRunId: parsed.planningRunId ?? null,
+      planningRunRevision: parsed.planningRunRevision ?? null,
     });
   }
 
@@ -185,7 +232,7 @@ export class WorkflowPlanApplicationService {
       await this.repositories.workflowPlans.getPlanDetail(input.planId);
     const plan = current.plan;
     const routerAgent =
-      plan.source === "router"
+      plan.source === "router" && plan.routerAgentId !== null
         ? await this.resolveRouterAgent(
             plan.projectId,
             parsed.routerAgentId ?? plan.routerAgentId ?? undefined,
@@ -259,10 +306,12 @@ export class WorkflowPlanApplicationService {
       graph: current.version.graph,
       settings: current.version.settings,
     });
-    await this.assertRouterGate(
-      current.plan.projectId,
-      parsed.expectedGateEpoch,
-    );
+    if (!isPlanningGeneratedPlan(current.plan)) {
+      await this.assertRouterGate(
+        current.plan.projectId,
+        parsed.expectedGateEpoch,
+      );
+    }
     return this.repositories.workflowPlans.approvePlan({
       planId: current.plan.id,
       expectedRevision: parsed.expectedRevision,
@@ -284,10 +333,12 @@ export class WorkflowPlanApplicationService {
       graph: current.version.graph,
       settings: current.version.settings,
     });
-    await this.assertRouterGate(
-      current.plan.projectId,
-      parsed.expectedGateEpoch,
-    );
+    if (!isPlanningGeneratedPlan(current.plan)) {
+      await this.assertRouterGate(
+        current.plan.projectId,
+        parsed.expectedGateEpoch,
+      );
+    }
     try {
       return await this.repositories.workflowPlans.materializePlan({
         planId: current.plan.id,
@@ -315,10 +366,12 @@ export class WorkflowPlanApplicationService {
     const parsed = finalizeWorkflowPlanInputSchema.parse(input.value);
     const current =
       await this.repositories.workflowPlans.getPlanDetail(input.planId);
-    await this.assertRouterGate(
-      current.plan.projectId,
-      parsed.expectedGateEpoch,
-    );
+    if (!isPlanningGeneratedPlan(current.plan)) {
+      await this.assertRouterGate(
+        current.plan.projectId,
+        parsed.expectedGateEpoch,
+      );
+    }
     return this.repositories.workflowPlans.finalizePlan({
       planId: current.plan.id,
       expectedRevision: parsed.expectedRevision,
@@ -335,10 +388,12 @@ export class WorkflowPlanApplicationService {
     const parsed = resumeWorkflowPlanInputSchema.parse(input.value);
     const current =
       await this.repositories.workflowPlans.getPlanDetail(input.planId);
-    await this.assertRouterGate(
-      current.plan.projectId,
-      parsed.expectedGateEpoch,
-    );
+    if (!isPlanningGeneratedPlan(current.plan)) {
+      await this.assertRouterGate(
+        current.plan.projectId,
+        parsed.expectedGateEpoch,
+      );
+    }
     return this.repositories.workflowPlans.resumePlan({
       planId: current.plan.id,
       expectedRevision: parsed.expectedRevision,
@@ -535,8 +590,8 @@ export class WorkflowPlanApplicationService {
     );
     if (
       detail.plan.status !== "active" ||
-      !gate.enabled ||
-      detail.plan.gateEpoch !== gate.epoch
+      (!isPlanningGeneratedPlan(detail.plan) &&
+        (!gate.enabled || detail.plan.gateEpoch !== gate.epoch))
     ) {
       await this.repositories.workflowPlans.deferDispatchMessage({
         messageId: message.message_id,
@@ -669,5 +724,17 @@ function isExpectedPlanConflict(error: unknown): boolean {
       "workflow_plan_gate_disabled",
       "workflow_plan_gate_epoch_conflict",
     ].includes(error.code)
+  );
+}
+
+function isPlanningGeneratedPlan(plan: {
+  readonly source: string;
+  readonly planningRunId: string | null;
+  readonly routerAgentId: string | null;
+}): boolean {
+  return (
+    plan.source === "router" &&
+    plan.planningRunId !== null &&
+    plan.routerAgentId === null
   );
 }

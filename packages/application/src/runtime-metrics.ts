@@ -1,4 +1,8 @@
-import type { OperationsSnapshot } from "@pluginmax/contracts";
+import type {
+  OperationsSnapshot,
+  ProjectSourceMcpReadSummary,
+  RuntimeToolRequestSummary,
+} from "@pluginmax/contracts";
 
 function metric(
   name: string,
@@ -28,6 +32,8 @@ function metric(
 
 export function renderRuntimePrometheusMetrics(
   snapshot: OperationsSnapshot,
+  runtimeToolRequests?: RuntimeToolRequestSummary | null,
+  projectSourceMcpReads?: ProjectSourceMcpReadSummary | null,
 ): string {
   const { metrics, maintenanceSchedules, maintenanceTrend, runtimeEffects } =
     snapshot;
@@ -225,6 +231,149 @@ export function renderRuntimePrometheusMetrics(
         return { labels: { operation: operation!, status: status! }, value };
       }),
     ),
+    ...(runtimeToolRequests === undefined || runtimeToolRequests === null
+      ? []
+      : [
+          metric(
+            "pluginmax_runtime_tool_requests",
+            "Agent Runtime MCP Tool Requests by terminal state.",
+            "gauge",
+            [
+              {
+                labels: { status: "running" },
+                value: runtimeToolRequests.running,
+              },
+              {
+                labels: { status: "succeeded" },
+                value: runtimeToolRequests.succeeded,
+              },
+              {
+                labels: { status: "failed" },
+                value: runtimeToolRequests.failed,
+              },
+              {
+                labels: { status: "timed_out" },
+                value: runtimeToolRequests.timedOut,
+              },
+              {
+                labels: { status: "cancelled" },
+                value: runtimeToolRequests.cancelled,
+              },
+              {
+                labels: { status: "interrupted" },
+                value: runtimeToolRequests.interrupted,
+              },
+            ],
+          ),
+          metric(
+            "pluginmax_runtime_tool_requests_stale",
+            "Runtime Tool Requests with an expired or terminated Run lease.",
+            "gauge",
+            [{ value: runtimeToolRequests.staleRunning }],
+          ),
+          metric(
+            "pluginmax_runtime_tool_request_oldest_running_seconds",
+            "Age of the oldest running Runtime Tool Request.",
+            "gauge",
+            [{ value: runtimeToolRequests.oldestRunningAgeSeconds }],
+          ),
+          metric(
+            "pluginmax_runtime_tool_request_errors",
+            "Runtime Tool Requests by error category.",
+            "gauge",
+            runtimeToolRequests.errorCategories.map((entry) => ({
+              labels: { category: entry.category },
+              value: entry.count,
+            })),
+          ),
+          metric(
+            "pluginmax_runtime_tool_request_alert_level",
+            "Runtime Tool Request alert level: 0 ok, 1 warning, 2 critical.",
+            "gauge",
+            [
+              {
+                value:
+                  runtimeToolRequests.alertLevel === "critical"
+                    ? 2
+                    : runtimeToolRequests.alertLevel === "warning"
+                      ? 1
+                      : 0,
+              },
+            ],
+          ),
+        ]),
+    ...(projectSourceMcpReads === undefined ||
+    projectSourceMcpReads === null
+      ? []
+      : [
+          metric(
+            "pluginmax_project_source_mcp_reads",
+            "MCP project source reads by terminal state.",
+            "gauge",
+            [
+              {
+                labels: { status: "running" },
+                value: projectSourceMcpReads.running,
+              },
+              {
+                labels: { status: "succeeded" },
+                value: projectSourceMcpReads.succeeded,
+              },
+              {
+                labels: { status: "failed" },
+                value: projectSourceMcpReads.failed,
+              },
+              {
+                labels: { status: "timed_out" },
+                value: projectSourceMcpReads.timedOut,
+              },
+              {
+                labels: { status: "cancelled" },
+                value: projectSourceMcpReads.cancelled,
+              },
+              {
+                labels: { status: "interrupted" },
+                value: projectSourceMcpReads.interrupted,
+              },
+            ],
+          ),
+          metric(
+            "pluginmax_project_source_mcp_stale_reads",
+            "MCP project source reads with an expired Worker lease.",
+            "gauge",
+            [{ value: projectSourceMcpReads.staleRunning }],
+          ),
+          metric(
+            "pluginmax_project_source_mcp_oldest_running_seconds",
+            "Age of the oldest running MCP project source read.",
+            "gauge",
+            [{ value: projectSourceMcpReads.oldestRunningAgeSeconds }],
+          ),
+          metric(
+            "pluginmax_project_source_mcp_errors",
+            "MCP project source read failures by error category.",
+            "gauge",
+            projectSourceMcpReads.errorCategories.map((entry) => ({
+              labels: { category: entry.category },
+              value: entry.count,
+            })),
+          ),
+          metric(
+            "pluginmax_project_source_mcp_alert_level",
+            "MCP project source read alert level: 0 ok, 1 warning, 2 critical.",
+            "gauge",
+            [
+              {
+                value:
+                  projectSourceMcpReads.alertLevel === "critical"
+                    ? 2
+                    : projectSourceMcpReads.alertLevel === "warning"
+                      ? 1
+                      : 0,
+              },
+            ],
+          ),
+        ]),
   ];
   return output.join("");
 }

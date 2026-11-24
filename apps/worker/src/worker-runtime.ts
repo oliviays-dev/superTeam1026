@@ -7,6 +7,7 @@ import {
 } from "@pluginmax/application";
 import type { ClaimedJob, PlatformRepositories } from "@pluginmax/database";
 import type { WorkerStatus } from "@pluginmax/contracts";
+import type { McpToolCallService } from "./mcp-tool-call-service.js";
 
 export class WorkerShutdownError extends Error {
   constructor() {
@@ -30,6 +31,7 @@ export interface WorkerRuntimeOptions {
   readonly sweepIntervalMs: number;
   readonly maintenanceIntervalMs?: number;
   readonly runtimeProbePollIntervalMs?: number;
+  readonly mcpProviderProbePollIntervalMs?: number;
 }
 
 export interface WorkerRuntimeDependencies {
@@ -42,6 +44,10 @@ export interface WorkerRuntimeDependencies {
   readonly runtimeProbe?: {
     runOnce(): Promise<number>;
   };
+  readonly mcpProviderProbe?: {
+    runOnce(): Promise<number>;
+  };
+  readonly mcpToolCall?: McpToolCallService;
   readonly log?: (event: string, data?: Record<string, unknown>) => void;
 }
 
@@ -109,6 +115,9 @@ export class WorkerRuntime {
     if (this.dependencies.runtimeProbe !== undefined) {
       this.loopPromises.push(this.runtimeProbeLoop());
     }
+    if (this.dependencies.mcpProviderProbe !== undefined) {
+      this.loopPromises.push(this.mcpProviderProbeLoop());
+    }
     await Promise.all(this.loopPromises);
     if (this.sweepTimer !== null) clearInterval(this.sweepTimer);
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
@@ -126,6 +135,23 @@ export class WorkerRuntime {
         }
       } catch (error) {
         this.log("runtime_probe.loop_failed", {
+          error: this.message(error),
+        });
+        await sleep(pollInterval);
+      }
+    }
+  }
+
+  private async mcpProviderProbeLoop(): Promise<void> {
+    const pollInterval = this.options.mcpProviderProbePollIntervalMs ?? 500;
+    while (!this.stopping) {
+      try {
+        const count = await this.dependencies.mcpProviderProbe!.runOnce();
+        if (count === 0) {
+          await sleep(pollInterval);
+        }
+      } catch (error) {
+        this.log("mcp_provider_probe.loop_failed", {
           error: this.message(error),
         });
         await sleep(pollInterval);

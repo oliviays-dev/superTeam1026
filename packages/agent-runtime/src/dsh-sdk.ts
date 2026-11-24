@@ -165,6 +165,7 @@ export function mapDshNotification(
 
 export class DshSdkAdapter implements AgentRuntimeAdapter {
   readonly id = "dsh-sdk";
+  readonly mcpToolRequestProtocol = "none" as const;
 
   constructor(private readonly options: DshSdkAdapterOptions = {}) {}
 

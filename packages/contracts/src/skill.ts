@@ -18,9 +18,7 @@ export const skillDefinitionStatusSchema = z.enum([
   "disabled",
   "archived",
 ]);
-export type SkillDefinitionStatus = z.infer<
-  typeof skillDefinitionStatusSchema
->;
+export type SkillDefinitionStatus = z.infer<typeof skillDefinitionStatusSchema>;
 
 export const skillVersionStatusSchema = z.enum([
   "published",
@@ -36,6 +34,22 @@ export const skillSourceSchema = z.enum([
 ]);
 export type SkillSource = z.infer<typeof skillSourceSchema>;
 
+export const skillBindingModeSchema = z.enum([
+  "required",
+  "default",
+  "additive",
+  "primary",
+]);
+export type SkillBindingMode = z.infer<typeof skillBindingModeSchema>;
+
+export const skillBindingSceneSchema = z.enum([
+  "task-planning",
+  "task-execution",
+  "meeting",
+  "project-report",
+]);
+export type SkillBindingScene = z.infer<typeof skillBindingSceneSchema>;
+
 export const skillVersionContentSchema = z.object({
   trustLevel: skillTrustLevelSchema,
   instructions: z.string().trim().min(1).max(200_000),
@@ -46,14 +60,8 @@ export const skillVersionContentSchema = z.object({
       (value) => canonicalSkillJson(value).length <= 200_000,
       "Skill manifest is too large",
     ),
-  permissions: z
-    .array(z.string().trim().min(1).max(120))
-    .max(50)
-    .default([]),
-  triggers: z
-    .array(z.string().trim().min(1).max(500))
-    .max(50)
-    .default([]),
+  permissions: z.array(z.string().trim().min(1).max(120)).max(50).default([]),
+  triggers: z.array(z.string().trim().min(1).max(500)).max(50).default([]),
   status: skillVersionStatusSchema.default("published"),
   protected: z.boolean().default(false),
 });
@@ -83,6 +91,7 @@ export const skillVersionSchema = z.object({
   publisherPrincipalId: idSchema,
   trustLevel: skillTrustLevelSchema,
   instructions: z.string(),
+  instructionsHash: digestSchema.optional(),
   manifest: z.record(z.string(), z.unknown()),
   permissions: z.array(z.string()),
   triggers: z.array(z.string()),
@@ -147,6 +156,8 @@ export const teammateTemplateSkillBindingSchema = z.object({
   installationId: z.string().uuid(),
   required: z.boolean(),
   enabled: z.boolean(),
+  mode: skillBindingModeSchema.default("default"),
+  scenes: z.array(skillBindingSceneSchema).default(["task-execution"]),
   boundByPrincipalId: idSchema,
   createdAt: isoTimeSchema,
   updatedAt: isoTimeSchema,
@@ -160,6 +171,8 @@ export const bindTemplateSkillInputSchema = z.object({
   versionId: z.string().uuid(),
   required: z.boolean().default(false),
   enabled: z.boolean().default(true),
+  mode: skillBindingModeSchema.optional(),
+  scenes: z.array(skillBindingSceneSchema).min(1).max(8).optional(),
 });
 export type BindTemplateSkillInput = z.input<
   typeof bindTemplateSkillInputSchema
@@ -172,6 +185,8 @@ export const teammateInstanceSkillExtensionSchema = z.object({
   skillVersionId: z.string().uuid(),
   installationId: z.string().uuid(),
   enabled: z.boolean(),
+  mode: z.literal("additive"),
+  scenes: z.array(skillBindingSceneSchema),
   addedByPrincipalId: idSchema,
   createdAt: isoTimeSchema,
   updatedAt: isoTimeSchema,
@@ -184,6 +199,7 @@ export const addInstanceSkillExtensionInputSchema = z.object({
   skillId: z.string().uuid(),
   versionId: z.string().uuid(),
   enabled: z.boolean().default(true),
+  scenes: z.array(skillBindingSceneSchema).min(1).max(8).optional(),
 });
 export type AddInstanceSkillExtensionInput = z.input<
   typeof addInstanceSkillExtensionInputSchema
@@ -229,12 +245,15 @@ export const effectiveSkillSchema = z.object({
   publisherPrincipalId: idSchema,
   trustLevel: skillTrustLevelSchema,
   instructions: z.string(),
+  instructionsHash: digestSchema.optional(),
   manifest: z.record(z.string(), z.unknown()),
   permissions: z.array(z.string()),
   triggers: z.array(z.string()),
   status: skillVersionStatusSchema,
   protected: z.boolean(),
   source: skillSourceSchema,
+  mode: skillBindingModeSchema.default("default"),
+  scenes: z.array(skillBindingSceneSchema).default(["task-execution"]),
   grantsAuthorization: z.literal(false),
 });
 export type EffectiveSkill = z.infer<typeof effectiveSkillSchema>;
@@ -296,10 +315,7 @@ export function canonicalSkillJson(value: unknown): string {
   }
   return `{${Object.entries(value as Record<string, unknown>)
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(
-      ([key, item]) =>
-        `${JSON.stringify(key)}:${canonicalSkillJson(item)}`,
-    )
+    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalSkillJson(item)}`)
     .join(",")}}`;
 }
 

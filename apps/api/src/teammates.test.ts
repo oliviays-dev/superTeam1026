@@ -195,6 +195,12 @@ integration("AI Teammate API", () => {
       createdTemplate.statusCode,
       JSON.stringify(createdTemplate.body),
     ).toBe(201);
+    expect(createdTemplate.body).toMatchObject({
+      projectId: null,
+      workspaceId: null,
+      scope: "personal",
+      ownerPrincipalId: "local-admin",
+    });
     template = createdTemplate.body;
     const versionConflict = await request(
       "PATCH",
@@ -249,15 +255,56 @@ integration("AI Teammate API", () => {
       status: "active",
     });
 
-    const crossWorkspace = await request("POST", "/api/v1/teammates", {
+    const crossAgent = await request<{ id: string }>("POST", "/api/v1/agents", {
+      name: `Cross Teammate execution ${suffix}`,
+      description: "Cross-project personal template execution",
+      runtimeKind: "fake",
+    });
+    expect(crossAgent.statusCode).toBe(201);
+    const crossWriterRole = await request<ProjectRole>(
+      "POST",
+      `/api/v1/projects/${otherProject.id}/roles`,
+      {
+        code: `CROSS_WRITER_${suffix.toUpperCase()}`,
+        name: `Cross writer ${suffix}`,
+        category: "execution",
+        permissions: ["read", "write"],
+      },
+    );
+    expect(
+      crossWriterRole.statusCode,
+      JSON.stringify(crossWriterRole.body),
+    ).toBe(201);
+    const crossAgentMember = await request<ProjectMember>(
+      "POST",
+      `/api/v1/projects/${otherProject.id}/members`,
+      {
+        kind: "agent",
+        agentId: crossAgent.body.id,
+        responsibility: "Cross-project AI Teammate execution",
+        roleIds: [crossWriterRole.body.id],
+      },
+    );
+    expect(
+      crossAgentMember.statusCode,
+      JSON.stringify(crossAgentMember.body),
+    ).toBe(201);
+    const crossWorkspace = await request<Teammate>(
+      "POST",
+      "/api/v1/teammates",
+      {
+        projectId: otherProject.id,
+        templateId: template.id,
+        agentId: crossAgent.body.id,
+        name: `Cross ${suffix}`,
+      },
+    );
+    expect(crossWorkspace.statusCode, JSON.stringify(crossWorkspace.body)).toBe(
+      201,
+    );
+    expect(crossWorkspace.body).toMatchObject({
       projectId: otherProject.id,
       templateId: template.id,
-      agentId,
-      name: `Cross ${suffix}`,
-    });
-    expect(crossWorkspace.statusCode).toBe(403);
-    expect(crossWorkspace.body).toMatchObject({
-      code: "teammate_template_cross_project",
     });
     const outsiderRead = await request(
       "GET",

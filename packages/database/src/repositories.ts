@@ -66,6 +66,8 @@ import { TaskCollaborationRepository } from "./task-collaboration-repository.js"
 import { WorkflowIdempotencyRepository } from "./workflow-idempotency-repository.js";
 import { WorkflowRuntimeRepository } from "./workflow-runtime-repository.js";
 import { WorkflowPlanRepository } from "./workflow-plan-repository.js";
+import { PlanningRepository } from "./planning-repository.js";
+import { ProjectBusinessChainRepository } from "./project-business-chain-repository.js";
 import { RuntimeReliabilityRepository } from "./runtime-reliability-repository.js";
 import { RuntimeEffectRepository } from "./runtime-effect-repository.js";
 import {
@@ -112,6 +114,13 @@ import { ProjectAiPmRepository } from "./project-ai-pm-repository.js";
 import { DataFabricRepository } from "./data-fabric-repository.js";
 import { MarketRepository } from "./market-repository.js";
 import { WorkbenchConfigurationRepository } from "./workbench-configuration-repository.js";
+import { McpProviderRepository } from "./mcp-provider-repository.js";
+import { McpToolCallRepository } from "./mcp-tool-call-repository.js";
+import {
+  closeRuntimeToolRequestsForRunWithClient,
+  RuntimeToolRequestRepository,
+} from "./runtime-tool-request-repository.js";
+import { ProjectSourceMcpRepository } from "./project-source-mcp-repository.js";
 
 export class ProjectRepository {
   private readonly authorization: AuthorizationRepository;
@@ -751,16 +760,18 @@ export class TaskRepository {
     await this.database.transaction(async (client) => {
       await client.query(
         `INSERT INTO tasks (
-           id, project_id, title, description, acceptance, status,
+           id, project_id, parent_task_id, title, description, acceptance, status,
            agent_id, role_id, priority, auto_submit, auto_accept,
            auto_redispatch_on_return, created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, $5::jsonb, 'queued', $6, $7, $8, $9, $10, $11,
+           $1, $2, $3, $4, $5, $6::jsonb, 'queued', $7, $8, $9, $10, $11,
+           $12,
            NOW(), NOW()
          )`,
         [
           taskId,
           input.projectId,
+          input.parentTaskId ?? null,
           input.title,
           input.description,
           JSON.stringify(input.acceptance),
@@ -782,6 +793,26 @@ export class TaskRepository {
     const task = await this.get(taskId);
     if (task === undefined) throw new Error("created task is missing");
     return task;
+  }
+
+  async setParent(input: {
+    readonly id: string;
+    readonly parentTaskId: string | null;
+    readonly expectedRevision: number;
+  }): Promise<Task | "revision_conflict" | undefined> {
+    const result = await this.database.query<{ id: string }>(
+      `UPDATE tasks
+       SET parent_task_id = $2, revision = revision + 1, updated_at = NOW()
+       WHERE id = $1
+         AND revision = $3
+       RETURNING id`,
+      [input.id, input.parentTaskId, input.expectedRevision],
+    );
+    if (result.rows[0] !== undefined) {
+      return this.get(input.id);
+    }
+    const existing = await this.get(input.id);
+    return existing === undefined ? undefined : "revision_conflict";
   }
 
   async update(id: string, input: UpdateTaskInput): Promise<Task | undefined> {
@@ -1195,22 +1226,55 @@ export class RunRepository {
     output: string | null,
     error: string | null,
   ): Promise<void> {
-    await this.database.query(
-      `UPDATE runs
-       SET status = $2, output = $3, error = $4, ended_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status IN ('queued', 'running')`,
-      [id, status, output, error],
-    );
+    await this.database.transaction(async (client) => {
+      await client.query(
+        `UPDATE runs
+         SET status = $2, output = $3, error = $4, ended_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1 AND status IN ('queued', 'running')`,
+        [id, status, output, error],
+      );
+      if (status !== "completed") {
+        await closeRuntimeToolRequestsForRunWithClient(client, {
+          runId: id,
+          status: status === "timeout" ? "timed_out" : status,
+          errorCategory:
+            status === "timeout"
+              ? "timeout"
+              : status === "cancelled"
+                ? "cancelled"
+                : "unknown",
+          errorCode:
+            status === "timeout"
+              ? "runtime_tool_run_timed_out"
+              : status === "cancelled"
+                ? "runtime_tool_run_cancelled"
+                : "runtime_tool_run_terminated",
+          errorMessage: `The Runtime Tool Request stopped with its Run (${status})`,
+        });
+      }
+    });
   }
 
   async timeout(id: string, error: string): Promise<boolean> {
-    const result = await this.database.query(
-      `UPDATE runs
-       SET status = 'timeout', error = $2, ended_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND status IN ('queued', 'running')`,
-      [id, error.slice(0, 4_000)],
-    );
-    return (result.rowCount ?? 0) > 0;
+    return this.database.transaction(async (client) => {
+      const result = await client.query(
+        `UPDATE runs
+         SET status = 'timeout', error = $2, ended_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1 AND status IN ('queued', 'running')`,
+        [id, error.slice(0, 4_000)],
+      );
+      if ((result.rowCount ?? 0) === 0) return false;
+      await closeRuntimeToolRequestsForRunWithClient(client, {
+        runId: id,
+        status: "timed_out",
+        errorCategory: "timeout",
+        errorCode: "runtime_tool_run_timed_out",
+        errorMessage: "The Runtime Tool Request timed out with its Run",
+      });
+      return true;
+    });
   }
 
   async appendEvent(
@@ -1337,6 +1401,13 @@ export class RunRepository {
          WHERE run_id = $1 AND status = 'running'`,
         [id],
       );
+      await closeRuntimeToolRequestsForRunWithClient(client, {
+        runId: id,
+        status: "cancelled",
+        errorCategory: "cancelled",
+        errorCode: "runtime_tool_run_cancelled",
+        errorMessage: "The Runtime Tool Request was cancelled with its Run",
+      });
       const run = runFromRow(result.rows[0]!);
       if (run.taskId !== null) {
         await client.query(
@@ -2240,6 +2311,8 @@ export class PlatformRepositories {
   readonly workflowRuntime: WorkflowRuntimeRepository;
   readonly workflowAssignments: WorkflowAssignmentRepository;
   readonly workflowPlans: WorkflowPlanRepository;
+  readonly planning: PlanningRepository;
+  readonly projectBusinessChains: ProjectBusinessChainRepository;
   readonly workflowIdempotency: WorkflowIdempotencyRepository;
   readonly meetings: MeetingRepository;
   readonly meetingCollaboration: MeetingCollaborationRepository;
@@ -2269,6 +2342,10 @@ export class PlatformRepositories {
   readonly dataFabric: DataFabricRepository;
   readonly workbenchConfiguration: WorkbenchConfigurationRepository;
   readonly market: MarketRepository;
+  readonly mcpProviders: McpProviderRepository;
+  readonly mcpToolCalls: McpToolCallRepository;
+  readonly runtimeToolRequests: RuntimeToolRequestRepository;
+  readonly projectSourceMcp: ProjectSourceMcpRepository;
 
   constructor(database: Database) {
     this.identityAdministration = new IdentityAdministrationRepository(
@@ -2301,6 +2378,8 @@ export class PlatformRepositories {
     this.workflowRuntime = new WorkflowRuntimeRepository(database);
     this.workflowAssignments = new WorkflowAssignmentRepository(database);
     this.workflowPlans = new WorkflowPlanRepository(database);
+    this.planning = new PlanningRepository(database);
+    this.projectBusinessChains = new ProjectBusinessChainRepository(database);
     this.workflowIdempotency = new WorkflowIdempotencyRepository(database);
     this.meetings = new MeetingRepository(database);
     this.meetingCollaboration = new MeetingCollaborationRepository(database);
@@ -2319,10 +2398,7 @@ export class PlatformRepositories {
     this.traces = new RuntimeTraceRepository(database);
     this.externalRuntimes = new ExternalRuntimeRepository(database);
     this.agentRuntimeBindings = new AgentRuntimeBindingRepository(database);
-    this.sharedSpace = new SharedSpaceRepository(
-      database,
-      this.actionTickets,
-    );
+    this.sharedSpace = new SharedSpaceRepository(database, this.actionTickets);
     this.delegations = new DelegationRepository(database);
     this.featureFlags = new FeatureFlagRepository(database);
     this.taskAcceptance = new TaskAcceptanceRepository(database);
@@ -2332,14 +2408,15 @@ export class PlatformRepositories {
     this.taskCapture = new TaskCaptureRepository(database);
     this.contextPolicies = new ContextPolicyRepository(database);
     this.auditEvents = new AuditEventRepository(database);
-    this.projectAiPms = new ProjectAiPmRepository(
-      database,
-      this.authorization,
-    );
+    this.projectAiPms = new ProjectAiPmRepository(database, this.authorization);
     this.dataFabric = new DataFabricRepository(database);
     this.workbenchConfiguration = new WorkbenchConfigurationRepository(
       database,
     );
     this.market = new MarketRepository(database);
+    this.mcpProviders = new McpProviderRepository(database);
+    this.mcpToolCalls = new McpToolCallRepository(database);
+    this.runtimeToolRequests = new RuntimeToolRequestRepository(database);
+    this.projectSourceMcp = new ProjectSourceMcpRepository(database);
   }
 }

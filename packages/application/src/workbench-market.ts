@@ -1,5 +1,7 @@
 import {
   MARKET_FLAG,
+  MARKET_GOVERNANCE_V2_FLAG,
+  MARKET_SHARED_SUPPLY_FLAG,
   TRUSTED_WORKBENCH_PANELS,
   WORKBENCH_HOST_VERSION,
   WORKBENCH_V2_FLAG,
@@ -15,10 +17,16 @@ import {
   type MarketAsset,
   type MarketAssetDetail,
   type MarketAssetKind,
+  type MarketAssetResourceBinding,
   type MarketAssetManifest,
   type MarketEntitlement,
+  type MarketGovernanceActionInput,
+  type MarketGovernanceView,
   type MarketInstallResult,
   type MarketInstallation,
+  type MarketAdminLockInput,
+  type MarketResourceBindingInput,
+  type MarketSuspendInput,
   type MarketTemplate,
   type MarketTemplateCopy,
   type MarketTemplateCopyResult,
@@ -61,7 +69,10 @@ export type WorkbenchMarketErrorCode =
   | "market_forbidden"
   | "market_manifest_has_dynamic_code"
   | "market_manifest_incompatible"
-  | "market_template_dependencies_unmet";
+  | "market_template_dependencies_unmet"
+  | "market_governance_disabled"
+  | "market_shared_supply_disabled"
+  | "market_resource_binding_invalid";
 
 export class WorkbenchMarketApplicationError extends Error {
   constructor(
@@ -394,6 +405,7 @@ export class WorkbenchConfigurationApplication {
         actor.principalId,
         panel.pluginId,
         1,
+        "runtime",
       );
       if (!entitled) {
         return {
@@ -450,6 +462,7 @@ export class WorkbenchConfigurationApplication {
             actor.principalId,
             panel.pluginId,
             1,
+            "install",
           ))
         ) {
           throw new WorkbenchMarketApplicationError(
@@ -511,6 +524,16 @@ export class MarketApplication {
   ): Promise<MarketAssetDetail> {
     await this.requireEnabled();
     await this.requireHuman(actor);
+    const governanceEnabled = await this.featureFlags.isEnabled(
+      MARKET_GOVERNANCE_V2_FLAG,
+    );
+    if (input.sharingScope !== undefined && !governanceEnabled) {
+      throw new WorkbenchMarketApplicationError(
+        "market_governance_disabled",
+        "Market governance v2 is disabled",
+        503,
+      );
+    }
     if (
       (input.trustLevel === "official" || input.trustLevel === "verified") &&
       !actor.platformAdministrator
@@ -521,7 +544,59 @@ export class MarketApplication {
         403,
       );
     }
-    return this.marketRepository.createAsset(actor, input);
+    const origin =
+      input.origin ??
+      (input.trustLevel === "official" || input.trustLevel === "verified"
+        ? "platform"
+        : "user");
+    if (input.origin === "platform" && !actor.platformAdministrator) {
+      throw new WorkbenchMarketApplicationError(
+        "market_forbidden",
+        "Only platform administrators can create platform-origin assets",
+        403,
+      );
+    }
+    const sharingScope =
+      input.sharingScope ??
+      (input.visibility === undefined
+        ? undefined
+        : input.visibility === "public"
+          ? "platform"
+          : input.visibility);
+    if (
+      governanceEnabled &&
+      origin === "user" &&
+      sharingScope !== undefined &&
+      sharingScope !== "private" &&
+      !(await this.featureFlags.isEnabled(MARKET_SHARED_SUPPLY_FLAG))
+    ) {
+      throw new WorkbenchMarketApplicationError(
+        "market_shared_supply_disabled",
+        "User shared supply is disabled",
+        403,
+      );
+    }
+    if (
+      governanceEnabled &&
+      origin === "platform" &&
+      sharingScope !== undefined &&
+      sharingScope !== "platform"
+    ) {
+      throw new WorkbenchMarketApplicationError(
+        "market_forbidden",
+        "Platform-origin assets must use platform sharing",
+        403,
+      );
+    }
+    return this.marketRepository.createAsset(
+      actor,
+      {
+        ...input,
+        origin,
+        ...(sharingScope === undefined ? {} : { sharingScope }),
+      },
+      governanceEnabled,
+    );
   }
 
   async publishVersion(
@@ -539,7 +614,12 @@ export class MarketApplication {
       );
     }
     this.validateManifest(asset.kind, input.manifest, input.compatibility);
-    return this.marketRepository.publishVersion(actor, assetId, input);
+    return this.marketRepository.publishVersion(
+      actor,
+      assetId,
+      input,
+      await this.featureFlags.isEnabled(MARKET_GOVERNANCE_V2_FLAG),
+    );
   }
 
   async setAssetStatus(
@@ -548,7 +628,116 @@ export class MarketApplication {
     input: SetMarketAssetStatusInput,
   ): Promise<MarketAsset> {
     await this.requireEnabled();
-    return this.marketRepository.setAssetStatus(actor, assetId, input);
+    return this.marketRepository.setAssetStatus(
+      actor,
+      assetId,
+      input,
+      await this.featureFlags.isEnabled(MARKET_GOVERNANCE_V2_FLAG),
+    );
+  }
+
+  async delistAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.delistAsset(actor, assetId, input);
+  }
+
+  async publishAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.publishAsset(actor, assetId, input);
+  }
+
+  async relistAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.relistAsset(actor, assetId, input);
+  }
+
+  async suspendAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketSuspendInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.suspendAsset(actor, assetId, input);
+  }
+
+  async resumeAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.resumeAsset(actor, assetId, input);
+  }
+
+  async archiveAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.archiveAsset(actor, assetId, input);
+  }
+
+  async lockAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketAdminLockInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.lockAsset(actor, assetId, input);
+  }
+
+  async unlockAsset(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketGovernanceActionInput,
+  ): Promise<MarketAsset> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.unlockAsset(actor, assetId, input);
+  }
+
+  async getGovernance(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+  ): Promise<MarketGovernanceView> {
+    await this.requireGovernanceEnabled();
+    const asset = await this.getAsset(actor, assetId);
+    const audit = await this.marketRepository.getGovernanceAudit(actor, assetId);
+    return {
+      asset,
+      impact: asset.installationImpact,
+      audit,
+    };
+  }
+
+  async listResourceBindings(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+  ): Promise<MarketAssetResourceBinding[]> {
+    await this.requireGovernanceEnabled();
+    await this.getAsset(actor, assetId);
+    return this.marketRepository.listResourceBindings(assetId);
+  }
+
+  async bindResource(
+    actor: WorkbenchMarketActor,
+    assetId: string,
+    input: MarketResourceBindingInput,
+  ): Promise<MarketAssetResourceBinding> {
+    await this.requireGovernanceEnabled();
+    return this.marketRepository.bindResource(actor, assetId, input);
   }
 
   async setVersionStatus(
@@ -611,6 +800,20 @@ export class MarketApplication {
       actor.principalId,
       input,
       idempotencyKey,
+    );
+  }
+
+  async hasPanelRuntimeAccess(
+    actor: WorkbenchMarketActor,
+    pluginId: string,
+    minimumVersion = 1,
+  ): Promise<boolean> {
+    await this.requireEnabled();
+    return this.marketRepository.hasPanelEntitlement(
+      actor.principalId,
+      pluginId,
+      minimumVersion,
+      "runtime",
     );
   }
 
@@ -750,6 +953,7 @@ export class MarketApplication {
           actor.principalId,
           panel.pluginId,
           1,
+          "install",
         ))
       ) {
         throw new WorkbenchMarketApplicationError(
@@ -921,6 +1125,19 @@ export class MarketApplication {
       throw new WorkbenchMarketApplicationError(
         "market_disabled",
         "Resource Market is disabled",
+        503,
+      );
+    }
+  }
+
+  private async requireGovernanceEnabled(): Promise<void> {
+    await this.requireEnabled();
+    if (
+      !(await this.featureFlags.isEnabled(MARKET_GOVERNANCE_V2_FLAG))
+    ) {
+      throw new WorkbenchMarketApplicationError(
+        "market_governance_disabled",
+        "Market governance v2 is disabled",
         503,
       );
     }

@@ -29,12 +29,17 @@ import {
 } from "@pluginmax/contracts";
 import type { PoolClient } from "pg";
 import type { Database } from "./database.js";
+import {
+  completePlanningRunForPlanWithClient,
+  lockPlanningRunForPlanWithClient,
+} from "./planning-repository.js";
 
 interface WorkflowPlanRow {
   id: string;
   project_id: string;
   root_task_id: string;
   source: WorkflowPlanSource;
+  planning_run_id: string | null;
   current_version: number;
   status: WorkflowPlanStatus;
   revision: number;
@@ -193,6 +198,9 @@ export interface CreateWorkflowPlanRecordInput {
   readonly reason: string;
   readonly actorId: string;
   readonly routerAgent: RouterAgentSnapshot | null;
+  readonly planningRunId: string | null;
+  readonly planningRunRevision: number | null;
+  readonly autoApprove?: boolean | undefined;
 }
 
 export interface CreateWorkflowPlanVersionRecordInput {
@@ -588,18 +596,33 @@ export class WorkflowPlanRepository {
       }
       const definitionId = randomUUID();
       const versionId = randomUUID();
+      if (input.planningRunId !== null) {
+        await lockPlanningRunForPlanWithClient(client, {
+          planningRunId: input.planningRunId,
+          expectedRevision: input.planningRunRevision ?? undefined,
+          projectId: input.projectId,
+          rootTaskId: input.rootTaskId,
+        });
+      } else if (input.source === "router") {
+        throw new WorkflowPlanRepositoryError(
+          "workflow_plan_state_conflict",
+          "Router plans require a Planning Run",
+        );
+      }
       await client.query(
         `INSERT INTO workflow_plans (
-           id, project_id, root_task_id, source, current_version, status,
-           revision, router_agent_id, created_by, created_at, updated_at
+           id, project_id, root_task_id, source, planning_run_id,
+           current_version, status, revision, router_agent_id, created_by,
+           created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, 1, 'proposed', 1, $5, $6, NOW(), NOW()
+           $1, $2, $3, $4, $5, 1, 'proposed', 1, $6, $7, NOW(), NOW()
          )`,
         [
           input.planId,
           input.projectId,
           input.rootTaskId,
           input.source,
+          input.planningRunId,
           input.routerAgent?.id ?? null,
           input.actorId,
         ],
@@ -629,6 +652,13 @@ export class WorkflowPlanRepository {
         actorId: input.actorId,
         routerAgent: input.routerAgent,
       });
+      if (input.planningRunId !== null) {
+        await completePlanningRunForPlanWithClient(client, {
+          planningRunId: input.planningRunId,
+          workflowPlanId: input.planId,
+          actorId: input.actorId,
+        });
+      }
       await client.query(
         `INSERT INTO task_origins (
            task_id, source_kind, source_id, parent_task_id, root_task_id,
@@ -654,8 +684,34 @@ export class WorkflowPlanRepository {
           source: input.source,
           version: 1,
           routerAgentId: input.routerAgent?.id ?? null,
+          planningRunId: input.planningRunId,
         },
       });
+      if (input.autoApprove === true) {
+        const approved = await client.query<WorkflowPlanRow>(
+          `UPDATE workflow_plans
+           SET status = 'approved',
+               confirmed_by_principal_id = $2,
+               confirmed_by_role = 'PLANNING_QUALITY_GATE',
+               confirmed_at = NOW(),
+               revision = revision + 1,
+               updated_at = NOW()
+           WHERE id = $1
+           RETURNING *`,
+          [input.planId, input.actorId],
+        );
+        await ensurePlanInstanceWithClient(client, approved.rows[0]!);
+        await appendPlanAuditWithClient(client, {
+          planId: input.planId,
+          kind: "plan.approved",
+          actorId: input.actorId,
+          summary: "Planning Quality Gate 自动确认计划",
+          data: {
+            version: 1,
+            role: "PLANNING_QUALITY_GATE",
+          },
+        });
+      }
     });
     return this.getPlanDetail(input.planId);
   }
@@ -862,7 +918,7 @@ export class WorkflowPlanRepository {
       const activated = await client.query<WorkflowPlanRow>(
         `UPDATE workflow_plans
          SET status = 'active',
-             gate_epoch = $2,
+             gate_epoch = NULLIF($2, 0),
              lease_owner = NULL,
              lease_expires_at = NULL,
              revision = revision + 1,
@@ -1655,12 +1711,13 @@ async function materializePlanWithClient(
     if (taskId === undefined) {
       const inserted = await client.query<{ id: string }>(
         `INSERT INTO tasks (
-           id, project_id, title, description, acceptance, status,
+           id, project_id, parent_task_id, title, description, acceptance,
+           status,
            agent_id, priority, auto_submit, auto_accept,
            auto_redispatch_on_return, creation_key, created_at, updated_at
          ) VALUES (
-           $1, $2, $3, $4, $5::jsonb, 'queued', $6, 'medium', TRUE, FALSE,
-           FALSE, $7, NOW(), NOW()
+           $1, $2, $3, $4, $5, $6::jsonb, 'queued', $7, 'medium', TRUE,
+           FALSE, FALSE, $8, NOW(), NOW()
          )
          ON CONFLICT (creation_key) WHERE creation_key IS NOT NULL
          DO NOTHING
@@ -1668,6 +1725,7 @@ async function materializePlanWithClient(
         [
           randomUUID(),
           plan.project_id,
+          plan.root_task_id,
           `${graph.name} · ${node.name}`.slice(0, 240),
           [
             `Plan: ${plan.id}`,
@@ -1849,6 +1907,13 @@ async function assertRouterGateWithClient(
   plan: WorkflowPlanRow,
   expectedGateEpoch: number,
 ): Promise<void> {
+  if (
+    plan.source === "router" &&
+    plan.planning_run_id !== null &&
+    plan.router_agent_id === null
+  ) {
+    return;
+  }
   const gate = await readRouterGateWithClient(client, plan.project_id);
   if (!gate.enabled) {
     await transitionPlanToSafeStopWithClient(
@@ -1969,6 +2034,7 @@ function planFromRow(row: WorkflowPlanRow): WorkflowPlan {
     projectId: row.project_id,
     rootTaskId: row.root_task_id,
     source: row.source,
+    planningRunId: row.planning_run_id,
     currentVersion: row.current_version,
     status: row.status,
     revision: row.revision,

@@ -54,6 +54,39 @@ export {
   type RouterAgentSnapshot,
 } from "./workflow-plan-repository.js";
 export {
+  PlanningRepository,
+  PlanningRepositoryError,
+  appendPlanningEventWithClient,
+  completePlanningRunForPlanWithClient,
+  lockPlanningRunForPlanWithClient,
+  type AdvancePlanningRunInput,
+  type LockedPlanningRun,
+  type PlanningRunContextSnapshot,
+  type PlanningRepositoryErrorCode,
+  type PlanningRunMutationResult,
+  type RecordPlanningArtifactInput,
+  type RecordPlanningQualityMetricInput,
+  type StartPlanningRunRecordInput,
+  type UpdatePlanningSettingsRecordInput,
+} from "./planning-repository.js";
+export {
+  ProjectBusinessChainRepository,
+  ProjectBusinessChainRepositoryError,
+  materializeTemplateBusinessChainWithClient,
+  normalizeBindInput,
+  type ProjectBusinessChainRepositoryErrorCode,
+  type ProjectOverviewTaskSummary,
+  type ProjectOverviewWorkflowSummary,
+} from "./project-business-chain-repository.js";
+export {
+  ProjectSourceMcpRepository,
+  type BeginProjectSourceMcpReadInput,
+  type BeginProjectSourceMcpReadResult,
+  type CompleteProjectSourceMcpReadInput,
+  type CompleteProjectSourceMcpReadResult,
+  type ResolvedMcpProjectSourceBinding,
+} from "./project-source-mcp-repository.js";
+export {
   captureRunSkillSnapshotWithClient,
   effectiveSkillSnapshotDigest,
   SkillRepository,
@@ -104,6 +137,35 @@ export {
   type RuntimeTransitionResult,
   type UpdateRuntimeDefinitionResult,
 } from "./external-runtime-repository.js";
+export {
+  McpProviderRepository,
+  McpProviderRepositoryError,
+  type ClaimedMcpProviderProbeJob,
+  type CompleteMcpProviderProbeInput,
+  type McpProviderDiscoveredToolInput,
+  type McpProviderRepositoryErrorCode,
+  type McpProviderVisibilityActor,
+} from "./mcp-provider-repository.js";
+export {
+  McpToolCallRepository,
+  McpToolCallRepositoryError,
+  type BeginMcpToolCallInput,
+  type BeginMcpToolCallResult,
+  type ClaimedMcpToolCatalog,
+  type CompleteMcpToolCallInput,
+  type CompleteMcpToolCallResult,
+  type McpToolCallRepositoryErrorCode,
+} from "./mcp-tool-call-repository.js";
+export {
+  RuntimeToolRequestRepository,
+  RuntimeToolRequestRepositoryError,
+  closeRuntimeToolRequestsForRunWithClient,
+  type BeginRuntimeToolRequestInput,
+  type BeginRuntimeToolRequestResult,
+  type CompleteRuntimeToolRequestInput,
+  type CompleteRuntimeToolRequestResult,
+  type RuntimeToolRequestRepositoryErrorCode,
+} from "./runtime-tool-request-repository.js";
 export {
   MemoryClosureRepository,
   MemoryReviewConflictError,

@@ -10,38 +10,49 @@ import type {
 } from "@pluginmax/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Archive,
   ArrowDown,
   ArrowUp,
+  Ban,
   Download,
   LayoutGrid,
   LockKeyhole,
   Plus,
   Save,
   ShieldCheck,
+  ShieldAlert,
   Star,
   Store,
+  Undo2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  archiveMarketAsset,
   copyMarketTemplate,
   createMarketAsset,
   createWorkbenchLayout,
+  delistMarketAsset,
   getMarketAsset,
   getWorkbenchDetail,
   getWorkbenchBootstrap,
   grantMarketEntitlement,
   installMarketAsset,
+  lockMarketAsset,
   listManagedAccounts,
   listMarketAssets,
   listMarketEntitlements,
   listMarketInstallations,
   listMarketTemplates,
+  publishMarketAsset,
   publishMarketAssetVersion,
+  relistMarketAsset,
+  resumeMarketAsset,
   revokeMarketEntitlement,
   saveWorkbenchLayout,
-  setMarketAssetStatus,
   setMarketAssetVersionStatus,
   setDefaultWorkbenchLayout,
+  suspendMarketAsset,
+  unlockMarketAsset,
   uninstallMarketAsset,
 } from "./api.js";
 
@@ -360,6 +371,9 @@ function WorkbenchMarketPanel({
 }) {
   const queryClient = useQueryClient();
   const [copyNames, setCopyNames] = useState<Record<string, string>>({});
+  const [governanceReasons, setGovernanceReasons] = useState<
+    Record<string, string>
+  >({});
   const assetsQuery = useQuery({
     queryKey: ["market-assets"],
     queryFn: () => listMarketAssets(),
@@ -414,6 +428,45 @@ function WorkbenchMarketPanel({
       });
     },
   });
+  const governanceMutation = useMutation({
+    mutationFn: (input: {
+      readonly asset: MarketAsset;
+      readonly action:
+        | "publish"
+        | "delist"
+        | "relist"
+        | "suspend"
+        | "resume"
+        | "archive";
+      readonly reason: string;
+    }) => {
+      const payload = {
+        expectedRevision: input.asset.revision,
+        reason: input.reason,
+      };
+      switch (input.action) {
+        case "publish":
+          return publishMarketAsset(input.asset.id, payload);
+        case "delist":
+          return delistMarketAsset(input.asset.id, payload);
+        case "relist":
+          return relistMarketAsset(input.asset.id, payload);
+        case "suspend":
+          return suspendMarketAsset(input.asset.id, payload);
+        case "resume":
+          return resumeMarketAsset(input.asset.id, payload);
+        case "archive":
+          return archiveMarketAsset(input.asset.id, payload);
+      }
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["market-assets"] }),
+        queryClient.invalidateQueries({ queryKey: ["market-installations"] }),
+        queryClient.invalidateQueries({ queryKey: ["market-asset"] }),
+      ]);
+    },
+  });
   const assets = assetsQuery.data ?? [];
   const entitlements = entitlementsQuery.data ?? [];
   const installations = installationsQuery.data ?? [];
@@ -435,7 +488,8 @@ function WorkbenchMarketPanel({
     templatesQuery.error ??
     installMutation.error ??
     uninstallMutation.error ??
-    copyMutation.error;
+    copyMutation.error ??
+    governanceMutation.error;
 
   return (
     <div className="workbench-market-panel">
@@ -452,20 +506,60 @@ function WorkbenchMarketPanel({
         {assets.map((asset: MarketAsset) => {
           const entitlement = activeEntitlements.has(asset.id);
           const installation = activeInstallations.get(asset.id);
+          const canGovern =
+            asset.publisherPrincipalId === viewerPrincipalId ||
+            (platformAdministrator &&
+              asset.sharingScope !== "private");
+          const reason = governanceReasons[asset.id] ?? "";
           return (
             <article className="market-asset-card" key={asset.id}>
               <div className="market-asset-head">
                 <span>
                   <strong>{asset.name}</strong>
                   <small>
-                    {marketKindLabel(asset.kind)} · {asset.trustLevel}
+                    {marketKindLabel(asset.kind)} · {asset.origin} ·{" "}
+                    {asset.sharingScope}
                   </small>
                 </span>
-                <span className={`pm-pill ${entitlement ? "progress" : ""}`}>
-                  {entitlement ? `v${asset.currentVersion}` : "未授权"}
+                <span
+                  className={`pm-pill ${
+                    asset.availabilityStatus === "suspended"
+                      ? "danger"
+                      : asset.newInstallAllowed
+                        ? "progress"
+                        : ""
+                  }`}
+                >
+                  {marketPublicationLabel(asset.publicationStatus)}
                 </span>
               </div>
               <p>{asset.description || "暂无说明"}</p>
+              <div className="market-governance-summary">
+                <span>
+                  {asset.availabilityStatus === "active"
+                    ? "运行可用"
+                    : "安全停用"}
+                </span>
+                <span>
+                  新安装{asset.newInstallAllowed ? "可用" : "阻断"} · 已有运行
+                  {asset.existingRunsAllowed ? "兼容" : "阻断"}
+                </span>
+                <small>
+                  旧接口兼容：{asset.legacyVisibility}/{asset.legacyStatus}
+                </small>
+                {asset.suspendedReason !== null && (
+                  <small className="market-suspend-reason">
+                    <ShieldAlert size={12} />
+                    {asset.suspendedReason}
+                  </small>
+                )}
+                {asset.adminLocked && (
+                  <small className="market-suspend-reason">
+                    <LockKeyhole size={12} />
+                    管理员锁定：{asset.adminLockReason}
+                  </small>
+                )}
+              </div>
               <footer>
                 {!entitlement && (
                   <span className="market-lock">
@@ -477,11 +571,15 @@ function WorkbenchMarketPanel({
                   <button
                     className="pm-btn"
                     type="button"
-                    disabled={!entitlement || installMutation.isPending}
+                    disabled={
+                      !entitlement ||
+                      !asset.newInstallAllowed ||
+                      installMutation.isPending
+                    }
                     onClick={() => installMutation.mutate(asset)}
                   >
                     <Download size={13} />
-                    安装
+                    {asset.newInstallAllowed ? "安装" : "暂不可安装"}
                   </button>
                 ) : (
                   <button
@@ -494,6 +592,143 @@ function WorkbenchMarketPanel({
                   </button>
                 )}
               </footer>
+              {installation !== undefined &&
+                !installation.runtimeAvailable &&
+                installation.blockedReason !== null && (
+                  <small className="market-suspend-reason">
+                    <ShieldAlert size={12} />
+                    {installation.blockedReason}
+                  </small>
+                )}
+              {canGovern && (
+                <details className="market-owner-controls">
+                  <summary>
+                    <ShieldCheck size={13} />
+                    治理操作
+                  </summary>
+                  <input
+                    className="pm-input"
+                    aria-label={`${asset.name} 治理原因`}
+                    placeholder="操作原因（安全停用必填）"
+                    value={reason}
+                    onChange={(event) =>
+                      setGovernanceReasons((current) => ({
+                        ...current,
+                        [asset.id]: event.target.value,
+                      }))
+                    }
+                  />
+                  <div className="market-admin-actions">
+                    {asset.publicationStatus === "draft" && (
+                      <button
+                        className="pm-btn secondary"
+                        type="button"
+                        disabled={governanceMutation.isPending}
+                        onClick={() =>
+                          governanceMutation.mutate({
+                            asset,
+                            action: "publish",
+                            reason,
+                          })
+                        }
+                      >
+                        <Undo2 size={13} />
+                        发布
+                      </button>
+                    )}
+                    {asset.publicationStatus === "published" && (
+                      <button
+                        className="pm-btn secondary"
+                        type="button"
+                        disabled={governanceMutation.isPending}
+                        onClick={() =>
+                          governanceMutation.mutate({
+                            asset,
+                            action: "delist",
+                            reason,
+                          })
+                        }
+                      >
+                        <Ban size={13} />
+                        下架
+                      </button>
+                    )}
+                    {asset.publicationStatus === "delisted" && (
+                      <button
+                        className="pm-btn secondary"
+                        type="button"
+                        disabled={
+                          governanceMutation.isPending || asset.adminLocked
+                        }
+                        onClick={() =>
+                          governanceMutation.mutate({
+                            asset,
+                            action: "relist",
+                            reason,
+                          })
+                        }
+                      >
+                        <Undo2 size={13} />
+                        重新上架
+                      </button>
+                    )}
+                    {asset.availabilityStatus === "active" ? (
+                      <button
+                        className="pm-btn secondary"
+                        type="button"
+                        disabled={
+                          governanceMutation.isPending || reason.trim() === ""
+                        }
+                        onClick={() =>
+                          governanceMutation.mutate({
+                            asset,
+                            action: "suspend",
+                            reason: reason.trim(),
+                          })
+                        }
+                      >
+                        <ShieldAlert size={13} />
+                        安全停用
+                      </button>
+                    ) : (
+                      <button
+                        className="pm-btn secondary"
+                        type="button"
+                        disabled={
+                          governanceMutation.isPending || asset.adminLocked
+                        }
+                        onClick={() =>
+                          governanceMutation.mutate({
+                            asset,
+                            action: "resume",
+                            reason,
+                          })
+                        }
+                      >
+                        <Undo2 size={13} />
+                        恢复
+                      </button>
+                    )}
+                    {asset.publicationStatus !== "archived" && (
+                      <button
+                        className="pm-btn secondary"
+                        type="button"
+                        disabled={governanceMutation.isPending}
+                        onClick={() =>
+                          governanceMutation.mutate({
+                            asset,
+                            action: "archive",
+                            reason,
+                          })
+                        }
+                      >
+                        <Archive size={13} />
+                        归档
+                      </button>
+                    )}
+                  </div>
+                </details>
+              )}
             </article>
           );
         })}
@@ -556,6 +791,7 @@ function MarketAdministrationPanel({
   const [targetPrincipalId, setTargetPrincipalId] = useState(
     viewerPrincipalId,
   );
+  const [adminGovernanceReason, setAdminGovernanceReason] = useState("");
   const [manifest, setManifest] = useState(() =>
     defaultMarketManifest("workbench-template"),
   );
@@ -565,9 +801,10 @@ function MarketAdministrationPanel({
     kind: "workbench-template" as MarketAssetKind,
     name: "",
     description: "",
-    trustLevel: "official" as "official" | "verified" | "private",
-    visibility: "public" as "public" | "private" | "workspace" | "project",
-    visibilityScopeId: "",
+    origin: "platform" as "platform" | "user",
+    sharingScope: "platform" as "platform" | "private" | "workspace" | "project",
+    publicationStatus: "published" as "draft" | "published",
+    sharingScopeId: "",
   });
   const assetsQuery = useQuery({
     queryKey: ["market-assets"],
@@ -625,12 +862,13 @@ function MarketAdministrationPanel({
         kind: draft.kind,
         name: draft.name.trim(),
         description: draft.description.trim(),
-        trustLevel: draft.trustLevel,
-        visibility: draft.visibility,
-        ...((draft.visibility === "workspace" ||
-          draft.visibility === "project") &&
-        draft.visibilityScopeId.trim() !== ""
-          ? { visibilityScopeId: draft.visibilityScopeId.trim() }
+        origin: draft.origin,
+        sharingScope: draft.sharingScope,
+        publicationStatus: draft.publicationStatus,
+        ...((draft.sharingScope === "workspace" ||
+          draft.sharingScope === "project") &&
+        draft.sharingScopeId.trim() !== ""
+          ? { visibilityScopeId: draft.sharingScopeId.trim() }
           : {}),
       }),
     onSuccess: async (asset) => {
@@ -640,7 +878,7 @@ function MarketAdministrationPanel({
         assetKey: "",
         name: "",
         description: "",
-        visibilityScopeId: "",
+        sharingScopeId: "",
       }));
       await refreshMarket();
     },
@@ -660,15 +898,48 @@ function MarketAdministrationPanel({
     },
     onSuccess: refreshMarket,
   });
-  const assetStatusMutation = useMutation({
+  const governanceMutation = useMutation({
     mutationFn: (input: {
-      readonly status: "active" | "delisted" | "archived";
+      readonly action:
+        | "publish"
+        | "delist"
+        | "relist"
+        | "suspend"
+        | "resume"
+        | "archive"
+        | "lock"
+        | "unlock";
+      readonly reason: string;
     }) => {
       if (selectedAsset === undefined) throw new Error("请先选择市场资产");
-      return setMarketAssetStatus(selectedAsset.id, {
-        status: input.status,
+      const payload = {
         expectedRevision: selectedAsset.revision,
-      });
+        reason: input.reason,
+      };
+      switch (input.action) {
+        case "publish":
+          return publishMarketAsset(selectedAsset.id, payload);
+        case "delist":
+          return delistMarketAsset(selectedAsset.id, payload);
+        case "relist":
+          return relistMarketAsset(selectedAsset.id, payload);
+        case "suspend":
+          return suspendMarketAsset(selectedAsset.id, {
+            ...payload,
+            reason: input.reason.trim(),
+          });
+        case "resume":
+          return resumeMarketAsset(selectedAsset.id, payload);
+        case "archive":
+          return archiveMarketAsset(selectedAsset.id, payload);
+        case "lock":
+          return lockMarketAsset(selectedAsset.id, {
+            ...payload,
+            reason: input.reason.trim(),
+          });
+        case "unlock":
+          return unlockMarketAsset(selectedAsset.id, payload);
+      }
     },
     onSuccess: refreshMarket,
   });
@@ -715,7 +986,7 @@ function MarketAdministrationPanel({
     selectedAssetQuery.error ??
     createMutation.error ??
     publishMutation.error ??
-    assetStatusMutation.error ??
+    governanceMutation.error ??
     versionStatusMutation.error ??
     grantMutation.error ??
     revokeMutation.error;
@@ -780,53 +1051,68 @@ function MarketAdministrationPanel({
             </select>
           </label>
           <label>
-            信任级
+            来源
             <select
               className="pm-input"
-              value={draft.trustLevel}
+              value={draft.origin}
               onChange={(event) =>
                 setDraft((current) => ({
                   ...current,
-                  trustLevel: event.target
-                    .value as typeof current.trustLevel,
+                  origin: event.target.value as typeof current.origin,
                 }))
               }
             >
-              <option value="official">official</option>
-              <option value="verified">verified</option>
-              <option value="private">private</option>
+              <option value="platform">platform</option>
+              <option value="user">user</option>
             </select>
           </label>
           <label>
-            可见性
+            共享范围
             <select
               className="pm-input"
-              value={draft.visibility}
+              value={draft.sharingScope}
               onChange={(event) =>
                 setDraft((current) => ({
                   ...current,
-                  visibility: event.target
-                    .value as typeof current.visibility,
+                  sharingScope: event.target
+                    .value as typeof current.sharingScope,
                 }))
               }
             >
-              <option value="public">public</option>
+              <option value="platform">platform</option>
               <option value="private">private</option>
               <option value="workspace">workspace</option>
               <option value="project">project</option>
             </select>
           </label>
-          {(draft.visibility === "workspace" ||
-            draft.visibility === "project") && (
+          <label>
+            发布状态
+            <select
+              className="pm-input"
+              value={draft.publicationStatus}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  publicationStatus: event.target
+                    .value as typeof current.publicationStatus,
+                }))
+              }
+            >
+              <option value="draft">draft</option>
+              <option value="published">published</option>
+            </select>
+          </label>
+          {(draft.sharingScope === "workspace" ||
+            draft.sharingScope === "project") && (
             <label>
               Scope ID
               <input
                 className="pm-input"
-                value={draft.visibilityScopeId}
+                value={draft.sharingScopeId}
                 onChange={(event) =>
                   setDraft((current) => ({
                     ...current,
-                    visibilityScopeId: event.target.value,
+                    sharingScopeId: event.target.value,
                   }))
                 }
               />
@@ -880,49 +1166,164 @@ function MarketAdministrationPanel({
         {selectedAsset !== undefined && (
           <>
             <div className="market-admin-pills">
-              <span className="pm-pill">{selectedAsset.status}</span>
+              <span className="pm-pill">
+                {marketPublicationLabel(selectedAsset.publicationStatus)}
+              </span>
+              <span className="pm-pill">
+                {selectedAsset.availabilityStatus}
+              </span>
               <span className="pm-pill progress">
                 v{selectedAsset.currentVersion}
               </span>
               <span className="pm-pill">r{selectedAsset.revision}</span>
             </div>
+            <div className="market-governance-summary">
+              <span>
+                新安装{selectedAsset.newInstallAllowed ? "允许" : "阻断"} ·
+                已有运行
+                {selectedAsset.existingRunsAllowed ? "兼容" : "阻断"}
+              </span>
+              <span>
+                活跃安装：
+                {selectedAsset.installationImpact.activeInstallations} ·
+                已卸载：
+                {selectedAsset.installationImpact.uninstalledInstallations} ·
+                方案副本：
+                {selectedAsset.installationImpact.activeTemplateCopies}
+              </span>
+              <small>
+                旧状态兼容：{selectedAsset.legacyVisibility}/
+                {selectedAsset.legacyStatus}
+              </small>
+              {selectedAsset.suspendedReason !== null && (
+                <small className="market-suspend-reason">
+                  <ShieldAlert size={12} />
+                  安全停用原因：{selectedAsset.suspendedReason}
+                </small>
+              )}
+            </div>
+            <label>
+              治理原因
+              <input
+                className="pm-input"
+                value={adminGovernanceReason}
+                placeholder="安全停用、恢复或管理员锁定时必填"
+                onChange={(event) =>
+                  setAdminGovernanceReason(event.target.value)
+                }
+              />
+            </label>
             <div className="market-admin-actions">
-              {selectedAsset.status !== "active" && (
+              {selectedAsset.publicationStatus === "draft" && (
                 <button
                   className="pm-btn secondary"
                   type="button"
-                  disabled={assetStatusMutation.isPending}
+                  disabled={governanceMutation.isPending}
                   onClick={() =>
-                    assetStatusMutation.mutate({ status: "active" })
+                    governanceMutation.mutate({
+                      action: "publish",
+                      reason: adminGovernanceReason,
+                    })
                   }
                 >
-                  重新上架
+                  发布
                 </button>
               )}
-              {selectedAsset.status === "active" && (
+              {selectedAsset.publicationStatus === "published" && (
                 <button
                   className="pm-btn secondary"
                   type="button"
-                  disabled={assetStatusMutation.isPending}
+                  disabled={governanceMutation.isPending}
                   onClick={() =>
-                    assetStatusMutation.mutate({ status: "delisted" })
+                    governanceMutation.mutate({
+                      action: "delist",
+                      reason: adminGovernanceReason,
+                    })
                   }
                 >
                   下架
                 </button>
               )}
-              {selectedAsset.status !== "archived" && (
+              {selectedAsset.publicationStatus === "delisted" && (
                 <button
                   className="pm-btn secondary"
                   type="button"
-                  disabled={assetStatusMutation.isPending}
+                  disabled={
+                    governanceMutation.isPending || selectedAsset.adminLocked
+                  }
                   onClick={() =>
-                    assetStatusMutation.mutate({ status: "archived" })
+                    governanceMutation.mutate({
+                      action: "relist",
+                      reason: adminGovernanceReason,
+                    })
+                  }
+                >
+                  重新上架
+                </button>
+              )}
+              {selectedAsset.availabilityStatus === "active" ? (
+                <button
+                  className="pm-btn secondary"
+                  type="button"
+                  disabled={
+                    governanceMutation.isPending ||
+                    adminGovernanceReason.trim() === ""
+                  }
+                  onClick={() =>
+                    governanceMutation.mutate({
+                      action: "suspend",
+                      reason: adminGovernanceReason.trim(),
+                    })
+                  }
+                >
+                  安全停用
+                </button>
+              ) : (
+                <button
+                  className="pm-btn secondary"
+                  type="button"
+                  disabled={governanceMutation.isPending}
+                  onClick={() =>
+                    governanceMutation.mutate({
+                      action: "resume",
+                      reason: adminGovernanceReason,
+                    })
+                  }
+                >
+                  恢复
+                </button>
+              )}
+              {selectedAsset.publicationStatus !== "archived" && (
+                <button
+                  className="pm-btn secondary"
+                  type="button"
+                  disabled={governanceMutation.isPending}
+                  onClick={() =>
+                    governanceMutation.mutate({
+                      action: "archive",
+                      reason: adminGovernanceReason,
+                    })
                   }
                 >
                   归档
                 </button>
               )}
+              <button
+                className="pm-btn secondary"
+                type="button"
+                disabled={
+                  governanceMutation.isPending ||
+                  adminGovernanceReason.trim() === ""
+                }
+                onClick={() =>
+                  governanceMutation.mutate({
+                    action: selectedAsset.adminLocked ? "unlock" : "lock",
+                    reason: adminGovernanceReason.trim(),
+                  })
+                }
+              >
+                {selectedAsset.adminLocked ? "解除锁定" : "管理员锁定"}
+              </button>
             </div>
             <div className="market-version-list">
               {selectedAsset.versions.map((version) => (
@@ -1104,5 +1505,20 @@ function marketKindLabel(kind: MarketAsset["kind"]): string {
       return "工作台方案";
     case "plugin":
       return "插件";
+  }
+}
+
+function marketPublicationLabel(
+  status: MarketAsset["publicationStatus"],
+): string {
+  switch (status) {
+    case "draft":
+      return "草稿";
+    case "published":
+      return "已发布";
+    case "delisted":
+      return "已下架";
+    case "archived":
+      return "已归档";
   }
 }

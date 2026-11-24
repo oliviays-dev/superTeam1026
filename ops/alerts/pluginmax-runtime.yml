@@ -115,3 +115,30 @@ groups:
         annotations:
           summary: No successful Pluginmax backup has completed in 36 hours.
           runbook: docs/v1-batch9-production-readiness.md#backup-failure
+
+      - alert: PluginmaxProjectSourceMcpStale
+        expr: pluginmax_project_source_mcp_stale_reads > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: One or more MCP project source reads have an expired Worker lease.
+          runbook: docs/v2-dsh-pluginmax-m13d-production-secret-resolver-and-mcp-project-source-implementation-record.md#alert
+
+      - alert: PluginmaxProjectSourceMcpErrors
+        expr: pluginmax_project_source_mcp_alert_level >= 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: MCP project source read errors or latency have crossed the warning threshold.
+          runbook: docs/v2-dsh-pluginmax-m13d-production-secret-resolver-and-mcp-project-source-implementation-record.md#alert
+
+      - alert: PluginmaxProjectSourceMcpCritical
+        expr: pluginmax_project_source_mcp_alert_level >= 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: MCP project source read errors or latency have crossed the critical threshold.
+          runbook: docs/v2-dsh-pluginmax-m13d-production-secret-resolver-and-mcp-project-source-implementation-record.md#alert
