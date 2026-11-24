@@ -23,7 +23,9 @@ test.describe("runtime operations desktop", () => {
     await expect(page.getByText("队列深度")).toBeVisible();
     await expect(page.getByText("SLA 超时", { exact: true })).toBeVisible();
     await expect(page.getByText("死信队列", { exact: true })).toBeVisible();
-    await expect(page.getByText("Migration v44 / v44")).toBeVisible();
+    await expect(page.getByText(/Migration v\d+ \/ v\d+/)).toHaveText(
+      /Migration v(\d+) \/ v\1/,
+    );
     await expect(page.getByText("租约抖动", { exact: true })).toBeVisible();
     await expect(page.getByText("SLA 燃尽率", { exact: true })).toBeVisible();
     await page.screenshot({
