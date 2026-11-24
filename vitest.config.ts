@@ -48,6 +48,7 @@ export default defineConfig({
   },
   test: {
     fileParallelism: false,
+    setupFiles: ["vitest.database-isolation.ts"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
     include: [

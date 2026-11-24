@@ -1004,13 +1004,19 @@ export class ProjectAiPmRepository {
     const inserted = await client.query<BindingRow>(
       `INSERT INTO teammate_template_skill_bindings (
          id, template_id, skill_id, skill_version_id, installation_id,
-         required, enabled, bound_by_principal_id, created_at, updated_at
-       ) VALUES ($1, $2, $3, $4, $5, TRUE, TRUE, $6, NOW(), NOW())
+         required, enabled, mode, scenes, bound_by_principal_id,
+         created_at, updated_at
+       ) VALUES (
+         $1, $2, $3, $4, $5, TRUE, TRUE, 'required',
+         '["task-execution"]'::jsonb, $6, NOW(), NOW()
+       )
        ON CONFLICT (template_id, skill_id) DO UPDATE
        SET
          skill_version_id = EXCLUDED.skill_version_id,
          installation_id = EXCLUDED.installation_id,
          enabled = TRUE,
+         mode = 'required',
+         scenes = '["task-execution"]'::jsonb,
          updated_at = NOW()
        RETURNING id`,
       [

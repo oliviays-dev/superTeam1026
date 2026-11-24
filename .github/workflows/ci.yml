@@ -76,6 +76,8 @@ jobs:
       BATCH8_POSTGRES_VOLUME: pluginmax-ci-database-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: pnpm/action-setup@v4
         with:
           version: 11.7.0

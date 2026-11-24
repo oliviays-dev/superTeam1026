@@ -115,7 +115,7 @@ integration("TeammateRepository PostgreSQL semantics", () => {
     }
   });
 
-  it("pins instance template scope and keeps queue order deterministic", async () => {
+  it("reuses a personal template across projects and keeps queue order deterministic", async () => {
     const context = await setup();
     try {
       const template = await context.repository.createTemplate({
@@ -152,22 +152,45 @@ integration("TeammateRepository PostgreSQL semantics", () => {
         },
         name: "Queue operator",
       });
-      await expect(
-        context.repository.createTeammate({
-          teammate: {
-            ...teammateInput,
-            projectId: context.otherProjectId,
-            templateId: template.id,
-          },
-          workspaceId: context.otherProjectId,
-          actorPrincipalId: context.ownerId,
-          agent: {
-            id: context.agentId,
-            principalId: context.aiPrincipalId,
-          },
-          name: "Cross project",
-        }),
-      ).rejects.toThrow("does not match instance scope");
+      const otherAgentId = randomUUID();
+      const otherAiPrincipalId = `principal-other-ai-${context.suffix}`;
+      await context.database.query(
+        `INSERT INTO principals (
+           id, kind, display_name, status, status_authority, source,
+           version, created_at, updated_at
+         ) VALUES (
+           $1, 'ai', 'Other AI teammate', 'active', 'system', 'agent',
+           1, NOW(), NOW()
+         )`,
+        [otherAiPrincipalId],
+      );
+      await context.database.query(
+        `INSERT INTO agents (
+           id, name, description, runtime_kind, status, source, owner_id,
+           principal_id, version, created_at, updated_at
+         ) VALUES (
+           $1, 'Other execution agent', '', 'fake', 'active', 'personal', $2,
+           $3, 1, NOW(), NOW()
+         )`,
+        [otherAgentId, context.ownerId, otherAiPrincipalId],
+      );
+      const otherProjectTeammate = await context.repository.createTeammate({
+        teammate: {
+          ...teammateInput,
+          projectId: context.otherProjectId,
+          agentId: otherAgentId,
+          templateId: template.id,
+        },
+        workspaceId: context.otherProjectId,
+        actorPrincipalId: context.ownerId,
+        agent: {
+          id: otherAgentId,
+          principalId: otherAiPrincipalId,
+        },
+        name: "Cross project",
+      });
+      expect(otherProjectTeammate.projectId).toBe(context.otherProjectId);
+      expect(otherProjectTeammate.templateId).toBe(template.id);
 
       const plan = await context.repository.createWorkPlan({
         teammate,
