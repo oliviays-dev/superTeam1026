@@ -13,4 +13,14 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    host: "127.0.0.1",
+    port: Number(process.env.WEB_PORT ?? 4311),
+    proxy: {
+      "/api": {
+        target: `http://127.0.0.1:${process.env.API_PORT ?? 4310}`,
+        changeOrigin: false,
+      },
+    },
+  },
 });

@@ -1,0 +1,40 @@
+name: Web Fast
+
+on:
+  push:
+    branches: ["feat/**", "feature/**", "fix/**"]
+    paths:
+      - "apps/web/**"
+      - "packages/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/web-fast.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: web-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Web checks and production build
+        run: |
+          pnpm build:packages
+          pnpm --filter @pluginmax/web typecheck
+          pnpm --filter @pluginmax/web build
