@@ -175,80 +175,105 @@ function ProjectCreateForm({
   }
 
   return (
-    <form
-      className="inline-create-card"
-      onSubmit={(event) => {
-        event.preventDefault();
-        if (name.trim() !== "") mutation.mutate();
-      }}
-    >
-      <div className="inline-create-head">
-        <strong>新建项目</strong>
-        <button
-          className="pm-icon-btn"
-          type="button"
-          title="关闭"
-          onClick={() => setOpen(false)}
-        >
-          <X size={14} />
-        </button>
-      </div>
-      <input
-        autoFocus
-        placeholder="项目名称"
-        value={name}
-        onChange={(event) => setName(event.target.value)}
-      />
-      <textarea
-        rows={2}
-        placeholder="项目说明"
-        value={description}
-        onChange={(event) => setDescription(event.target.value)}
-      />
-      <label className="template-create-select">
-        <span>项目模板（可选）</span>
-        <select
-          value={templateId}
-          onChange={(event) => {
-            setTemplateId(event.target.value);
-            materializationKey.current = undefined;
-          }}
-          disabled={templatesQuery.isLoading}
-        >
-          <option value="">不使用模板</option>
-          {templatesQuery.data?.map((template) => (
-            <option key={template.id} value={template.id}>
-              {template.name} · {template.roles.length} 个角色
-            </option>
-          ))}
-        </select>
-        {templatesQuery.isError && (
-          <small>项目模板加载失败，可先创建空项目后重试。</small>
-        )}
-        {templatesQuery.data?.length === 0 && (
-          <small>当前还没有可用项目模板。</small>
-        )}
-      </label>
-      {mutation.error !== null && (
-        <div className="pm-error">
-          {mutation.error instanceof Error
-            ? mutation.error.message
-            : "创建项目失败"}
-        </div>
-      )}
-      <button
-        className="pm-btn primary"
-        type="submit"
-        disabled={mutation.isPending || name.trim() === ""}
+    <div className="pm-modal-layer" role="presentation">
+      <form
+        aria-labelledby="project-create-title"
+        aria-modal="true"
+        className="pm-modal project-create-modal"
+        role="dialog"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (name.trim() !== "") mutation.mutate();
+        }}
       >
-        {mutation.isPending ? (
-          <LoaderCircle className="spin" size={14} />
-        ) : (
-          <Plus size={14} />
+        <div className="pm-modal-head">
+          <div>
+            <h2 id="project-create-title">新建项目</h2>
+            <p>创建项目后，可以继续添加任务、成员和项目记忆。</p>
+          </div>
+          <button
+            className="pm-icon-btn"
+            type="button"
+            title="关闭"
+            onClick={() => setOpen(false)}
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div className="pm-form-grid">
+          <label className="pm-field pm-field-wide">
+            <span>项目名称</span>
+            <input
+              autoFocus
+              placeholder="项目名称"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+          <label className="pm-field pm-field-wide">
+            <span>项目说明</span>
+            <textarea
+              rows={3}
+              placeholder="项目说明"
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+            />
+          </label>
+          <label className="pm-field pm-field-wide template-create-select">
+            <span>项目模板（可选）</span>
+            <select
+              value={templateId}
+              onChange={(event) => {
+                setTemplateId(event.target.value);
+                materializationKey.current = undefined;
+              }}
+              disabled={templatesQuery.isLoading}
+            >
+              <option value="">不使用模板</option>
+              {templatesQuery.data?.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name} · {template.roles.length} 个角色
+                </option>
+              ))}
+            </select>
+            {templatesQuery.isError && (
+              <small>项目模板加载失败，可先创建空项目后重试。</small>
+            )}
+            {templatesQuery.data?.length === 0 && (
+              <small>当前还没有可用项目模板。</small>
+            )}
+          </label>
+        </div>
+        {mutation.error !== null && (
+          <div className="pm-error">
+            {mutation.error instanceof Error
+              ? mutation.error.message
+              : "创建项目失败"}
+          </div>
         )}
-        创建项目
-      </button>
-    </form>
+        <div className="pm-modal-actions">
+          <button
+            className="pm-btn secondary"
+            type="button"
+            onClick={() => setOpen(false)}
+          >
+            取消
+          </button>
+          <button
+            className="pm-btn primary"
+            type="submit"
+            disabled={mutation.isPending || name.trim() === ""}
+          >
+            {mutation.isPending ? (
+              <LoaderCircle className="spin" size={14} />
+            ) : (
+              <Plus size={14} />
+            )}
+            创建项目
+          </button>
+        </div>
+      </form>
+    </div>
   );
 }
 
