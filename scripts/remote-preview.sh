@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API_PORT="${API_PORT:-4310}"
 WEB_PORT="${WEB_PORT:-4311}"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-superteam-preview}"
 API_PID=""
 WORKER_PID=""
+
+export COMPOSE_PROJECT_NAME
 
 if [ -x "$HOME/.local/node-v24.9.0/bin/node" ]; then
   export PATH="$HOME/.local/node-v24.9.0/bin:$PATH"
